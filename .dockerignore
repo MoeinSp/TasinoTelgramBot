@@ -1,0 +1,20 @@
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+.git
+.gitignore
+.env
+.env.prod
+*.log
+*.sqlite3
+staticfiles/
+media/
+docker/ssl/
+.idea
+.vscode
+# تست‌ها نمیرن تو image
+*/tests.py
+*/test_*.py

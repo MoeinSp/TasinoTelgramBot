@@ -1,0 +1,84 @@
+services:
+
+  # ─── PostgreSQL ─────────────────────────────────────────────────────────────
+  # shared_buffers و work_mem خیلی کم تنظیم شده برای VPS یک گیگ
+  db:
+    image: postgres:15-alpine
+    container_name: tasino_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: tasino_db
+      POSTGRES_USER: tasino
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    command: >
+      postgres
+        -c shared_buffers=32MB
+        -c effective_cache_size=128MB
+        -c work_mem=2MB
+        -c maintenance_work_mem=16MB
+        -c max_connections=15
+        -c checkpoint_completion_target=0.9
+        -c wal_buffers=4MB
+        -c synchronous_commit=off
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    deploy:
+      resources:
+        limits:
+          memory: 80m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tasino -d tasino_db"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ─── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: tasino_redis
+    restart: unless-stopped
+    command: >
+      redis-server
+        --maxmemory 30mb
+        --maxmemory-policy allkeys-lru
+        --save ""
+        --loglevel warning
+        --hz 5
+    volumes:
+      - redis_data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 40m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ─── Bot ────────────────────────────────────────────────────────────────────
+  bot:
+    build: .
+    container_name: tasino_bot
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: .env.prod
+    deploy:
+      resources:
+        limits:
+          memory: 220m
+        reservations:
+          memory: 80m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+volumes:
+  postgres_data:
+  redis_data:
