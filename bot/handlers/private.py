@@ -16,15 +16,15 @@ def _welcome_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             Btn(text="📚 راهنمای کامل",   callback_data="p:0"),
-            Btn(text="🎮 بازی‌ها",         callback_data="p:4"),
+            Btn(text="🎮 بازی‌ها",         callback_data="p:cat_game"),
         ],
         [
-            Btn(text="🔐 قفل و مدیریت",   callback_data="p:1"),
-            Btn(text="💰 سیستم مالی",      callback_data="p:8"),
+            Btn(text="🔐 قفل و مدیریت",   callback_data="p:cat_manage"),
+            Btn(text="💰 سیستم مالی",      callback_data="p:cat_finance"),
         ],
         [
             Btn(text="⚙️ تنظیمات گروه",   callback_data="p:7"),
-            Btn(text="👮 مدیریت اعضا",     callback_data="p:2"),
+            Btn(text="👮 مدیریت اعضا",     callback_data="p:cat_manage"),
         ],
         [
             Btn(text="💬 پشتیبانی",        url="https://t.me/Spayers"),

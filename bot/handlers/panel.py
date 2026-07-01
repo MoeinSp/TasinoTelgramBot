@@ -136,6 +136,7 @@ async def _execute(action: str, chat_id: int, user_id: int, bot: Bot) -> str:
         db_get_learned_responses, db_get_word_filters,
         db_get_top_users, db_get_member,
         db_enable_group_off, db_disable_group_off,
+        db_get_alias,
     )
 
     # ── قفل‌ها ──
@@ -239,10 +240,9 @@ async def _execute(action: str, chat_id: int, user_id: int, bot: Bot) -> str:
         return "⚠️ اطلاعاتی یافت نشد."
 
     # ── تاس ──
-    if action == "dice":
-        from bot.dice_game import handle_dice
-        return None  # handle_dice نیاز به message object داره — راهنما بده
-    # پیام راهنما به جای اجرا
+    if action == "dice_hint":
+        return "🎲 برای پرتاب تاس بنویس:  تاس"
+
     if action == "dice":
         return "🎲 برای پرتاب تاس بنویس:  تاس"
 
@@ -354,7 +354,95 @@ async def _execute(action: str, chat_id: int, user_id: int, bot: Bot) -> str:
         theme = await db_get_group_theme(chat_id)
         return f"🎨 تم تاس فعلی: {theme}"
 
-    if action == "install":
-        return "👑 برای ثبت مالکیت بنویس:  نصب"
+    if action == "owner_info":
+        owner_id = cache.OWNER_CACHE.get(chat_id)
+        if not owner_id:
+            return "👑 مالکی برای این گروه ثبت نشده."
+        return (
+            f"👑 مالک فعلی گروه:\n"
+            f"<a href='tg://user?id={owner_id}'>{owner_id}</a>\n\n"
+            f"برای انتقال مالکیت، روی پیام کاربر مورد نظر ریپلای کن و بنویس:\n"
+            f"انتقال مالکیت"
+        )
+
+    # ── خوشامدگویی ──
+    if action == "welcome_status":
+        from bot import cache as _c
+        enabled = chat_id not in _c.WELCOME_DISABLED
+        s = _c.WELCOME_SETTINGS.get(chat_id, {})
+        from bot.constants import DEFAULT_WELCOME_TEXT as _dwt
+        text = s.get("text") or (_dwt + " (پیش‌فرض)")
+        has_gif = bool(s.get("gif_file_id"))
+        return (
+            f"🎉 وضعیت خوشامدگویی:\n\n"
+            f"  وضعیت: {'✅ روشن' if enabled else '❌ خاموش'}\n"
+            f"  متن: {text[:60]}{'...' if len(text) > 60 else ''}\n"
+            f"  گیف: {'✅ تنظیم شده' if has_gif else '❌ ندارد'}"
+        )
+
+    if action == "welcome_on":
+        from bot import cache as _c
+        from bot.helpers import db_set_welcome as _sw
+        _c.WELCOME_DISABLED.discard(chat_id)
+        await _sw(chat_id, enabled=True)
+        return "✅ خوشامدگویی روشن شد.\n\nبرای تنظیم متن: متن خوشامد [پیام]\nبرای گیف: گیف خوشامد (ریپلای روی گیف)"
+
+    if action == "welcome_off":
+        from bot import cache as _c
+        from bot.helpers import db_set_welcome as _sw
+        _c.WELCOME_DISABLED.add(chat_id)
+        await _sw(chat_id, enabled=False)
+        return "❌ خوشامدگویی خاموش شد."
+
+    if action == "welcome_gif_del":
+        from bot import cache as _c
+        from bot.helpers import db_set_welcome as _sw
+        _c.WELCOME_SETTINGS.setdefault(chat_id, {})["gif_file_id"] = ""
+        await _sw(chat_id, gif_file_id="")
+        return "✅ گیف خوشامد حذف شد."
+
+    # ── آنتی فلود ──
+    if action == "flood_status":
+        from bot import cache as _c
+        enabled = chat_id in _c.ANTI_FLOOD_ENABLED
+        cfg = _c.ANTI_FLOOD_SETTINGS.get(chat_id, {"limit": 5, "window": 10})
+        return (
+            f"🚫 وضعیت آنتی فلود:\n\n"
+            f"  وضعیت: {'✅ روشن' if enabled else '❌ خاموش'}\n"
+            f"  حد: {cfg['limit']} پیام در {cfg['window']} ثانیه\n"
+            f"  مجازات: سکوت ۵ دقیقه‌ای"
+        )
+
+    if action == "flood_on":
+        from bot import cache as _c
+        from bot.helpers import db_set_anti_flood as _sf
+        _c.ANTI_FLOOD_ENABLED.add(chat_id)
+        await _sf(chat_id, enabled=True)
+        cfg = _c.ANTI_FLOOD_SETTINGS.get(chat_id, {"limit": 5, "window": 10})
+        return f"✅ آنتی فلود روشن شد.\n\nحد: {cfg['limit']} پیام در {cfg['window']} ثانیه"
+
+    if action == "flood_off":
+        from bot import cache as _c
+        from bot.helpers import db_set_anti_flood as _sf
+        _c.ANTI_FLOOD_ENABLED.discard(chat_id)
+        await _sf(chat_id, enabled=False)
+        return "❌ آنتی فلود خاموش شد."
+
+    # ── فیلتر کلمه ──
+    if action == "filter_list":
+        filters = cache.WORD_FILTERS.get(chat_id, [])
+        if not filters:
+            filters = await db_get_word_filters(chat_id)
+        if not filters:
+            return "🔤 هیچ کلمه فیلتری ثبت نشده.\n\nبرای اضافه کردن بنویس:  کلمه فیلتر [کلمه]"
+        words = [f"  • {w}" for w in list(filters)[:20]]
+        return "🔤 کلمات فیلتر شده:\n\n" + "\n".join(words)
+
+    # ── لقب/مشخصات ──
+    if action == "my_alias":
+        alias = await db_get_alias(chat_id, user_id)
+        if alias:
+            return f"🏷 لقب شما در این گروه: <b>{alias}</b>"
+        return "🏷 شما هنوز لقبی ندارید.\n\nبرای ثبت لقب بنویس:  لقب [نام دلخواه]"
 
     return f"⚙️ دستور «{action}» اجرا شد."

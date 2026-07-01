@@ -520,6 +520,68 @@ def db_get_alias(chat_id: int, user_id: int) -> Optional[str]:
     return m.alias if m else None
 
 
+# ─── خوشامدگویی ───────────────────────────────────────────────────────────────
+
+@sync_to_async
+def db_get_welcome(chat_id: int) -> dict:
+    from account.models import TelegramGroup
+    grp, _ = TelegramGroup.objects.get_or_create(telegram_chat_id=chat_id, defaults={"name": ""})
+    return {
+        "enabled": grp.welcome_enabled,
+        "text": grp.welcome_text or "",
+        "gif_file_id": grp.welcome_gif_file_id or "",
+    }
+
+
+@sync_to_async
+def db_set_welcome(chat_id: int, enabled=None, text=None, gif_file_id=None):
+    from account.models import TelegramGroup
+    grp, _ = TelegramGroup.objects.get_or_create(telegram_chat_id=chat_id, defaults={"name": ""})
+    fields = []
+    if enabled is not None:
+        grp.welcome_enabled = enabled
+        fields.append("welcome_enabled")
+    if text is not None:
+        grp.welcome_text = text
+        fields.append("welcome_text")
+    if gif_file_id is not None:
+        grp.welcome_gif_file_id = gif_file_id
+        fields.append("welcome_gif_file_id")
+    if fields:
+        grp.save(update_fields=fields)
+
+
+# ─── آنتی فلود ────────────────────────────────────────────────────────────────
+
+@sync_to_async
+def db_get_anti_flood(chat_id: int) -> dict:
+    from account.models import TelegramGroup
+    grp, _ = TelegramGroup.objects.get_or_create(telegram_chat_id=chat_id, defaults={"name": ""})
+    return {
+        "enabled": grp.anti_flood_enabled,
+        "limit": grp.anti_flood_limit,
+        "window": grp.anti_flood_window,
+    }
+
+
+@sync_to_async
+def db_set_anti_flood(chat_id: int, enabled=None, limit=None, window=None):
+    from account.models import TelegramGroup
+    grp, _ = TelegramGroup.objects.get_or_create(telegram_chat_id=chat_id, defaults={"name": ""})
+    fields = []
+    if enabled is not None:
+        grp.anti_flood_enabled = enabled
+        fields.append("anti_flood_enabled")
+    if limit is not None:
+        grp.anti_flood_limit = limit
+        fields.append("anti_flood_limit")
+    if window is not None:
+        grp.anti_flood_window = window
+        fields.append("anti_flood_window")
+    if fields:
+        grp.save(update_fields=fields)
+
+
 # ─── calc ────────────────────────────────────────────────────────────────────
 
 _ALLOWED_OPS = {

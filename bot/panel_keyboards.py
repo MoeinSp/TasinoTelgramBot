@@ -99,6 +99,10 @@ def panel_cat_settings() -> InlineKeyboardMarkup:
             B(text="🏷 لقب/مشخصات",    callback_data="p:2.7"),
             B(text="🔍 وضعیت گروه",    callback_data="p:6.3"),
         ],
+        [
+            B(text="🎉 خوشامدگویی",    callback_data="p:welcome"),
+            B(text="🚫 آنتی فلود",     callback_data="p:antispam"),
+        ],
         [_back(label="🔙 منوی اصلی")],
     )
 
@@ -131,7 +135,7 @@ def panel_1_2() -> InlineKeyboardMarkup:
 
 def panel_2_1() -> InlineKeyboardMarkup:
     return _sub("cat_manage",
-        [_act("👑 ثبت مالکیت (نصب)", "install")],
+        [_act("👑 مالک فعلی", "owner_info")],
     )
 
 def panel_2_2() -> InlineKeyboardMarkup:
@@ -164,7 +168,9 @@ def panel_2_6() -> InlineKeyboardMarkup:
     )
 
 def panel_2_7() -> InlineKeyboardMarkup:
-    return _sub("cat_settings")
+    return _sub("cat_settings",
+        [_act("🏷 لقب من در گروه", "my_alias")],
+    )
 
 def panel_3() -> InlineKeyboardMarkup:
     return _sub("cat_manage",
@@ -181,7 +187,7 @@ def panel_4_2() -> InlineKeyboardMarkup:
     return _sub("cat_game",
         [_act("🏀 بسکتبال", "basketball"), _act("⚽ پنالتی",  "penalty"),  _act("🎳 بولینگ", "bowling")],
         [_act("🎯 دارت",    "dart"),        _act("🎰 اسلات",   "slots"),    _act("🪙 سکه",    "coin")],
-        [_act("🍀 شانس",    "luck"),        _act("✂️ سنگ/کاغذ/قیچی", "rps")],
+        [_act("🍀 شانس",    "luck"),        _act("✂️ سنگ‌کاغذ‌قیچی", "rps")],
     )
 
 def panel_4_3() -> InlineKeyboardMarkup:
@@ -197,7 +203,9 @@ def panel_4_4() -> InlineKeyboardMarkup:
     )
 
 def panel_5() -> InlineKeyboardMarkup:
-    return _sub("cat_manage")
+    return _sub("cat_manage",
+        [_act("📋 لیست کلمات فیلتر", "filter_list")],
+    )
 
 def panel_6_1() -> InlineKeyboardMarkup:
     return _sub("cat_game",
@@ -245,6 +253,23 @@ def panel_8_4() -> InlineKeyboardMarkup:
     )
 
 
+def panel_welcome() -> InlineKeyboardMarkup:
+    return _sub("cat_settings",
+        [_act("📋 وضعیت خوشامد",     "welcome_status")],
+        [_act("✅ روشن کردن",         "welcome_on"),
+         _act("❌ خاموش کردن",        "welcome_off")],
+        [_act("🗑 حذف گیف",           "welcome_gif_del")],
+    )
+
+
+def panel_antispam() -> InlineKeyboardMarkup:
+    return _sub("cat_settings",
+        [_act("📋 وضعیت فلود",        "flood_status")],
+        [_act("✅ روشن کردن",         "flood_on"),
+         _act("❌ خاموش کردن",        "flood_off")],
+    )
+
+
 # ─── صفحات دسته‌بندی‌ها ──────────────────────────────────────────────────────
 
 _KB_MAP = {
@@ -263,6 +288,8 @@ _KB_MAP = {
     "6.1":  panel_6_1, "6.2": panel_6_2, "6.3": panel_6_3,
     "7":    panel_7,
     "8.1":  panel_8_1, "8.2": panel_8_2, "8.3": panel_8_3, "8.4": panel_8_4,
+    "welcome":  panel_welcome,
+    "antispam": panel_antispam,
 }
 
 
@@ -285,4 +312,22 @@ _CAT_TEXTS = {
     "cat_game":     "🎲 <b>بازی و سرگرمی</b>\n\nبخش مورد نظر رو انتخاب کن:",
     "cat_finance":  "💰 <b>مالی و تراکنش</b>\n\nبخش مورد نظر رو انتخاب کن:",
     "cat_settings": "⚙️ <b>تنظیمات</b>\n\nبخش مورد نظر رو انتخاب کن:",
+    "welcome":  (
+        "🎉 <b>خوشامدگویی</b>\n\n"
+        "وقتی عضو جدیدی وارد گروه می‌شه، ربات پیام خوشامد می‌فرسته.\n\n"
+        "دستورات متنی:\n"
+        "  <code>خوشامد روشن / خاموش</code>\n"
+        "  <code>متن خوشامد [پیام]</code>\n"
+        "  <code>گیف خوشامد</code> — ریپلای روی گیف\n"
+        "  <code>حذف گیف خوشامد</code>\n\n"
+        "متغیر: <code>{name}</code> = نام عضو جدید"
+    ),
+    "antispam": (
+        "🚫 <b>آنتی فلود</b>\n\n"
+        "اگه کاربری بیش از حد مجاز پیام بفرسته، ۵ دقیقه سکوت می‌شه.\n\n"
+        "دستورات متنی:\n"
+        "  <code>فلود روشن / خاموش</code>\n"
+        "  <code>حد فلود [تعداد] [ثانیه]</code>\n"
+        "  مثال: <code>حد فلود 5 10</code>"
+    ),
 }

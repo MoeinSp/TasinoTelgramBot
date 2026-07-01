@@ -29,6 +29,20 @@ def _load_from_db():
         cache.ADMINS_CACHE.setdefault(cid, set())
         cache.VIP_USERS_CACHE.setdefault(cid, set())
 
+        if not group.welcome_enabled:
+            cache.WELCOME_DISABLED.add(cid)
+        cache.WELCOME_SETTINGS[cid] = {
+            "text": group.welcome_text or "",
+            "gif_file_id": group.welcome_gif_file_id or "",
+        }
+
+        if group.anti_flood_enabled:
+            cache.ANTI_FLOOD_ENABLED.add(cid)
+        cache.ANTI_FLOOD_SETTINGS[cid] = {
+            "limit": group.anti_flood_limit,
+            "window": group.anti_flood_window,
+        }
+
     for member in TelegramGroupMember.objects.filter(
         is_owner=True
     ).select_related("group"):

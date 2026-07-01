@@ -131,6 +131,39 @@ class TelegramGroup(models.Model):
         verbose_name="درصد کارمزد"
     )
 
+    welcome_enabled = models.BooleanField(
+        default=True,
+        verbose_name="خوشامدگویی فعال"
+    )
+
+    welcome_text = models.TextField(
+        blank=True,
+        null=True,
+        verbose_name="متن خوشامدگویی"
+    )
+
+    welcome_gif_file_id = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        verbose_name="گیف خوشامدگویی"
+    )
+
+    anti_flood_enabled = models.BooleanField(
+        default=False,
+        verbose_name="آنتی فلود فعال"
+    )
+
+    anti_flood_limit = models.IntegerField(
+        default=5,
+        verbose_name="حد فلود (تعداد پیام)"
+    )
+
+    anti_flood_window = models.IntegerField(
+        default=10,
+        verbose_name="بازه فلود (ثانیه)"
+    )
+
     def check_subscription(self):
         if (
             self.subscription_until and

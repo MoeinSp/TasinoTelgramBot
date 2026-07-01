@@ -1,8 +1,11 @@
 """
 فیلتر پیام‌های گروه: قفل‌ها، فیلتر کلمات، ردیابی XP، پاسخ‌های یادگرفته‌شده
 """
+import time
+from datetime import datetime, timezone, timedelta
+
 from aiogram import Router, F, Bot
-from aiogram.types import Message
+from aiogram.types import Message, ChatPermissions
 from asgiref.sync import sync_to_async
 
 from bot import cache
@@ -11,6 +14,20 @@ from bot.helpers import safe_send, contains_link, contains_username
 
 router = Router()
 router.message.filter(F.chat.type.in_({"group", "supergroup"}))
+
+
+def _is_flooding(chat_id: int, user_id: int) -> bool:
+    if chat_id not in cache.ANTI_FLOOD_ENABLED:
+        return False
+    cfg = cache.ANTI_FLOOD_SETTINGS.get(chat_id, {"limit": 5, "window": 10})
+    limit = cfg.get("limit", 5)
+    window = cfg.get("window", 10)
+    key = (chat_id, user_id)
+    now = time.time()
+    ts = [t for t in cache.FLOOD_TRACKER.get(key, []) if now - t < window]
+    ts.append(now)
+    cache.FLOOD_TRACKER[key] = ts
+    return len(ts) > limit
 
 
 @sync_to_async
@@ -36,6 +53,24 @@ async def handle_text_filter(message: Message, bot: Bot):
     text = message.text or ""
 
     if chat_id in cache.OFF_GROUP:
+        return
+
+    if not has_privilege(chat_id, user_id) and _is_flooding(chat_id, user_id):
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        until = datetime.now(tz=timezone.utc) + timedelta(minutes=5)
+        try:
+            await bot.restrict_chat_member(
+                chat_id, user_id,
+                permissions=ChatPermissions(can_send_messages=False),
+                until_date=until,
+            )
+        except Exception:
+            pass
+        await safe_send(bot, chat_id,
+                        f"⚠️ کاربر به دلیل ارسال سریع پیام ۵ دقیقه سکوت شد.")
         return
 
     if has_privilege(chat_id, user_id):

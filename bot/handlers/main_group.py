@@ -21,7 +21,7 @@ from bot.helpers import (
     db_enable_dice_option, db_disable_dice_option,
     db_enable_speaker, db_disable_speaker,
     db_update_lock, db_get_locks,
-    db_set_owner, db_has_owner,
+    db_set_owner,
     db_add_admin, db_del_admin,
     db_add_vip, db_del_vip,
     db_get_admins, db_get_vips, db_clear_vips,
@@ -36,9 +36,11 @@ from bot.helpers import (
     db_get_dice_stats, db_record_dice_roll,
     db_update_card, db_get_card, db_delete_card,
     safe_calc, LOCK_MAP, LOCK_NAMES,
+    db_set_welcome, db_set_anti_flood,
 )
 from bot.group_help import get_page, PAGE_MAIN
 from bot.panel_keyboards import get_panel, panel_main
+from bot.constants import DEFAULT_WELCOME_TEXT, DEFAULT_WELCOME_GIF_FILE_ID
 from bot.dice_game import (
     THEMES, has_active_game, get_game, create_game, delete_game, finish_game_cleanup,
     handle_dice, handle_round_selection, WAITING_ROUNDS, ACTIVE_GAMES as DICE_ACTIVE_GAMES,
@@ -1776,36 +1778,9 @@ async def cb_dice_stats(call: CallbackQuery, bot: Bot):
     await call.answer()
 
 
-# ─── نصب دستورات اصلی با فرمت کامل (دوباره با متن دقیق روبیکا) ───────────────
-
-@router.message(F.text.in_(["نصب", "مالک", "فعال"]))
-async def cmd_install_full(message: Message, bot: Bot):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    has_owner = await db_has_owner(chat_id)
-    if message.text in ["نصب", "مالک"]:
-        if has_owner:
-            owner_id = cache.OWNER_CACHE.get(chat_id)
-            if owner_id:
-                owner_mention = await _mention(owner_id, bot, chat_id)
-                return await _reply(message, f"🤖 ربات در این گروه فعال و نصب می‌باشد.\n────────────\n👑 مالک گروه: {owner_mention}")
-            return await _reply(message, "❌ این گروه قبلاً نصب شده و مالک دارد.")
-        await db_set_owner(chat_id, user_id)
-        owner_mention = await _mention(user_id, bot, chat_id)
-        msg = (
-            f"🔰 ربات با موفقیت در گروه نصب شد\n\n\n\n"
-            f"✚ مالک گروه:\n▸  {owner_mention}\n\n\n"
-            f"⚠️ ادمینی در گروه یافت نشد!\n\n\n"
-            f"🛠 بطور پیشفرض قفل های زیر در گروه شما فعال شد :\n\n"
-            f"✅ قفل لینک فعال\n✅ قفل ایدی فعال\n✅ قفل فورارد فعال\n\n"
-            f"📚 برای مشاهده راهنما از دستور  راهنما استفاده نمایید\n\n\n"
-            f"⛑ درصورت وجود هرگونه مشکل به پیوی ادمین مراجعه کنید :\n\n@Spayers"
-        )
-        return await _reply(message, msg)
-    if message.text == "فعال":
-        if not has_owner:
-            return await _reply(message, "❌ ابتدا دستور «نصب» را ارسال کنید.")
-        return await _reply(message, "✅ ربات در این گروه فعال است.")
+# ─── نصب و ثبت مالکیت ───────────────────────────────────────────────────────
+# نصب دیگر با دستور متنی نیست — به‌محض گرفتن دسترسی ادمین کامل توسط ربات،
+# نصب و ثبت مالکیت به‌صورت خودکار انجام می‌شود (bot/handlers/group_lifecycle.py)
 
 
 # ─── هندلر تاس (سیستم کامل) ─────────────────────────────────────────────────
@@ -1964,6 +1939,189 @@ async def cmd_real_owner(message: Message, bot: Bot):
     cache.OWNER_CACHE[chat_id] = owner_id
     mention = await _mention(owner_id, bot, chat_id)
     return await _reply(message, f"👑 مالک واقعی گروه:\n{mention}\n\nبه عنوان مالک در ربات ثبت شد.")
+
+
+# ─── خوشامدگویی ──────────────────────────────────────────────────────────────
+
+@router.message(F.new_chat_members)
+async def handle_new_member(message: Message, bot: Bot):
+    chat_id = message.chat.id
+    if chat_id in cache.OFF_GROUP:
+        return
+    if chat_id in cache.WELCOME_DISABLED:
+        return
+    settings = cache.WELCOME_SETTINGS.get(chat_id, {})
+    welcome_text = settings.get("text") or DEFAULT_WELCOME_TEXT
+    gif_file_id = settings.get("gif_file_id") or DEFAULT_WELCOME_GIF_FILE_ID
+    for new_member in message.new_chat_members:
+        if new_member.is_bot:
+            continue
+        name = new_member.first_name or new_member.username or str(new_member.id)
+        text = welcome_text.replace("{name}", name).replace("{id}", str(new_member.id))
+        if gif_file_id:
+            try:
+                await bot.send_animation(chat_id, animation=gif_file_id, caption=text, parse_mode="HTML")
+                continue
+            except Exception:
+                pass
+        await safe_send(bot, chat_id, text)
+
+
+@router.message(F.text.in_(["خوشامد روشن", "خوشامدگویی روشن"]))
+async def cmd_welcome_on(message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return
+    cache.WELCOME_DISABLED.discard(chat_id)
+    await db_set_welcome(chat_id, enabled=True)
+    return await _reply(message,
+        "✅ خوشامدگویی روشن شد.\n\n"
+        "تنظیمات:\n"
+        "  متن خوشامد [پیام] — تغییر متن\n"
+        "  گیف خوشامد — ریپلای روی گیف\n"
+        "  حذف گیف خوشامد\n\n"
+        "متغیر: {name} = نام عضو جدید"
+    )
+
+
+@router.message(F.text.in_(["خوشامد خاموش", "خوشامدگویی خاموش"]))
+async def cmd_welcome_off(message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return
+    cache.WELCOME_DISABLED.add(chat_id)
+    await db_set_welcome(chat_id, enabled=False)
+    return await _reply(message, "❌ خوشامدگویی خاموش شد.")
+
+
+@router.message(F.text.regexp(r"^متن خوشامد\s+.+$"))
+async def cmd_set_welcome_text(message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return
+    text = message.text[len("متن خوشامد"):].strip()
+    if len(text) > 500:
+        return await _reply(message, "❌ متن نمی‌تواند بیشتر از ۵۰۰ کاراکتر باشد.")
+    cache.WELCOME_SETTINGS.setdefault(chat_id, {})["text"] = text
+    await db_set_welcome(chat_id, text=text)
+    return await _reply(message,
+        f"✅ متن خوشامد تنظیم شد:\n\n{text}\n\n"
+        "💡 متغیر: {name} = نام عضو جدید"
+    )
+
+
+@router.message(F.text == "گیف خوشامد")
+async def cmd_set_welcome_gif(message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return
+    if not message.reply_to_message or not message.reply_to_message.animation:
+        return await _reply(message, "⚠️ لطفاً روی یک گیف (GIF) ریپلای کنید.")
+    gif_file_id = message.reply_to_message.animation.file_id
+    cache.WELCOME_SETTINGS.setdefault(chat_id, {})["gif_file_id"] = gif_file_id
+    await db_set_welcome(chat_id, gif_file_id=gif_file_id)
+    return await _reply(message, "✅ گیف خوشامد تنظیم شد.")
+
+
+@router.message(F.text == "حذف گیف خوشامد")
+async def cmd_del_welcome_gif(message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return
+    cache.WELCOME_SETTINGS.setdefault(chat_id, {})["gif_file_id"] = ""
+    await db_set_welcome(chat_id, gif_file_id="")
+    return await _reply(message, "✅ گیف خوشامد حذف شد.")
+
+
+@router.message(F.text.in_(["خوشامد", "وضعیت خوشامد", "تنظیمات خوشامد"]))
+async def cmd_welcome_status(message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return
+    enabled = chat_id not in cache.WELCOME_DISABLED
+    s = cache.WELCOME_SETTINGS.get(chat_id, {})
+    text = s.get("text") or DEFAULT_WELCOME_TEXT + " (پیش‌فرض)"
+    has_gif = bool(s.get("gif_file_id"))
+    preview = text[:60] + ("..." if len(text) > 60 else "")
+    return await _reply(message,
+        f"🎉 وضعیت خوشامدگویی\n\n"
+        f"  وضعیت: {'✅ روشن' if enabled else '❌ خاموش'}\n"
+        f"  متن: {preview}\n"
+        f"  گیف: {'✅ تنظیم شده' if has_gif else '❌ ندارد'}"
+    )
+
+
+# ─── آنتی فلود ────────────────────────────────────────────────────────────────
+
+@router.message(F.text.in_(["فلود روشن", "آنتی فلود روشن", "ضد فلود روشن"]))
+async def cmd_flood_on(message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return
+    cache.ANTI_FLOOD_ENABLED.add(chat_id)
+    await db_set_anti_flood(chat_id, enabled=True)
+    cfg = cache.ANTI_FLOOD_SETTINGS.get(chat_id, {"limit": 5, "window": 10})
+    return await _reply(message,
+        f"✅ آنتی فلود روشن شد.\n\n"
+        f"  حد: {cfg['limit']} پیام در {cfg['window']} ثانیه\n\n"
+        "برای تغییر حد: حد فلود [تعداد پیام] [ثانیه]\n"
+        "مثال: حد فلود 5 10"
+    )
+
+
+@router.message(F.text.in_(["فلود خاموش", "آنتی فلود خاموش", "ضد فلود خاموش"]))
+async def cmd_flood_off(message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return
+    cache.ANTI_FLOOD_ENABLED.discard(chat_id)
+    await db_set_anti_flood(chat_id, enabled=False)
+    return await _reply(message, "❌ آنتی فلود خاموش شد.")
+
+
+@router.message(F.text.regexp(r"^حد فلود\s+\d+\s+\d+$"))
+async def cmd_set_flood_limit(message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return
+    parts = message.text.split()
+    limit = int(parts[2])
+    window = int(parts[3])
+    if not 2 <= limit <= 30:
+        return await _reply(message, "❌ حد پیام باید بین ۲ تا ۳۰ باشد.")
+    if not 3 <= window <= 60:
+        return await _reply(message, "❌ بازه زمانی باید بین ۳ تا ۶۰ ثانیه باشد.")
+    cache.ANTI_FLOOD_SETTINGS[chat_id] = {"limit": limit, "window": window}
+    await db_set_anti_flood(chat_id, limit=limit, window=window)
+    return await _reply(message,
+        f"✅ حد فلود تنظیم شد:\n\n"
+        f"  بیشتر از {limit} پیام در {window} ثانیه = سکوت ۵ دقیقه‌ای"
+    )
+
+
+@router.message(F.text.in_(["فلود", "وضعیت فلود", "وضعیت آنتی فلود"]))
+async def cmd_flood_status(message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return
+    enabled = chat_id in cache.ANTI_FLOOD_ENABLED
+    cfg = cache.ANTI_FLOOD_SETTINGS.get(chat_id, {"limit": 5, "window": 10})
+    return await _reply(message,
+        f"🚫 وضعیت آنتی فلود\n\n"
+        f"  وضعیت: {'✅ روشن' if enabled else '❌ خاموش'}\n"
+        f"  حد: {cfg['limit']} پیام در {cfg['window']} ثانیه\n"
+        f"  مجازات: سکوت ۵ دقیقه‌ای"
+    )
 
 
 # ─── هندلر پیش‌فرض متن گروه ─────────────────────────────────────────────────

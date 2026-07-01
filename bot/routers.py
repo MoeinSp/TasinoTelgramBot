@@ -8,6 +8,7 @@ from bot.handlers.main_group import router as main_group_router
 from bot.handlers.admin import router as admin_router
 from bot.handlers.group import router as group_router
 from bot.handlers.message_filter import router as filter_router
+from bot.handlers.group_lifecycle import router as group_lifecycle_router
 from bot.middleware import MessageTrackingMiddleware
 
 
@@ -17,6 +18,7 @@ def setup_routers(dp: Dispatcher):
 
     dp.include_router(private_router)
     dp.include_router(panel_router)   # callback پنل — گروه و پیوی
+    dp.include_router(group_lifecycle_router)  # افزودن به گروه / ارتقا به ادمین
     dp.include_router(vip_router)
     dp.include_router(games_router)
     dp.include_router(main_group_router)
