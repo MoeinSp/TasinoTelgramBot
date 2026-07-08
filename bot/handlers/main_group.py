@@ -1792,7 +1792,7 @@ async def cmd_fee(message: Message, bot: Bot):
         text += (
             f"📊 نحوه محاسبه:\n"
             f"   • حالت عادی: هر بازیکن = شرط + {new_fee}% حق واسطه\n"
-            f"   • حالت فیکس: ورودی ثابت، بدون افزودن حق واسطه\n\n"
+            f"   • حالت فیکس: ورودی ثابت، حق واسطه از جایزه کسر می‌شود\n\n"
         )
     text += f"🔔 از این به بعد مسابقات تاس با حق واسطه {new_fee}% برگزار می‌شود."
     return await _reply(message, text)
@@ -1949,11 +1949,12 @@ async def cmd_start_game(message: Message, bot: Bot):
         has_bet=has_bet, fixed_entry=fixed_entry and has_bet,
     )
     if has_bet:
-        costs = calc_bet_costs(bet_amount, fee_percent, fixed_entry)
+        costs = calc_bet_costs(bet_amount, fee_percent, fixed_entry, total_players)
         _entry = costs["entry"]
         _fee_per = costs["fee_per"]
-        _prize = total_players * bet_amount
-        _total_fee = total_players * _fee_per
+        _gross = costs["gross_prize"]
+        _total_fee = costs["total_fee"]
+        _prize = costs["winner_total"]
         mode = "فیکس" if fixed_entry else "عادی"
         msg = (
             f"🎲 رقابت تاس شروع شد!\n"
@@ -1963,17 +1964,24 @@ async def cmd_start_game(message: Message, bot: Bot):
             f"💳 هزینه ورودی هر نفر: {_entry:,} واحد"
         )
         if fixed_entry:
-            msg += f"\n   └ ورودی ثابت — بدون افزودن حق واسطه"
+            if fee_percent > 0:
+                msg += (
+                    f"\n   ├ شرط: {bet_amount:,} واحد"
+                    f"\n   └ حق واسطه ({fee_percent}٪): {_fee_per:,} واحد (از جایزه)"
+                )
         elif fee_percent > 0:
             msg += (
                 f"\n   ├ شرط: {bet_amount:,} واحد"
                 f"\n   └ حق واسطه ({fee_percent}٪): {_fee_per:,} واحد"
             )
-        msg += (
-            f"\n\n🏆 مبلغ برد: {_prize:,} واحد"
-            f"  ({total_players} × {bet_amount:,})\n"
-        )
-        if not fixed_entry and fee_percent > 0:
+        if fixed_entry and fee_percent > 0:
+            msg += f"\n\n🏆 مبلغ برد: {_prize:,} واحد  ({_gross:,} − {_total_fee:,} حق واسطه)\n"
+        else:
+            msg += (
+                f"\n\n🏆 مبلغ برد: {_prize:,} واحد"
+                f"  ({total_players} × {bet_amount:,})\n"
+            )
+        if fee_percent > 0:
             msg += f"💸 جمع حق واسطه: {_total_fee:,} واحد\n"
         msg += (
             f"\n✅ برای شرکت «تاس» بفرست\n\n"

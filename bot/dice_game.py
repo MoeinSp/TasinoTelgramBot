@@ -166,20 +166,27 @@ def create_game(chat_id, total_players, bet_amount=0, fee_percent=0, has_bet=Fal
     return game
 
 
-def calc_bet_costs(bet_amount: int, fee_percent: int, fixed_entry: bool = False) -> dict:
+def calc_bet_costs(bet_amount: int, fee_percent: int, fixed_entry: bool = False,
+                   player_count: int = 0) -> dict:
     """محاسبه هزینه ورود، حق واسطه و جایزه."""
-    if fixed_entry:
-        return {
-            "entry": bet_amount,
-            "fee_per": 0,
-            "stake": bet_amount,
-        }
     fee_per = int(bet_amount * fee_percent / 100)
-    return {
-        "entry": bet_amount + fee_per,
+    stake = bet_amount
+    entry = bet_amount if fixed_entry else bet_amount + fee_per
+    result = {
+        "entry": entry,
         "fee_per": fee_per,
-        "stake": bet_amount,
+        "stake": stake,
     }
+    if player_count > 0:
+        gross_prize = stake * player_count
+        total_fee = fee_per * player_count
+        winner_total = gross_prize - total_fee if fixed_entry else gross_prize
+        result.update(
+            gross_prize=gross_prize,
+            total_fee=total_fee,
+            winner_total=winner_total,
+        )
+    return result
 
 
 def get_game(chat_id) -> Optional[dict]:
@@ -594,10 +601,10 @@ async def send_final_results(chat_id, bot, message_id):
         bet_amount = game_data["bet_amount"]
         fee_percent = game_data.get("fee_percent", 0)
         fixed_entry = game_data.get("fixed_entry", False)
-        costs = calc_bet_costs(bet_amount, fee_percent, fixed_entry)
+        costs = calc_bet_costs(bet_amount, fee_percent, fixed_entry, len(players_list))
         entry_amount = costs["entry"]
         fee_per_player = costs["fee_per"]
-        winner_amount = bet_amount * len(players_list)
+        winner_amount = costs["winner_total"]
 
         for player_id in players_list:
             await _decrease_wallet(chat_id, player_id, entry_amount)
@@ -634,22 +641,22 @@ async def send_final_results(chat_id, bot, message_id):
         bet_amount = game_data["bet_amount"]
         fee_percent = game_data.get("fee_percent", 0)
         fixed_entry = game_data.get("fixed_entry", False)
-        costs = calc_bet_costs(bet_amount, fee_percent, fixed_entry)
+        costs = calc_bet_costs(bet_amount, fee_percent, fixed_entry, len(players_list))
         entry_amount = costs["entry"]
-        fee_per_player = costs["fee_per"]
-        winner_amount = bet_amount * len(players_list)
-        fee_amount = fee_per_player * len(players_list)
+        winner_amount = costs["winner_total"]
+        fee_amount = costs["total_fee"]
+        gross_prize = costs["gross_prize"]
 
         lines.append("")
         lines.append("💰 جایزه نقدی")
         lines.append("────────────────────")
-        if fixed_entry:
-            lines.append(f"💳 هزینه ورودی هر نفر: {entry_amount:,} واحد (فیکس)")
+        lines.append(f"💳 هزینه ورودی هر نفر: {entry_amount:,} واحد" + (" (فیکس)" if fixed_entry else ""))
+        if fee_percent > 0:
+            lines.append(f"💸 حق واسطه ({fee_percent}%): {fee_amount:,} واحد")
+        if fixed_entry and fee_percent > 0:
+            lines.append(f"🏆 مبلغ برد: {winner_amount:,} واحد  ({gross_prize:,} − {fee_amount:,})")
         else:
-            lines.append(f"💳 هزینه ورودی هر نفر: {entry_amount:,} واحد")
-            if fee_percent > 0:
-                lines.append(f"💸 حق واسطه ({fee_percent}%): {fee_amount:,} واحد")
-        lines.append(f"🏆 مبلغ برد: {winner_amount:,} واحد")
+            lines.append(f"🏆 مبلغ برد: {winner_amount:,} واحد")
         lines.append("")
         lines.append("📊 تغییرات موجودی:")
         for uid in players_list:
@@ -737,8 +744,8 @@ async def handle_dice(text, chat_id, message_id, bot, user_id, dice_option_off, 
         fee_per = costs["fee_per"]
         balance = await _get_balance(chat_id, user_id)
         if balance < entry_cost:
-            if fixed_entry:
-                fee_line = ""
+            if fixed_entry and fee_per > 0:
+                fee_line = f"\n   └ حق واسطه ({fee_percent}٪): {fee_per:,} واحد (از جایزه)"
             elif fee_per > 0:
                 fee_line = f"\n   ├ شرط: {bet_amount:,} واحد\n   └ حق واسطه: {fee_per:,} واحد"
             else:
