@@ -907,6 +907,15 @@ LOCK_NAMES = {
     "game": "بازی",
 }
 
+# ترتیب اولویت نمایش و پنل (مهم‌ترین‌ها بالاتر)
+LOCK_ORDER = [
+    "link", "forward", "username",
+    "gif", "photo", "video", "sticker", "voice", "video_note",
+    "audio", "document", "media",
+    "contact", "location", "poll", "via_bot", "game",
+    "bad_words", "edit_message", "fun_text",
+]
+
 ALL_TOGGLEABLE = list(LOCK_MAP.keys())
 
 # ─── contains helpers ─────────────────────────────────────────────────────────

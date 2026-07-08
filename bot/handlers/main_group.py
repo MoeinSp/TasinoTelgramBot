@@ -39,7 +39,7 @@ from bot.helpers import (
     db_ban_user, db_unban_user, db_mute_user, db_unmute_user,
     db_get_dice_stats, db_record_dice_roll,
     db_update_card, db_get_card, db_delete_card,
-    safe_calc, LOCK_MAP, LOCK_NAMES,
+    safe_calc, LOCK_MAP, LOCK_NAMES, LOCK_ORDER,
     db_set_welcome, db_set_anti_flood,
     db_set_captcha, db_set_antiraid, db_set_log_channel, log_action,
     full_permissions, unrestrict_user,
@@ -191,6 +191,32 @@ async def cmd_list_disabled(message: Message):
 
 # ─── قفل‌ها ───────────────────────────────────────────────────────────────────
 
+_LOCK_ON_WORDS = {"روشن", "فعال", "فعالسازی", "فعال‌سازی", "enable", "on"}
+_LOCK_OFF_WORDS = {"خاموش", "غیرفعال", "غیر فعال", "غیرفعالسازی", "غیرفعال‌سازی", "disable", "off"}
+
+
+def _resolve_lock_name(raw: str) -> str | None:
+    name = (raw or "").strip()
+    for token in ("قفل",):
+        name = re.sub(rf"\b{token}\b", " ", name).strip()
+    # حذف کلمات وضعیت از انتها/ابتدا
+    for token in list(_LOCK_ON_WORDS | _LOCK_OFF_WORDS):
+        name = re.sub(rf"^\s*{re.escape(token)}\s+", "", name).strip()
+        name = re.sub(rf"\s+{re.escape(token)}\s*$", "", name).strip()
+    # یکسان‌سازی فاصله‌ها
+    name = re.sub(r"\s+", " ", name).strip()
+    return LOCK_MAP.get(name)
+
+
+def _extract_lock_state(text: str) -> bool | None:
+    t = (text or "").strip().lower()
+    if any(w in t for w in _LOCK_OFF_WORDS):
+        return False
+    if any(w in t for w in _LOCK_ON_WORDS):
+        return True
+    return None
+
+
 @router.message(F.text.regexp(r"^قفل\s+(.+)$"))
 async def cmd_lock(message: Message):
     chat_id = message.chat.id
@@ -231,6 +257,44 @@ async def cmd_unlock(message: Message):
         skip()
     await db_update_lock(chat_id, lock_key, False)
     return await _reply(message, f"🔓 قفل «{lock_name}» غیرفعال شد.")
+
+
+@router.message(F.text.regexp(r"^.+\s+(روشن|فعال|خاموش|غیرفعال)$"))
+async def cmd_lock_alias_state_end(message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return
+    text = (message.text or "").strip()
+    # نمونه‌ها: «لینک خاموش» / «قفل لینک غیرفعال»
+    state = _extract_lock_state(text)
+    lock_key = _resolve_lock_name(text)
+    if state is None or not lock_key:
+        skip()
+    await db_update_lock(chat_id, lock_key, state)
+    label = LOCK_NAMES.get(lock_key, lock_key)
+    icon = "🔒" if state else "🔓"
+    st = "فعال" if state else "غیرفعال"
+    return await _reply(message, f"{icon} قفل «{label}» {st} شد.")
+
+
+@router.message(F.text.regexp(r"^(روشن|فعال|خاموش|غیرفعال)\s+.+$"))
+async def cmd_lock_alias_state_start(message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return
+    text = (message.text or "").strip()
+    # نمونه‌ها: «خاموش لینک» / «فعال قفل لینک»
+    state = _extract_lock_state(text)
+    lock_key = _resolve_lock_name(text)
+    if state is None or not lock_key:
+        skip()
+    await db_update_lock(chat_id, lock_key, state)
+    label = LOCK_NAMES.get(lock_key, lock_key)
+    icon = "🔒" if state else "🔓"
+    st = "فعال" if state else "غیرفعال"
+    return await _reply(message, f"{icon} قفل «{label}» {st} شد.")
 
 
 @router.message(F.text.in_(["باز کردن گروه", "گروه باز", "بازکردن گروه", "بازکردن قفل گروه", "باز کردن قفل گروه"]))
@@ -1189,7 +1253,8 @@ async def cmd_lock_status_full(message: Message):
 
     response = ">🛠 وضعیت قفل‌های گروه\n\n"
     active, inactive = [], []
-    for key, name in LOCK_NAMES.items():
+    for key in LOCK_ORDER:
+        name = LOCK_NAMES.get(key, key)
         if locks.get(key, False):
             active.append(f"🔒 {name}  ‹اخطار: {max_w}›")
         else:

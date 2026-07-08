@@ -119,6 +119,24 @@ def _sub(parent: str, *action_rows) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _lock_toggle_rows():
+    """دکمه‌های toggle همه قفل‌ها به ترتیب اولویت (۲ تا در هر ردیف)."""
+    from bot.helpers import LOCK_NAMES, LOCK_ORDER
+    rows = []
+    row = []
+    for key in LOCK_ORDER:
+        label = LOCK_NAMES.get(key)
+        if not label:
+            continue
+        row.append(_act(f"↔️ {label}", f"lock_toggle_{key}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return rows
+
+
 def panel_1() -> InlineKeyboardMarkup:
     return _sub("cat_manage",
         [_act("📋 وضعیت قفل‌ها", "locks_status")],
@@ -128,7 +146,9 @@ def panel_1() -> InlineKeyboardMarkup:
 
 def panel_1_1() -> InlineKeyboardMarkup:
     return _sub("1",
-        [_act("📋 وضعیت قفل‌ها", "locks_status")],
+        [_act("✨ وضعیت زیبا", "locks_status_pretty")],
+        [_act("📋 وضعیت لیستی", "locks_status")],
+        *_lock_toggle_rows(),
     )
 
 def panel_1_2() -> InlineKeyboardMarkup:

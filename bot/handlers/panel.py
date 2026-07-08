@@ -137,25 +137,59 @@ async def _execute(action: str, chat_id: int, user_id: int, bot: Bot) -> str:
     from bot import cache
     from bot.helpers import (
         db_get_admins, db_get_vips, db_clear_vips,
-        db_get_locks, db_enable_group_lock, db_disable_group_lock,
+        db_get_locks, db_update_lock, db_enable_group_lock, db_disable_group_lock,
         db_enable_speaker, db_disable_speaker,
         db_get_learned_responses, db_get_word_filters,
         db_get_top_users, db_get_member,
         db_enable_group_off, db_disable_group_off,
-        db_get_alias,
+        db_get_alias, LOCK_NAMES, LOCK_ORDER,
     )
 
     # ── قفل‌ها ──
     if action == "locks_status":
-        from bot.helpers import LOCK_NAMES
         locks = cache.GROUP_LOCKS.get(chat_id, {})
         if not locks:
             locks = await db_get_locks(chat_id)
         lines = []
-        for k, label in LOCK_NAMES.items():
+        for k in LOCK_ORDER:
+            label = LOCK_NAMES.get(k, k)
             state = "🔒 فعال" if locks.get(k) else "🔓 غیرفعال"
             lines.append(f"  {label}: {state}")
         return "📋 وضعیت قفل‌ها:\n\n" + "\n".join(lines)
+
+    if action == "locks_status_pretty":
+        locks = cache.GROUP_LOCKS.get(chat_id, {})
+        if not locks:
+            locks = await db_get_locks(chat_id)
+        on = []
+        off = []
+        for k in LOCK_ORDER:
+            label = LOCK_NAMES.get(k, k)
+            if locks.get(k):
+                on.append(f"🔒 {label}")
+            else:
+                off.append(f"🔓 {label}")
+        return (
+            "✨ وضعیت قفل‌های گروه\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            + ("✅ روشن:\n" + (" • " + "\n • ".join(on)) if on else "✅ روشن: هیچ‌کدام")
+            + "\n\n"
+            + ("❌ خاموش:\n" + (" • " + "\n • ".join(off)) if off else "❌ خاموش: هیچ‌کدام")
+            + "\n\n💡 برای تغییر، از دکمه‌های ↔️ همین صفحه استفاده کن."
+        )
+
+    if action.startswith("lock_toggle_"):
+        lock_key = action[len("lock_toggle_"):]
+        if lock_key not in LOCK_NAMES:
+            return "❌ قفل نامعتبر است."
+        locks = cache.GROUP_LOCKS.get(chat_id, {})
+        if not locks:
+            locks = await db_get_locks(chat_id)
+        new_state = not bool(locks.get(lock_key))
+        await db_update_lock(chat_id, lock_key, new_state)
+        icon = "🔒" if new_state else "🔓"
+        state = "روشن" if new_state else "خاموش"
+        return f"{icon} قفل «{LOCK_NAMES[lock_key]}» {state} شد."
 
     if action == "group_lock":
         await db_enable_group_lock(chat_id)
