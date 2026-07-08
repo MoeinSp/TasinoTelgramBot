@@ -1,41 +1,17 @@
 """
-هندلرهای بازی — پورت کامل از rubpy/bot/func.py و bot/bot.py
+هندلرهای بازی — پیش‌فرض متنی (rubpy)، با «ایموجی تلگرام روشن» استیکر متحرک تلگرام
 """
-import re
 import secrets
 
 from aiogram import Router, F, Bot
 from aiogram.types import Message
 
 from bot import cache
-from bot.helpers import safe_send, db_get_group_commands, db_get_group_theme
+from bot import game_text
+from bot.helpers import safe_send, db_get_group_commands, telegram_emoji_on
 
 router = Router()
 router.message.filter(F.chat.type.in_({"group", "supergroup"}))
-
-# ─── ۱۵ تم تاس ───────────────────────────────────────────────────────────────
-
-DICE_THEMES = {
-    1:  {"name":"کلاسیک",      "dice":["⚀","⚁","⚂","⚃","⚄","⚅"],      "roll":"🎲 {name} تاس انداخت: {icon} {val}"},
-    2:  {"name":"سینما",       "dice":["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣"],   "roll":"🎬 {name}: {icon} {val}"},
-    3:  {"name":"پادشاهی",     "dice":["👑","🗡","🛡","⚔️","🏰","💎"],      "roll":"🏰 {name}: {icon} {val}"},
-    4:  {"name":"ملایم",       "dice":["🌸","🌺","🌻","🌹","🌷","🌼"],      "roll":"🌷 {name}: {icon} {val}"},
-    5:  {"name":"نقطه",        "dice":["·","··","···","····","·····","······"],"roll":"· {name}: {icon} {val}"},
-    6:  {"name":"کریستال",     "dice":["💠","🔷","🔹","🔵","🔶","💎"],      "roll":"💎 {name}: {icon} {val}"},
-    7:  {"name":"سامورایی",    "dice":["⚔️","🗡","🛡","🏯","🎌","🌸"],      "roll":"🏯 {name}: {icon} {val}"},
-    8:  {"name":"شبکه",        "dice":["①","②","③","④","⑤","⑥"],          "roll":"📊 {name}: {icon} {val}"},
-    9:  {"name":"رعد و برق",   "dice":["⚡","🌩","⛈","🌪","🌊","🔥"],      "roll":"⚡ {name}: {icon} {val}"},
-    10: {"name":"کیمیا",       "dice":["🧪","⚗️","🔮","🧬","🌀","✨"],      "roll":"⚗️ {name}: {icon} {val}"},
-    11: {"name":"گل رز",       "dice":["🌹","🥀","🌺","🌸","💐","🌷"],      "roll":"💐 {name}: {icon} {val}"},
-    12: {"name":"جنگل",        "dice":["🌿","🍃","🌱","🍀","🌲","🌳"],      "roll":"🌲 {name}: {icon} {val}"},
-    13: {"name":"طلا",         "dice":["🥇","🥈","🥉","🏅","🎖","🏆"],      "roll":"🏅 {name}: {icon} {val}"},
-    14: {"name":"جمجمه",       "dice":["💀","☠️","🦴","🕷","🕯","⚰️"],     "roll":"⚰️ {name}: {icon} {val}"},
-    15: {"name":"دروازه اژدها","dice":["🐉","🔥","⚡","💥","🌊","🌪"],      "roll":"🔥 {name}: {icon} {val}"},
-}
-
-
-def get_dice_roll() -> int:
-    return secrets.randbelow(6) + 1
 
 
 async def _reply(message: Message, text: str):
@@ -46,6 +22,12 @@ async def _check_enabled(message: Message, cmd: str) -> bool:
     chat_id = message.chat.id
     if chat_id in cache.OFF_GROUP:
         return False
+
+    from bot.cache_manager import has_privilege
+    locks = cache.GROUP_LOCKS.get(chat_id, {})
+    if locks.get("fun_text") and not has_privilege(chat_id, message.from_user.id):
+        return False
+
     cmds = await db_get_group_commands(chat_id)
     if cmd not in cmds:
         await _reply(message, "این قابلیت توسط ادمین گروه غیرفعال شده است.")
@@ -53,88 +35,66 @@ async def _check_enabled(message: Message, cmd: str) -> bool:
     return True
 
 
+async def _play_tg_or_text(
+    message: Message, bot: Bot, cmd: str, tg_emoji: str, text_fn,
+):
+    if not await _check_enabled(message, cmd):
+        return
+    chat_id = message.chat.id
+    mid = message.message_id
+    if telegram_emoji_on(chat_id):
+        await bot.send_dice(chat_id, emoji=tg_emoji, reply_to_message_id=mid)
+    else:
+        await text_fn(bot, chat_id, mid)
+
+
 # تاس — در main_group.py هندل می‌شود (سیستم کامل با تم و مسابقه)
 
 
-# ─── بازی‌های تلگرام ──────────────────────────────────────────────────────────
-
 @router.message(F.text == "بسکتبال")
 async def cmd_basketball(message: Message, bot: Bot):
-    if not await _check_enabled(message, "بسکتبال"):
-        return
-    await bot.send_dice(message.chat.id, emoji="🏀")
+    await _play_tg_or_text(message, bot, "بسکتبال", "🏀", game_text.send_basketball)
 
 
 @router.message(F.text == "پنالتی")
 async def cmd_penalty(message: Message, bot: Bot):
-    if not await _check_enabled(message, "پنالتی"):
-        return
-    await bot.send_dice(message.chat.id, emoji="⚽")
+    await _play_tg_or_text(message, bot, "پنالتی", "⚽", game_text.send_penalty)
 
 
 @router.message(F.text == "بولینگ")
 async def cmd_bowling(message: Message, bot: Bot):
-    if not await _check_enabled(message, "بولینگ"):
-        return
-    await bot.send_dice(message.chat.id, emoji="🎳")
+    await _play_tg_or_text(message, bot, "بولینگ", "🎳", game_text.send_bowling)
 
 
 @router.message(F.text == "دارت")
 async def cmd_dart(message: Message, bot: Bot):
-    if not await _check_enabled(message, "دارت"):
-        return
-    await bot.send_dice(message.chat.id, emoji="🎯")
+    await _play_tg_or_text(message, bot, "دارت", "🎯", game_text.send_dart)
 
 
 @router.message(F.text == "اسلات")
 async def cmd_slots(message: Message, bot: Bot):
-    if not await _check_enabled(message, "اسلات"):
-        return
-    await bot.send_dice(message.chat.id, emoji="🎰")
-
-
-# ─── بازی‌های متنی ────────────────────────────────────────────────────────────
-
-_RPS_OPTIONS = ["سنگ 🪨", "کاغذ 📄", "قیچی ✂️"]
-_RPS_MAP = {"سنگ 🪨": "قیچی ✂️", "کاغذ 📄": "سنگ 🪨", "قیچی ✂️": "کاغذ 📄"}
+    await _play_tg_or_text(message, bot, "اسلات", "🎰", game_text.send_slots)
 
 
 @router.message(F.text == "سنگ کاغذ قیچی")
-async def cmd_rps(message: Message):
+async def cmd_rps(message: Message, bot: Bot):
     if not await _check_enabled(message, "سنگ کاغذ قیچی"):
         return
-    bot_pick = secrets.choice(_RPS_OPTIONS)
-    user_pick = secrets.choice(_RPS_OPTIONS)
-    if user_pick == bot_pick:
-        result = "🤝 مساوی!"
-    elif _RPS_MAP[user_pick] == bot_pick:
-        result = "🎉 بُردی!"
-    else:
-        result = "😢 باختی!"
-    text = (
-        f"✂️ سنگ کاغذ قیچی\n\n"
-        f"👤 انتخاب شما: {user_pick}\n"
-        f"🤖 انتخاب ربات: {bot_pick}\n\n"
-        f"{result}"
-    )
-    return await _reply(message, text)
+    await game_text.send_rps(bot, message.chat.id, message.message_id)
 
 
 @router.message(F.text == "سکه")
-async def cmd_coin(message: Message):
+async def cmd_coin(message: Message, bot: Bot):
     if not await _check_enabled(message, "سکه"):
         return
-    side = secrets.choice(["شیر 🦁", "خط 📝"])
-    return await _reply(message, f"🪙 سکه انداخته شد:\n\n{side}")
+    await game_text.send_coin(message.bot, message.chat.id, message.message_id)
 
 
 @router.message(F.text == "شانس")
-async def cmd_luck(message: Message):
+async def cmd_luck(message: Message, bot: Bot):
     if not await _check_enabled(message, "شانس"):
         return
-    percent = secrets.randbelow(101)
-    emoji = "🍀" if percent >= 90 else "😊" if percent >= 70 else "😐" if percent >= 50 else "😕" if percent >= 30 else "😢"
-    return await _reply(message, f"🍀 شانس شما: {percent}% {emoji}")
+    await game_text.send_luck(message.bot, message.chat.id, message.message_id)
 
 
 # ─── سرگرمی ──────────────────────────────────────────────────────────────────

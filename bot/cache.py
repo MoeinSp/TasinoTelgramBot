@@ -22,4 +22,25 @@ ANTI_FLOOD_ENABLED: set[int] = set()
 ANTI_FLOOD_SETTINGS: dict[int, dict] = {} # chat_id → {"limit": int, "window": int}
 FLOOD_TRACKER: dict[tuple, list] = {}     # (chat_id, user_id) → [timestamps]
 
+# ─── کپچا ──────────────────────────────────────────────────────────────────
+CAPTCHA_ENABLED: set[int] = set()          # chat_ids که کپچا براشون فعاله (پیش‌فرض: خاموش)
+CAPTCHA_TIMEOUT: dict[int, int] = {}       # chat_id → مهلت به ثانیه
+PENDING_CAPTCHA: dict[tuple, dict] = {}    # (chat_id, user_id) → {"message_id": int, "task": asyncio.Task}
+
+# ─── ضد رید ────────────────────────────────────────────────────────────────
+ANTIRAID_ENABLED: set[int] = set()         # chat_ids که حالت ضد رید موقتاً فعاله
+
+# ─── حالت شب ───────────────────────────────────────────────────────────────
+NIGHT_MODE: dict[int, tuple[int, int]] = {}  # chat_id → (ساعت شروع، ساعت پایان)
+
+# ─── ایموجی متحرک تلگرام (بازی‌ها) ─────────────────────────────────────────
+TELEGRAM_EMOJI_ON: set[int] = set()        # پیش‌فرض: خاموش → بازی متنی مثل rubpy
+
+# ─── دستورات ویژه سازنده (فقط برای یک user_id) ──────────────────────────────
+SILENCE_ALL: set[int] = set()              # chat_ids که «خفه» فعال است
+SILENCE_ALL_USERS: dict[int, set[int]] = {}  # chat_id → user_ids محدودشده در خفه
+
+# ─── کانال لاگ ────────────────────────────────────────────────────────────
+LOG_CHANNEL: dict[int, int] = {}           # chat_id → log_channel_id
+
 CACHE_LOADED = False

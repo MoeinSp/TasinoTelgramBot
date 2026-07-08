@@ -3,15 +3,51 @@
 """
 import re
 import ast
+import html
 import operator as op
 from typing import Optional
 
 from aiogram import Bot
-from aiogram.types import Message
+from aiogram.types import Message, ChatPermissions
 from asgiref.sync import sync_to_async
 
 from bot import cache
 from bot.cache_manager import is_owner, is_admin, is_vip, has_privilege
+
+
+# ─── پرمیشن‌ها ────────────────────────────────────────────────────────────────
+# Bot API 6.5+ پرمیشن مدیا رو به فیلدهای جدا تقسیم کرده؛
+# فیلد تنظیم‌نشده False حساب می‌شه، پس برای رفع محدودیت باید همه صریحاً True باشن.
+
+def full_permissions() -> ChatPermissions:
+    return ChatPermissions(
+        can_send_messages=True,
+        can_send_audios=True,
+        can_send_documents=True,
+        can_send_photos=True,
+        can_send_videos=True,
+        can_send_video_notes=True,
+        can_send_voice_notes=True,
+        can_send_polls=True,
+        can_send_other_messages=True,
+        can_add_web_page_previews=True,
+    )
+
+
+async def unrestrict_user(bot: Bot, chat_id: int, user_id: int) -> bool:
+    """محدودیت کاربر رو برمی‌داره (پرمیشن‌های پیش‌فرض گروه اگه در دسترس باشه)."""
+    permissions = full_permissions()
+    try:
+        chat = await bot.get_chat(chat_id)
+        if chat.permissions:
+            permissions = chat.permissions
+    except Exception:
+        pass
+    try:
+        await bot.restrict_chat_member(chat_id, user_id, permissions=permissions)
+        return True
+    except Exception:
+        return False
 
 
 # ─── safe_send ────────────────────────────────────────────────────────────────
@@ -73,13 +109,13 @@ async def user_mention(user_id: int, chat_id: int = 0,
         name = await _get_member_name(chat_id, user_id)
     if not name:
         name = fallback or str(user_id)
-    return f'<a href="tg://user?id={user_id}">{name}</a>'
+    return f'<a href="tg://user?id={user_id}">{html.escape(name)}</a>'
 
 
 async def user_mention_from_msg(message: Message) -> str:
     u = message.from_user
     name = u.full_name or str(u.id)
-    return f'<a href="tg://user?id={u.id}">{name}</a>'
+    return f'<a href="tg://user?id={u.id}">{html.escape(name)}</a>'
 
 
 async def user_mention_id(user_id: int, bot: Bot, chat_id: int) -> str:
@@ -88,7 +124,7 @@ async def user_mention_id(user_id: int, bot: Bot, chat_id: int) -> str:
         name = member.user.full_name or str(user_id)
     except Exception:
         name = str(user_id)
-    return f'<a href="tg://user?id={user_id}">{name}</a>'
+    return f'<a href="tg://user?id={user_id}">{html.escape(name)}</a>'
 
 
 # ─── get_user_status ──────────────────────────────────────────────────────────
@@ -186,22 +222,21 @@ def db_disable_speaker(chat_id: int):
 @sync_to_async
 def db_update_lock(chat_id: int, lock_name: str, value: bool):
     from account.models import TelegramGroup
-    grp = TelegramGroup.objects.filter(telegram_chat_id=chat_id).first()
-    if grp:
-        locks = grp.locks or {}
-        locks[lock_name] = value
-        grp.locks = locks
-        grp.save(update_fields=["locks"])
-        cache.GROUP_LOCKS[chat_id] = locks
+    grp, _ = TelegramGroup.objects.get_or_create(telegram_chat_id=chat_id, defaults={"name": ""})
+    locks = grp.locks or {}
+    locks[lock_name] = value
+    grp.locks = locks
+    grp.save(update_fields=["locks"])
+    cache.GROUP_LOCKS[chat_id] = locks
 
 
 @sync_to_async
 def db_get_locks(chat_id: int) -> dict:
-    from account.models import TelegramGroup
+    from account.models import TelegramGroup, default_locks
     grp = TelegramGroup.objects.filter(telegram_chat_id=chat_id).first()
     if grp:
-        return grp.locks or {}
-    return {}
+        return grp.locks or default_locks()
+    return default_locks()
 
 
 @sync_to_async
@@ -582,6 +617,159 @@ def db_set_anti_flood(chat_id: int, enabled=None, limit=None, window=None):
         grp.save(update_fields=fields)
 
 
+# ─── کپچا ─────────────────────────────────────────────────────────────────────
+
+@sync_to_async
+def db_get_captcha(chat_id: int) -> dict:
+    from account.models import TelegramGroup
+    grp, _ = TelegramGroup.objects.get_or_create(telegram_chat_id=chat_id, defaults={"name": ""})
+    return {"enabled": grp.captcha_enabled, "timeout": grp.captcha_timeout}
+
+
+@sync_to_async
+def db_set_captcha(chat_id: int, enabled=None, timeout=None):
+    from account.models import TelegramGroup
+    grp, _ = TelegramGroup.objects.get_or_create(telegram_chat_id=chat_id, defaults={"name": ""})
+    fields = []
+    if enabled is not None:
+        grp.captcha_enabled = enabled
+        fields.append("captcha_enabled")
+    if timeout is not None:
+        grp.captcha_timeout = timeout
+        fields.append("captcha_timeout")
+    if fields:
+        grp.save(update_fields=fields)
+
+
+# ─── ضد رید ───────────────────────────────────────────────────────────────────
+
+@sync_to_async
+def db_set_antiraid(chat_id: int, enabled: bool):
+    from account.models import TelegramGroup
+    grp, _ = TelegramGroup.objects.get_or_create(telegram_chat_id=chat_id, defaults={"name": ""})
+    grp.antiraid_enabled = enabled
+    grp.save(update_fields=["antiraid_enabled"])
+
+
+# ─── کانال لاگ ────────────────────────────────────────────────────────────────
+
+@sync_to_async
+def db_set_log_channel(chat_id: int, log_channel_id: int | None):
+    from account.models import TelegramGroup
+    grp, _ = TelegramGroup.objects.get_or_create(telegram_chat_id=chat_id, defaults={"name": ""})
+    grp.log_channel_id = log_channel_id
+    grp.save(update_fields=["log_channel_id"])
+
+
+async def log_action(bot, chat_id: int, text: str) -> None:
+    """اگه کانال لاگ برای گروه تنظیم شده باشه، متن رو اونجا می‌فرسته."""
+    log_chat_id = cache.LOG_CHANNEL.get(chat_id)
+    if not log_chat_id:
+        return
+    try:
+        await bot.send_message(log_chat_id, text, parse_mode="HTML")
+    except Exception as e:
+        print(f"log_action error: {e}")
+
+
+# ─── قوانین گروه ──────────────────────────────────────────────────────────────
+
+@sync_to_async
+def db_set_rules(chat_id: int, text: str | None):
+    from account.models import TelegramGroup
+    grp, _ = TelegramGroup.objects.get_or_create(telegram_chat_id=chat_id, defaults={"name": ""})
+    grp.rules_text = text
+    grp.save(update_fields=["rules_text"])
+
+
+@sync_to_async
+def db_get_rules(chat_id: int) -> Optional[str]:
+    from account.models import TelegramGroup
+    grp = TelegramGroup.objects.filter(telegram_chat_id=chat_id).first()
+    return grp.rules_text if grp else None
+
+
+# ─── حالت شب ──────────────────────────────────────────────────────────────────
+
+@sync_to_async
+def db_set_night_mode(chat_id: int, enabled: bool, start_hour: int = None, end_hour: int = None):
+    from account.models import TelegramGroup
+    grp, _ = TelegramGroup.objects.get_or_create(telegram_chat_id=chat_id, defaults={"name": ""})
+    grp.night_mode_enabled = enabled
+    fields = ["night_mode_enabled"]
+    if start_hour is not None:
+        grp.night_start_hour = start_hour
+        fields.append("night_start_hour")
+    if end_hour is not None:
+        grp.night_end_hour = end_hour
+        fields.append("night_end_hour")
+    grp.save(update_fields=fields)
+
+
+def is_night_time(chat_id: int) -> bool:
+    """آیا الان در بازه‌ی حالت شب این گروه هستیم؟ (ساعت محلی سرور)"""
+    cfg = cache.NIGHT_MODE.get(chat_id)
+    if not cfg:
+        return False
+    start, end = cfg
+    import datetime
+    hour = datetime.datetime.now().hour
+    if start <= end:
+        return start <= hour < end
+    return hour >= start or hour < end
+
+
+def telegram_emoji_on(chat_id: int) -> bool:
+    return chat_id in cache.TELEGRAM_EMOJI_ON
+
+
+@sync_to_async
+def db_set_telegram_emoji(chat_id: int, enabled: bool):
+    from account.models import TelegramGroup
+    grp, _ = TelegramGroup.objects.get_or_create(telegram_chat_id=chat_id, defaults={"name": ""})
+    grp.telegram_emoji_enabled = enabled
+    grp.save(update_fields=["telegram_emoji_enabled"])
+    if enabled:
+        cache.TELEGRAM_EMOJI_ON.add(chat_id)
+    else:
+        cache.TELEGRAM_EMOJI_ON.discard(chat_id)
+
+
+# ─── یادداشت‌ها (Notes) ───────────────────────────────────────────────────────
+
+@sync_to_async
+def db_save_note(chat_id: int, name: str, content: str, user_id: int) -> None:
+    from account.models import TelegramGroup, Note
+    grp, _ = TelegramGroup.objects.get_or_create(telegram_chat_id=chat_id, defaults={"name": ""})
+    Note.objects.update_or_create(
+        group=grp, name=name,
+        defaults={"content": content, "created_by": user_id},
+    )
+
+
+@sync_to_async
+def db_get_note(chat_id: int, name: str) -> Optional[str]:
+    from account.models import Note
+    note = Note.objects.filter(group__telegram_chat_id=chat_id, name=name).first()
+    return note.content if note else None
+
+
+@sync_to_async
+def db_delete_note(chat_id: int, name: str) -> bool:
+    from account.models import Note
+    deleted, _ = Note.objects.filter(group__telegram_chat_id=chat_id, name=name).delete()
+    return deleted > 0
+
+
+@sync_to_async
+def db_list_notes(chat_id: int) -> list[str]:
+    from account.models import Note
+    return list(
+        Note.objects.filter(group__telegram_chat_id=chat_id)
+        .order_by("name").values_list("name", flat=True)
+    )
+
+
 # ─── calc ────────────────────────────────────────────────────────────────────
 
 _ALLOWED_OPS = {
@@ -660,7 +848,7 @@ def db_get_point(chat_id: int, user_id: int) -> int:
 def db_get_group_fee(chat_id: int) -> int:
     from account.models import TelegramGroup
     grp = TelegramGroup.objects.filter(telegram_chat_id=chat_id).first()
-    return grp.fee_percent if grp else 0
+    return grp.fee_percent if grp and grp.fee_percent is not None else 10
 
 
 # ─── lock map ────────────────────────────────────────────────────────────────
@@ -670,22 +858,61 @@ LOCK_MAP = {
     "فوروارد": "forward",
     "ایدی": "username",
     "یوزرنیم": "username",
+    "منشن": "username",
     "گیف": "gif",
     "عکس": "photo",
     "مدیا": "media",
     "کلمات": "bad_words",
     "ادیت": "edit_message",
+    "ویرایش": "edit_message",
     "سرگرمی": "fun_text",
+    "استیکر": "sticker",
+    "ویس": "voice",
+    "ویدیو": "video",
+    "فیلم": "video",
+    "ویدیو مسیج": "video_note",
+    "ویدئو مسیج": "video_note",
+    "موزیک": "audio",
+    "آهنگ": "audio",
+    "فایل": "document",
+    "مخاطب": "contact",
+    "لوکیشن": "location",
+    "موقعیت": "location",
+    "نظرسنجی": "poll",
+    "اینلاین": "via_bot",
+    "بازی": "game",
 }
 
-LOCK_NAMES = {v: k for k, v in LOCK_MAP.items()}
+# نام نمایشی هر قفل (کلید انگلیسی ← برچسب فارسی)
+LOCK_NAMES = {
+    "link": "لینک",
+    "forward": "فوروارد",
+    "username": "یوزرنیم",
+    "gif": "گیف",
+    "photo": "عکس",
+    "media": "مدیا",
+    "bad_words": "کلمات",
+    "edit_message": "ادیت",
+    "fun_text": "سرگرمی",
+    "sticker": "استیکر",
+    "voice": "ویس",
+    "video": "ویدیو",
+    "video_note": "ویدیو مسیج",
+    "audio": "موزیک",
+    "document": "فایل",
+    "contact": "مخاطب",
+    "location": "لوکیشن",
+    "poll": "نظرسنجی",
+    "via_bot": "اینلاین",
+    "game": "بازی",
+}
 
 ALL_TOGGLEABLE = list(LOCK_MAP.keys())
 
 # ─── contains helpers ─────────────────────────────────────────────────────────
 
 URL_RE = re.compile(
-    r"(https?://|t\.me/|@\w+|www\.\w)", re.IGNORECASE
+    r"(https?://|t\.me/|telegram\.me/|www\.\w|\w+\.(com|ir|org|net|io)\b)", re.IGNORECASE
 )
 USERNAME_RE = re.compile(r"@\w{4,}")
 

@@ -144,7 +144,8 @@ WAITING_ROUNDS: dict = {}  # chat_id → winner_id (منتظر انتخاب را
 
 # ─── توابع مدیریت بازی ───────────────────────────────────────────────────────
 
-def create_game(chat_id, total_players, bet_amount=0, fee_percent=0, has_bet=False):
+def create_game(chat_id, total_players, bet_amount=0, fee_percent=0, has_bet=False,
+                fixed_entry=False):
     game = {
         "chat_id": chat_id,
         "total_players": total_players,
@@ -154,6 +155,7 @@ def create_game(chat_id, total_players, bet_amount=0, fee_percent=0, has_bet=Fal
         "has_bet": has_bet,
         "bet_amount": bet_amount,
         "fee_percent": fee_percent,
+        "fixed_entry": fixed_entry,
         "rounds": 0,
         "total_rounds": 0,
         "is_turn_based": False,
@@ -162,6 +164,22 @@ def create_game(chat_id, total_players, bet_amount=0, fee_percent=0, has_bet=Fal
     }
     ACTIVE_GAMES[chat_id] = game
     return game
+
+
+def calc_bet_costs(bet_amount: int, fee_percent: int, fixed_entry: bool = False) -> dict:
+    """محاسبه هزینه ورود، حق واسطه و جایزه."""
+    if fixed_entry:
+        return {
+            "entry": bet_amount,
+            "fee_per": 0,
+            "stake": bet_amount,
+        }
+    fee_per = int(bet_amount * fee_percent / 100)
+    return {
+        "entry": bet_amount + fee_per,
+        "fee_per": fee_per,
+        "stake": bet_amount,
+    }
 
 
 def get_game(chat_id) -> Optional[dict]:
@@ -575,8 +593,10 @@ async def send_final_results(chat_id, bot, message_id):
     if game_data.get("has_bet") and game_data.get("bet_amount", 0) > 0 and not is_tie and winner_id:
         bet_amount = game_data["bet_amount"]
         fee_percent = game_data.get("fee_percent", 0)
-        fee_per_player = int(bet_amount * fee_percent / 100)
-        entry_amount = bet_amount + fee_per_player
+        fixed_entry = game_data.get("fixed_entry", False)
+        costs = calc_bet_costs(bet_amount, fee_percent, fixed_entry)
+        entry_amount = costs["entry"]
+        fee_per_player = costs["fee_per"]
         winner_amount = bet_amount * len(players_list)
 
         for player_id in players_list:
@@ -613,17 +633,22 @@ async def send_final_results(chat_id, bot, message_id):
     if game_data.get("has_bet") and game_data.get("bet_amount", 0) > 0 and not is_tie and winner_id:
         bet_amount = game_data["bet_amount"]
         fee_percent = game_data.get("fee_percent", 0)
-        fee_per_player = int(bet_amount * fee_percent / 100)
-        entry_amount = bet_amount + fee_per_player
+        fixed_entry = game_data.get("fixed_entry", False)
+        costs = calc_bet_costs(bet_amount, fee_percent, fixed_entry)
+        entry_amount = costs["entry"]
+        fee_per_player = costs["fee_per"]
         winner_amount = bet_amount * len(players_list)
         fee_amount = fee_per_player * len(players_list)
 
         lines.append("")
         lines.append("💰 جایزه نقدی")
         lines.append("────────────────────")
-        lines.append(f"💳 هزینه ورودی هر نفر: {entry_amount:,} واحد")
-        if fee_percent > 0:
-            lines.append(f"💸 حق واسطه ({fee_percent}%): {fee_amount:,} واحد")
+        if fixed_entry:
+            lines.append(f"💳 هزینه ورودی هر نفر: {entry_amount:,} واحد (فیکس)")
+        else:
+            lines.append(f"💳 هزینه ورودی هر نفر: {entry_amount:,} واحد")
+            if fee_percent > 0:
+                lines.append(f"💸 حق واسطه ({fee_percent}%): {fee_amount:,} واحد")
         lines.append(f"🏆 مبلغ برد: {winner_amount:,} واحد")
         lines.append("")
         lines.append("📊 تغییرات موجودی:")
@@ -679,7 +704,8 @@ def _multinomial_fair(count_):
 
 # ─── تابع اصلی handle_dice ───────────────────────────────────────────────────
 
-async def handle_dice(text, chat_id, message_id, bot, user_id, dice_option_off, theme_id=1):
+async def handle_dice(text, chat_id, message_id, bot, user_id, dice_option_off, theme_id=1,
+                      telegram_emoji_on=False):
     text = (text or "").strip()
     theme = THEMES.get(theme_id, THEMES[1])
     separator = theme["separator"]
@@ -705,15 +731,23 @@ async def handle_dice(text, chat_id, message_id, bot, user_id, dice_option_off, 
     if game and game.get("status") == "waiting" and game.get("has_bet") and game.get("bet_amount", 0) > 0:
         bet_amount = game["bet_amount"]
         fee_percent = game.get("fee_percent", 0)
-        fee_per = int(bet_amount * fee_percent / 100)
-        entry_cost = bet_amount + fee_per
+        fixed_entry = game.get("fixed_entry", False)
+        costs = calc_bet_costs(bet_amount, fee_percent, fixed_entry)
+        entry_cost = costs["entry"]
+        fee_per = costs["fee_per"]
         balance = await _get_balance(chat_id, user_id)
         if balance < entry_cost:
-            fee_line = f"\n   ├ شرط: {bet_amount:,} واحد\n   └ حق واسطه: {fee_per:,} واحد" if fee_per > 0 else ""
+            if fixed_entry:
+                fee_line = ""
+            elif fee_per > 0:
+                fee_line = f"\n   ├ شرط: {bet_amount:,} واحد\n   └ حق واسطه: {fee_per:,} واحد"
+            else:
+                fee_line = ""
+            mode_line = " (فیکس)" if fixed_entry else ""
             await bot.send_message(
                 chat_id=chat_id,
                 text=(f"❌ موجودی ناکافی!\n\n"
-                      f"💳 هزینه ورودی: {entry_cost:,} واحد{fee_line}\n\n"
+                      f"💳 هزینه ورودی: {entry_cost:,} واحد{mode_line}{fee_line}\n\n"
                       f"💰 موجودی فعلی شما: {balance:,} واحد\n"
                       f"🔻 کمبود: {entry_cost - balance:,} واحد\n\n"
                       f"💡 برای افزایش موجودی با ادمین تماس بگیرید."),
@@ -734,12 +768,16 @@ async def handle_dice(text, chat_id, message_id, bot, user_id, dice_option_off, 
             await bot.send_message(chat_id=chat_id, text=error_msg, reply_to_message_id=message_id)
             return
 
-    # ─── تاس تکی — native Telegram dice sticker ─────────────────────────────
+    # ─── تاس تکی ─────────────────────────────────────────────────────────────
     if dice_count == 1:
-        sent = await bot.send_dice(chat_id, emoji="🎲", reply_to_message_id=message_id)
-        r = sent.dice.value
-        LAST_DICE[chat_id] = r
         from bot.helpers import db_record_dice_roll
+        if telegram_emoji_on:
+            sent = await bot.send_dice(chat_id, emoji="🎲", reply_to_message_id=message_id)
+            r = sent.dice.value
+        else:
+            from bot.game_text import send_single_dice
+            r = await send_single_dice(bot, chat_id, message_id)
+        LAST_DICE[chat_id] = r
         await db_record_dice_roll(chat_id, user_id, r)
 
         game = get_game(chat_id)
@@ -857,27 +895,28 @@ async def _handle_game_roll_silent(chat_id, user_id, dice_count, total, message_
 # ─── helpers داخلی ────────────────────────────────────────────────────────────
 
 async def _bulk_mentions(user_ids: list, bot, chat_id: int) -> dict:
+    import html as _html
     result = {}
     for uid in user_ids:
         try:
             member = await bot.get_chat_member(chat_id, uid)
             name = member.user.full_name or str(uid)
-            result[uid] = f'<a href="tg://user?id={uid}">{name}</a>'
+            result[uid] = f'<a href="tg://user?id={uid}">{_html.escape(name)}</a>'
         except Exception:
             result[uid] = f'<a href="tg://user?id={uid}">{uid}</a>'
     return result
 
 
+# موجودی کاربران در فیلد point ذخیره می‌شه
 async def _get_balance(chat_id, user_id):
     from asgiref.sync import sync_to_async
     @sync_to_async
     def _q():
         from account.models import TelegramGroupMember
-        try:
-            m = TelegramGroupMember.objects.get(telegram_chat_id=chat_id, telegram_user_id=user_id)
-            return getattr(m, 'balance', 0) or 0
-        except Exception:
-            return 0
+        m = TelegramGroupMember.objects.filter(
+            telegram_chat_id=chat_id, telegram_user_id=user_id
+        ).first()
+        return (m.point or 0) if m else 0
     return await _q()
 
 
@@ -887,8 +926,8 @@ async def _increase_wallet(chat_id, user_id, amount):
     def _q():
         from account.models import TelegramGroupMember
         m, _ = TelegramGroupMember.objects.get_or_create(telegram_chat_id=chat_id, telegram_user_id=user_id, defaults={"role": "member"})
-        m.balance = (getattr(m, 'balance', 0) or 0) + amount
-        m.save(update_fields=["balance"])
+        m.point = (m.point or 0) + amount
+        m.save(update_fields=["point"])
     await _q()
 
 
@@ -898,6 +937,6 @@ async def _decrease_wallet(chat_id, user_id, amount):
     def _q():
         from account.models import TelegramGroupMember
         m, _ = TelegramGroupMember.objects.get_or_create(telegram_chat_id=chat_id, telegram_user_id=user_id, defaults={"role": "member"})
-        m.balance = (getattr(m, 'balance', 0) or 0) - amount
-        m.save(update_fields=["balance"])
+        m.point = (m.point or 0) - amount
+        m.save(update_fields=["point"])
     await _q()

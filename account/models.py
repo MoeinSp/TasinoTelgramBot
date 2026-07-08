@@ -12,7 +12,18 @@ def default_locks():
         "media": False,
         "bad_words": True,
         "edit_message": False,
-        "fun_text": False
+        "fun_text": False,
+        "sticker": False,
+        "voice": False,
+        "video": False,
+        "video_note": False,
+        "audio": False,
+        "document": False,
+        "contact": False,
+        "location": False,
+        "poll": False,
+        "via_bot": False,
+        "game": False,
     }
 
 
@@ -127,7 +138,7 @@ class TelegramGroup(models.Model):
     )
 
     fee_percent = models.IntegerField(
-        default=0,
+        default=10,
         verbose_name="درصد کارمزد"
     )
 
@@ -162,6 +173,53 @@ class TelegramGroup(models.Model):
     anti_flood_window = models.IntegerField(
         default=10,
         verbose_name="بازه فلود (ثانیه)"
+    )
+
+    captcha_enabled = models.BooleanField(
+        default=False,
+        verbose_name="کپچا فعال"
+    )
+
+    captcha_timeout = models.IntegerField(
+        default=180,
+        verbose_name="مهلت کپچا (ثانیه)"
+    )
+
+    antiraid_enabled = models.BooleanField(
+        default=False,
+        verbose_name="حالت ضد رید فعال"
+    )
+
+    log_channel_id = models.BigIntegerField(
+        null=True,
+        blank=True,
+        verbose_name="شناسه کانال لاگ"
+    )
+
+    rules_text = models.TextField(
+        blank=True,
+        null=True,
+        verbose_name="قوانین گروه"
+    )
+
+    night_mode_enabled = models.BooleanField(
+        default=False,
+        verbose_name="حالت شب فعال"
+    )
+
+    night_start_hour = models.IntegerField(
+        default=0,
+        verbose_name="ساعت شروع حالت شب"
+    )
+
+    night_end_hour = models.IntegerField(
+        default=8,
+        verbose_name="ساعت پایان حالت شب"
+    )
+
+    telegram_emoji_enabled = models.BooleanField(
+        default=False,
+        verbose_name="استیکر/ایموجی متحرک تلگرام برای بازی‌ها"
     )
 
     def check_subscription(self):
@@ -422,3 +480,26 @@ class DiceRollStat(models.Model):
 
     def __str__(self):
         return f"{self.telegram_user_id} rolled {self.value} @ {self.rolled_at}"
+
+
+class Note(models.Model):
+    group = models.ForeignKey(
+        TelegramGroup,
+        on_delete=models.CASCADE,
+        related_name="notes"
+    )
+
+    name = models.CharField(max_length=100)
+    content = models.TextField()
+
+    created_by = models.BigIntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [("group", "name")]
+        indexes = [
+            models.Index(fields=["group", "name"]),
+        ]
+
+    def __str__(self):
+        return f"#{self.name}"

@@ -43,6 +43,22 @@ def _load_from_db():
             "window": group.anti_flood_window,
         }
 
+        if group.captcha_enabled:
+            cache.CAPTCHA_ENABLED.add(cid)
+        cache.CAPTCHA_TIMEOUT[cid] = group.captcha_timeout
+
+        if group.antiraid_enabled:
+            cache.ANTIRAID_ENABLED.add(cid)
+
+        if group.night_mode_enabled:
+            cache.NIGHT_MODE[cid] = (group.night_start_hour, group.night_end_hour)
+
+        if group.telegram_emoji_enabled:
+            cache.TELEGRAM_EMOJI_ON.add(cid)
+
+        if group.log_channel_id:
+            cache.LOG_CHANNEL[cid] = group.log_channel_id
+
     for member in TelegramGroupMember.objects.filter(
         is_owner=True
     ).select_related("group"):
@@ -58,6 +74,12 @@ def _load_from_db():
 
     for member in TelegramGroupMember.objects.filter(is_vip=True):
         cache.VIP_USERS_CACHE.setdefault(member.telegram_chat_id, set()).add(
+            member.telegram_user_id
+        )
+
+    # لیست سکوت باید بعد از ری‌استارت هم پابرجا بمونه
+    for member in TelegramGroupMember.objects.filter(role="muted"):
+        cache.MUTED_USERS.setdefault(member.telegram_chat_id, set()).add(
             member.telegram_user_id
         )
 

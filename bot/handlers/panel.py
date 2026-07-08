@@ -20,6 +20,12 @@ _log = logging.getLogger(__name__)
 
 @router.callback_query(F.data.startswith("p:"))
 async def cb_panel(call: CallbackQuery):
+    chat_id = call.message.chat.id
+    user_id = call.from_user.id
+    if call.message.chat.type != "private" and not has_privilege(chat_id, user_id):
+        await call.answer("❌ شما دسترسی ندارید.", show_alert=True)
+        return
+
     code = call.data[2:]
 
     if code == "close":
@@ -141,27 +147,21 @@ async def _execute(action: str, chat_id: int, user_id: int, bot: Bot) -> str:
 
     # ── قفل‌ها ──
     if action == "locks_status":
+        from bot.helpers import LOCK_NAMES
         locks = cache.GROUP_LOCKS.get(chat_id, {})
         if not locks:
             locks = await db_get_locks(chat_id)
-        names = {
-            "link": "لینک", "forward": "فوروارد", "username": "یوزرنیم",
-            "gif": "گیف", "photo": "عکس", "media": "مدیا",
-            "bad_words": "کلمات", "edit_message": "ادیت", "fun_text": "سرگرمی",
-        }
         lines = []
-        for k, label in names.items():
+        for k, label in LOCK_NAMES.items():
             state = "🔒 فعال" if locks.get(k) else "🔓 غیرفعال"
             lines.append(f"  {label}: {state}")
         return "📋 وضعیت قفل‌ها:\n\n" + "\n".join(lines)
 
     if action == "group_lock":
-        cache.GROUP_LOCK[chat_id] = True
         await db_enable_group_lock(chat_id)
         return "🔐 گروه قفل شد — فقط ادمین‌ها پیام می‌دهند."
 
     if action == "group_unlock":
-        cache.GROUP_LOCK.pop(chat_id, None)
         await db_disable_group_lock(chat_id)
         return "🔓 قفل کل گروه برداشته شد."
 
@@ -176,17 +176,17 @@ async def _execute(action: str, chat_id: int, user_id: int, bot: Bot) -> str:
     if action == "sync_admins":
         try:
             members = await bot.get_chat_administrators(chat_id)
-            from bot.helpers import db_add_admin
-            from bot.cache_manager import ADMINS
-            synced = []
+            from bot.helpers import db_add_admin, db_set_owner
+            synced = 0
             for m in members:
-                if not m.user.is_bot:
+                if m.user.is_bot:
+                    continue
+                if m.status == "creator":
+                    await db_set_owner(chat_id, m.user.id)
+                else:
                     await db_add_admin(chat_id, m.user.id)
-                    if chat_id not in ADMINS:
-                        ADMINS[chat_id] = set()
-                    ADMINS[chat_id].add(m.user.id)
-                    synced.append(str(m.user.id))
-            return f"🔄 {len(synced)} ادمین همگام‌سازی شد."
+                synced += 1
+            return f"🔄 {synced} ادمین همگام‌سازی شد."
         except Exception as e:
             return f"❌ خطا: {e}"
 
@@ -200,21 +200,23 @@ async def _execute(action: str, chat_id: int, user_id: int, bot: Bot) -> str:
 
     if action == "vip_clear":
         await db_clear_vips(chat_id)
-        from bot.cache_manager import VIPS
-        VIPS.pop(chat_id, None)
         return "🗑 لیست ویژه پاکسازی شد."
 
     # ── بن ──
     if action == "ban_list":
-        bans = cache.BAN_LIST.get(chat_id, set())
-        if not bans:
+        from bot.handlers.main_group import _get_banned_from_db, _count_banned
+        total = await _count_banned(chat_id)
+        if total == 0:
             return "🚫 لیست بن خالی است."
+        bans = await _get_banned_from_db(chat_id)
         lines = [f"  • <a href='tg://user?id={uid}'>{uid}</a>" for uid in bans]
-        return "🚫 لیست بن:\n\n" + "\n".join(lines)
+        text = "🚫 لیست بن:\n\n" + "\n".join(lines)
+        if total > len(bans):
+            text += f"\n\n📌 و {total - len(bans)} نفر دیگر ..."
+        return text
 
     if action == "ban_clear":
-        cache.BAN_LIST.pop(chat_id, None)
-        return "🗑 لیست بن پاکسازی شد."
+        return "🗑 برای پاکسازی لیست بن در گروه بنویس:  پاکسازی لیست بن"
 
     # ── سکوت ──
     if action == "mute_list":
@@ -225,8 +227,8 @@ async def _execute(action: str, chat_id: int, user_id: int, bot: Bot) -> str:
         return "🤫 لیست سکوت:\n\n" + "\n".join(lines)
 
     if action == "mute_clear":
-        cache.MUTED_USERS.pop(chat_id, None)
-        return "🗑 لیست سکوت پاکسازی شد."
+        # رفع محدودیت واقعی کاربران هم لازمه — دستور متنی کامل‌تره
+        return "🗑 برای پاکسازی لیست سکوت در گروه بنویس:  پاکسازی لیست سکوت"
 
     # ── تگ ──
     if action == "tag_all":
@@ -305,11 +307,23 @@ async def _execute(action: str, chat_id: int, user_id: int, bot: Bot) -> str:
         off = chat_id in cache.OFF_GROUP
         locked = chat_id in cache.GROUP_LOCK
         speaker = chat_id in cache.SPEAKER_ON
+        captcha = chat_id in cache.CAPTCHA_ENABLED
+        antiraid = chat_id in cache.ANTIRAID_ENABLED
+        captcha_timeout = cache.CAPTCHA_TIMEOUT.get(chat_id, 180)
+        night = cache.NIGHT_MODE.get(chat_id)
+        flood = chat_id in cache.ANTI_FLOOD_ENABLED
+        tg_emoji = chat_id in cache.TELEGRAM_EMOJI_ON
         return (
             "📊 وضعیت گروه:\n\n"
             f"  ربات: {'❌ خاموش' if off else '✅ فعال'}\n"
             f"  قفل گروه: {'🔒 بسته' if locked else '🔓 باز'}\n"
             f"  سخنگو: {'🔊 روشن' if speaker else '🔇 خاموش'}\n"
+            f"  کپچا: {'✅ روشن' if captcha else '❌ خاموش'}"
+            + (f" ({captcha_timeout}s)" if captcha else "") + "\n"
+            f"  آنتی فلود: {'✅ روشن' if flood else '❌ خاموش'}\n"
+            f"  ضد رید: {'✅ روشن' if antiraid else '❌ خاموش'}\n"
+            f"  حالت شب: {f'🌙 {night[0]}:00 تا {night[1]}:00' if night else '❌ خاموش'}\n"
+            f"  ایموجی تلگرام: {'✅ روشن' if tg_emoji else '❌ خاموش (متن)'}\n"
         )
 
     # ── ربات روشن/خاموش ──
@@ -345,14 +359,43 @@ async def _execute(action: str, chat_id: int, user_id: int, bot: Bot) -> str:
         from bot.helpers import db_get_group_fee
         try:
             fee = await db_get_group_fee(chat_id)
-            return f"💹 کارمزد فعلی: {fee}٪"
+            return (
+                f"💹 حق واسطه فعلی: {fee}٪\n\n"
+                f"تغییر: حق واسطه 10"
+            )
         except Exception:
-            return "💹 برای دیدن کارمزد بنویس:  کارمزد"
+            return "💹 برای دیدن حق واسطه بنویس:  حق واسطه"
 
     if action == "dice_theme":
         from bot.helpers import db_get_group_theme
         theme = await db_get_group_theme(chat_id)
         return f"🎨 تم تاس فعلی: {theme}"
+
+    if action == "tg_emoji_status":
+        on = chat_id in cache.TELEGRAM_EMOJI_ON
+        return (
+            "🎮 ایموجی تلگرام (تاس):\n\n"
+            f"  وضعیت: {'✅ روشن (استیکر متحرک)' if on else '❌ خاموش (متن)'}\n\n"
+            "با خاموش بودن، بازی‌ها به صورت متنی نمایش داده می‌شوند."
+        )
+
+    if action == "tg_emoji_on":
+        from bot.helpers import db_set_telegram_emoji
+        cache.TELEGRAM_EMOJI_ON.add(chat_id)
+        await db_set_telegram_emoji(chat_id, True)
+        return (
+            "✅ ایموجی تلگرام روشن شد.\n\n"
+            "بازی‌ها با استیکر متحرک تلگرام نمایش داده می‌شوند."
+        )
+
+    if action == "tg_emoji_off":
+        from bot.helpers import db_set_telegram_emoji
+        cache.TELEGRAM_EMOJI_ON.discard(chat_id)
+        await db_set_telegram_emoji(chat_id, False)
+        return (
+            "❌ ایموجی تلگرام خاموش شد.\n\n"
+            "بازی‌ها به صورت متنی نمایش داده می‌شوند."
+        )
 
     if action == "owner_info":
         owner_id = cache.OWNER_CACHE.get(chat_id)
@@ -377,7 +420,7 @@ async def _execute(action: str, chat_id: int, user_id: int, bot: Bot) -> str:
             f"🎉 وضعیت خوشامدگویی:\n\n"
             f"  وضعیت: {'✅ روشن' if enabled else '❌ خاموش'}\n"
             f"  متن: {text[:60]}{'...' if len(text) > 60 else ''}\n"
-            f"  گیف: {'✅ تنظیم شده' if has_gif else '❌ ندارد'}"
+            f"  گیف سفارشی: {'✅ تنظیم شده' if has_gif else '❌ ندارد (عکس پیش‌فرض)'}"
         )
 
     if action == "welcome_on":
@@ -427,6 +470,71 @@ async def _execute(action: str, chat_id: int, user_id: int, bot: Bot) -> str:
         _c.ANTI_FLOOD_ENABLED.discard(chat_id)
         await _sf(chat_id, enabled=False)
         return "❌ آنتی فلود خاموش شد."
+
+    # ── کپچا ──
+    if action == "captcha_status":
+        from bot import cache as _c
+        enabled = chat_id in _c.CAPTCHA_ENABLED
+        timeout = _c.CAPTCHA_TIMEOUT.get(chat_id, 180)
+        pending = sum(1 for (cid, _) in _c.PENDING_CAPTCHA if cid == chat_id)
+        return (
+            f"🔐 وضعیت کپچا:\n\n"
+            f"  وضعیت: {'✅ روشن' if enabled else '❌ خاموش'}\n"
+            f"  مهلت: {timeout} ثانیه\n"
+            f"  در انتظار تایید: {pending} نفر"
+        )
+
+    if action == "captcha_on":
+        from bot import cache as _c
+        from bot.helpers import db_set_captcha as _sc
+        _c.CAPTCHA_ENABLED.add(chat_id)
+        await _sc(chat_id, enabled=True)
+        timeout = _c.CAPTCHA_TIMEOUT.get(chat_id, 180)
+        return (
+            f"✅ کپچا روشن شد.\n\n"
+            f"اعضای جدید باید ظرف {timeout // 60} دقیقه دکمه‌ی تایید رو بزنن.\n"
+            f"برای تغییر مهلت: زمان کپچا [ثانیه]"
+        )
+
+    if action == "captcha_off":
+        from bot import cache as _c
+        from bot.helpers import db_set_captcha as _sc
+        _c.CAPTCHA_ENABLED.discard(chat_id)
+        await _sc(chat_id, enabled=False)
+        pending_keys = [(cid, uid) for (cid, uid) in list(_c.PENDING_CAPTCHA) if cid == chat_id]
+        for cid, uid in pending_keys:
+            pending = _c.PENDING_CAPTCHA.pop((cid, uid), None)
+            if pending:
+                pending["task"].cancel()
+                try:
+                    await bot.delete_message(cid, pending["message_id"])
+                except Exception:
+                    pass
+        return "❌ کپچا خاموش شد."
+
+    # ── ضد رید ──
+    if action == "antiraid_status":
+        from bot import cache as _c
+        enabled = chat_id in _c.ANTIRAID_ENABLED
+        return f"🚨 وضعیت ضد رید: {'✅ روشن' if enabled else '❌ خاموش'}"
+
+    if action == "antiraid_on":
+        from bot import cache as _c
+        from bot.helpers import db_set_antiraid as _sa
+        _c.ANTIRAID_ENABLED.add(chat_id)
+        await _sa(chat_id, True)
+        return (
+            "🚨 حالت ضد رید فعال شد.\n\n"
+            "هر عضو جدیدی بلافاصله اخراج می‌شه.\n"
+            "بعد از رفع خطر حتماً خاموشش کن."
+        )
+
+    if action == "antiraid_off":
+        from bot import cache as _c
+        from bot.helpers import db_set_antiraid as _sa
+        _c.ANTIRAID_ENABLED.discard(chat_id)
+        await _sa(chat_id, False)
+        return "✅ حالت ضد رید غیرفعال شد."
 
     # ── فیلتر کلمه ──
     if action == "filter_list":

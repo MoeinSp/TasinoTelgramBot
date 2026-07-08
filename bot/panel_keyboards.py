@@ -103,6 +103,10 @@ def panel_cat_settings() -> InlineKeyboardMarkup:
             B(text="🎉 خوشامدگویی",    callback_data="p:welcome"),
             B(text="🚫 آنتی فلود",     callback_data="p:antispam"),
         ],
+        [
+            B(text="🔐 کپچا",          callback_data="p:captcha"),
+            B(text="🚨 ضد رید",         callback_data="p:antiraid"),
+        ],
         [_back(label="🔙 منوی اصلی")],
     )
 
@@ -198,8 +202,11 @@ def panel_4_3() -> InlineKeyboardMarkup:
 
 def panel_4_4() -> InlineKeyboardMarkup:
     return _sub("cat_game",
-        [_act("🎨 تم فعلی تاس",  "dice_theme"),
-         _act("💹 کارمزد",       "fee_show")],
+        [_act("🎨 تم فعلی تاس",     "dice_theme"),
+         _act("🎮 وضعیت ایموجی",   "tg_emoji_status")],
+        [_act("✅ ایموجی روشن",    "tg_emoji_on"),
+         _act("❌ ایموجی خاموش",   "tg_emoji_off")],
+        [_act("💹 کارمزد",         "fee_show")],
     )
 
 def panel_5() -> InlineKeyboardMarkup:
@@ -270,6 +277,22 @@ def panel_antispam() -> InlineKeyboardMarkup:
     )
 
 
+def panel_captcha() -> InlineKeyboardMarkup:
+    return _sub("cat_settings",
+        [_act("📋 وضعیت کپچا",        "captcha_status")],
+        [_act("✅ روشن کردن",         "captcha_on"),
+         _act("❌ خاموش کردن",        "captcha_off")],
+    )
+
+
+def panel_antiraid() -> InlineKeyboardMarkup:
+    return _sub("cat_settings",
+        [_act("📋 وضعیت ضد رید",      "antiraid_status")],
+        [_act("✅ روشن کردن",         "antiraid_on"),
+         _act("❌ خاموش کردن",        "antiraid_off")],
+    )
+
+
 # ─── صفحات دسته‌بندی‌ها ──────────────────────────────────────────────────────
 
 _KB_MAP = {
@@ -290,6 +313,8 @@ _KB_MAP = {
     "8.1":  panel_8_1, "8.2": panel_8_2, "8.3": panel_8_3, "8.4": panel_8_4,
     "welcome":  panel_welcome,
     "antispam": panel_antispam,
+    "captcha":  panel_captcha,
+    "antiraid": panel_antiraid,
 }
 
 
@@ -320,7 +345,9 @@ _CAT_TEXTS = {
         "  <code>متن خوشامد [پیام]</code>\n"
         "  <code>گیف خوشامد</code> — ریپلای روی گیف\n"
         "  <code>حذف گیف خوشامد</code>\n\n"
-        "متغیر: <code>{name}</code> = نام عضو جدید"
+        "متغیرها:\n"
+        "  <code>{mention}</code> = منشن عضو جدید\n"
+        "  <code>{group}</code> = نام گروه"
     ),
     "antispam": (
         "🚫 <b>آنتی فلود</b>\n\n"
@@ -329,5 +356,22 @@ _CAT_TEXTS = {
         "  <code>فلود روشن / خاموش</code>\n"
         "  <code>حد فلود [تعداد] [ثانیه]</code>\n"
         "  مثال: <code>حد فلود 5 10</code>"
+    ),
+    "captcha": (
+        "🔐 <b>کپچا</b>\n\n"
+        "اعضای جدید باید دکمه‌ی «من ربات نیستم» رو بزنن تا بتونن پیام بدن.\n\n"
+        "دستورات متنی:\n"
+        "  <code>کپچا روشن / خاموش</code>\n"
+        "  <code>زمان کپچا [ثانیه]</code> — مثال: <code>زمان کپچا 180</code>\n"
+        "  <code>کپچا</code> — وضعیت\n\n"
+        "⚠️ ربات باید ادمین با دسترسی محدودسازی اعضا باشه."
+    ),
+    "antiraid": (
+        "🚨 <b>حالت ضد رید</b>\n\n"
+        "هر عضو جدیدی که وارد بشه بلافاصله اخراج می‌شه.\n"
+        "بعد از رفع خطر حتماً خاموشش کن.\n\n"
+        "دستورات متنی:\n"
+        "  <code>ضد رید روشن / خاموش</code>\n"
+        "  <code>ضد رید</code> — وضعیت"
     ),
 }
