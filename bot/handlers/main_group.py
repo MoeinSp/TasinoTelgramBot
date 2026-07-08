@@ -48,7 +48,7 @@ from bot.helpers import (
     db_set_telegram_emoji, telegram_emoji_on,
 )
 from bot.group_help import get_page, PAGE_MAIN
-from bot.panel_keyboards import get_panel, panel_main
+from bot.panel_keyboards import get_panel, panel_main, locks_panel_text, locks_panel_kb
 from bot.constants import (
     DEFAULT_WELCOME_TEXT, DEFAULT_WELCOME_GIF_FILE_ID, DEFAULT_WELCOME_PHOTO_PATH,
 )
@@ -1245,7 +1245,23 @@ async def cmd_dice_option_off(message: Message):
 
 # ─── قفل ها با نمایش اخطار ────────────────────────────────────────────────────
 
-@router.message(F.text.in_(["قفل ها", "وضعیت", "محدودیت"]))
+@router.message(F.text.in_(["قفل ها", "قفل‌ها", "وضعیت قفل", "پنل قفل"]))
+async def cmd_locks_inline_panel(message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not has_privilege(chat_id, user_id):
+        return await _reply(message, _NO_ACCESS)
+    locks = cache.GROUP_LOCKS.get(chat_id) or await db_get_locks(chat_id)
+    group_locked = chat_id in cache.GROUP_LOCK
+    await safe_send(
+        message.bot, chat_id,
+        locks_panel_text(locks, group_locked),
+        reply_markup=locks_panel_kb(locks, group_locked),
+        reply_to=message.message_id,
+    )
+
+
+@router.message(F.text.in_(["وضعیت", "محدودیت"]))
 async def cmd_lock_status_full(message: Message):
     chat_id = message.chat.id
     locks = cache.GROUP_LOCKS.get(chat_id) or await db_get_locks(chat_id)

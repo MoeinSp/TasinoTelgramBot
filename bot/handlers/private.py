@@ -14,21 +14,16 @@ router.message.filter(F.chat.type == "private")
 
 def _welcome_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [Btn(text="📋 پنل کامل", callback_data="p:0")],
         [
-            Btn(text="📚 راهنمای کامل",   callback_data="p:0"),
-            Btn(text="🎮 بازی‌ها",         callback_data="p:cat_game"),
+            Btn(text="🛡 امنیت", callback_data="p:locks"),
+            Btn(text="⚙️ تنظیمات", callback_data="p:settings"),
         ],
         [
-            Btn(text="🔐 قفل و مدیریت",   callback_data="p:cat_manage"),
-            Btn(text="💰 سیستم مالی",      callback_data="p:cat_finance"),
+            Btn(text="🎲 بازی", callback_data="p:game"),
+            Btn(text="💰 مالی", callback_data="p:finance"),
         ],
-        [
-            Btn(text="⚙️ تنظیمات گروه",   callback_data="p:7"),
-            Btn(text="👮 مدیریت اعضا",     callback_data="p:cat_manage"),
-        ],
-        [
-            Btn(text="💬 پشتیبانی",        url="https://t.me/Spayers"),
-        ],
+        [Btn(text="💬 پشتیبانی", url="https://t.me/Spayers")],
     ])
 
 

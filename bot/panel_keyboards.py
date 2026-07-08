@@ -1,397 +1,290 @@
 """
-کیبوردهای پنل — compact با expand
+کیبوردهای پنل — طراحی یکپارچه با دکمه‌های toggle زنده
 """
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton as B
 
+SEP = "━━━━━━━━━━━━━━━━━━━━"
 
-def _back(to="0", label="🔙 بازگشت") -> B:
+
+def _back(to: str = "0", label: str = "🔙 بازگشت") -> B:
     return B(text=label, callback_data=f"p:{to}")
+
 
 def _home() -> B:
     return B(text="🏠 خانه", callback_data="p:0")
 
-def _act(label: str, action: str) -> B:
+
+def _go(label: str, page: str) -> B:
+    return B(text=label, callback_data=f"p:{page}")
+
+
+def _cmd(label: str, action: str) -> B:
     return B(text=label, callback_data=f"cmd:{action}")
+
+
+def _toggle(label: str, key: str, on: bool) -> B:
+  icon = "🟢" if on else "⚫"
+  return B(text=f"{icon} {label}", callback_data=f"cmd:tgl_{key}")
+
 
 def _mk(*rows) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=list(rows))
 
 
-# ─── منوی اصلی (compact) ─────────────────────────────────────────────────────
+def _nav(*rows, parent: str = "0") -> InlineKeyboardMarkup:
+    r = list(rows)
+    r.append([_back(parent), _home()])
+    return InlineKeyboardMarkup(inline_keyboard=r)
+
+
+def panel_header(icon: str, title: str, subtitle: str = "") -> str:
+    lines = [f"{icon} <b>{title}</b>", SEP]
+    if subtitle:
+        lines.extend(["", subtitle, ""])
+    return "\n".join(lines)
+
+
+# ─── منوی اصلی ───────────────────────────────────────────────────────────────
 
 def panel_main() -> InlineKeyboardMarkup:
     return _mk(
-        [
-            B(text="🛠 مدیریت گروه",    callback_data="p:cat_manage"),
-            B(text="🎲 بازی و سرگرمی",  callback_data="p:cat_game"),
-        ],
-        [
-            B(text="💰 مالی",            callback_data="p:cat_finance"),
-            B(text="⚙️ تنظیمات",        callback_data="p:cat_settings"),
-        ],
-        [B(text="❌ بستن",               callback_data="p:close")],
+        [_go("🛡 امنیت و قفل", "locks"), _go("👥 مدیریت اعضا", "manage")],
+        [_go("🎲 بازی و سرگرمی", "game"), _go("⚙️ تنظیمات گروه", "settings")],
+        [_go("💰 مالی", "finance")],
+        [B(text="❌ بستن", callback_data="p:close")],
     )
 
 
-# ─── دسته: مدیریت گروه ───────────────────────────────────────────────────────
+# ─── پنل‌های زنده ────────────────────────────────────────────────────────────
 
-def panel_cat_manage() -> InlineKeyboardMarkup:
-    return _mk(
-        [
-            B(text="🔐 قفل‌ها",         callback_data="p:1"),
-            B(text="👮 ادمین‌ها",        callback_data="p:2.2"),
-            B(text="⭐ ویژه",            callback_data="p:2.3"),
-        ],
-        [
-            B(text="🚫 بن",             callback_data="p:2.4"),
-            B(text="🤫 سکوت",           callback_data="p:2.5"),
-            B(text="⚠️ اخطار",          callback_data="p:3"),
-        ],
-        [
-            B(text="🔤 فیلتر",          callback_data="p:5"),
-            B(text="👑 مالکیت",         callback_data="p:2.1"),
-            B(text="📣 تگ",             callback_data="p:2.6"),
-        ],
-        [_back(label="🔙 منوی اصلی")],
-    )
-
-
-# ─── دسته: بازی و سرگرمی ─────────────────────────────────────────────────────
-
-def panel_cat_game() -> InlineKeyboardMarkup:
-    return _mk(
-        [
-            B(text="🎲 تاس",            callback_data="p:4.1"),
-            B(text="🎮 سایر بازی‌ها",   callback_data="p:4.2"),
-            B(text="📊 آمار",           callback_data="p:4.3"),
-        ],
-        [
-            B(text="⚙️ تنظیمات بازی",  callback_data="p:4.4"),
-            B(text="🤖 سخنگو",          callback_data="p:6.1"),
-            B(text="📚 یادگیری",        callback_data="p:6.2"),
-        ],
-        [_back(label="🔙 منوی اصلی")],
-    )
-
-
-# ─── دسته: مالی ──────────────────────────────────────────────────────────────
-
-def panel_cat_finance() -> InlineKeyboardMarkup:
-    return _mk(
-        [
-            B(text="👛 موجودی",         callback_data="p:8.1"),
-            B(text="💳 کارت",           callback_data="p:8.2"),
-        ],
-        [
-            B(text="📑 گزارش/تسویه",   callback_data="p:8.3"),
-            B(text="💹 کارمزد",         callback_data="p:8.4"),
-        ],
-        [_back(label="🔙 منوی اصلی")],
-    )
-
-
-# ─── دسته: تنظیمات ───────────────────────────────────────────────────────────
-
-def panel_cat_settings() -> InlineKeyboardMarkup:
-    return _mk(
-        [
-            B(text="⚙️ تنظیمات گروه",  callback_data="p:7"),
-            B(text="🏷 لقب/مشخصات",    callback_data="p:2.7"),
-            B(text="🔍 وضعیت گروه",    callback_data="p:6.3"),
-        ],
-        [
-            B(text="🎉 خوشامدگویی",    callback_data="p:welcome"),
-            B(text="🚫 آنتی فلود",     callback_data="p:antispam"),
-        ],
-        [
-            B(text="🔐 کپچا",          callback_data="p:captcha"),
-            B(text="🚨 ضد رید",         callback_data="p:antiraid"),
-        ],
-        [_back(label="🔙 منوی اصلی")],
-    )
-
-
-# ─── صفحات فرعی با دکمه‌های اجرایی ──────────────────────────────────────────
-
-def _sub(parent: str, *action_rows) -> InlineKeyboardMarkup:
-    rows = list(action_rows)
-    rows.append([_back(parent), _home()])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def _lock_toggle_rows():
-    """دکمه‌های toggle همه قفل‌ها به ترتیب اولویت (۲ تا در هر ردیف)."""
+def locks_panel_text(locks: dict, group_locked: bool = False) -> str:
     from bot.helpers import LOCK_NAMES, LOCK_ORDER
-    rows = []
-    row = []
+    on = [LOCK_NAMES[k] for k in LOCK_ORDER if locks.get(k)]
+    off = [LOCK_NAMES[k] for k in LOCK_ORDER if not locks.get(k)]
+
+    lines = [
+        panel_header("🛡", "امنیت و قفل‌ها", "روی هر دکمه بزن تا وضعیت عوض بشه."),
+        f"🔐 قفل کل گروه: <b>{'روشن' if group_locked else 'خاموش'}</b>",
+        f"🔒 قفل‌های فعال: <b>{len(on)}</b>  ·  🔓 غیرفعال: <b>{len(off)}</b>",
+    ]
+    if on:
+        lines += ["", "✅ <b>روشن:</b>", " • " + " · ".join(on[:12])]
+        if len(on) > 12:
+            lines.append(f" • +{len(on) - 12} مورد دیگر")
+    return "\n".join(lines)
+
+
+def locks_panel_kb(locks: dict, group_locked: bool = False) -> InlineKeyboardMarkup:
+    from bot.helpers import LOCK_NAMES, LOCK_ORDER
+    rows, row = [], []
     for key in LOCK_ORDER:
         label = LOCK_NAMES.get(key)
         if not label:
             continue
-        row.append(_act(f"↔️ {label}", f"lock_toggle_{key}"))
+        icon = "🔒" if locks.get(key) else "🔓"
+        row.append(B(text=f"{icon} {label}", callback_data=f"cmd:lock_toggle_{key}"))
         if len(row) == 2:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
-    return rows
+    rows.append([_toggle("قفل کل گروه", "group_lock", group_locked)])
+    rows.append([_back("0"), _home()])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def panel_1() -> InlineKeyboardMarkup:
-    return _sub("cat_manage",
-        [_act("📋 وضعیت قفل‌ها", "locks_status")],
-        [B(text="🔒 قفل‌های جداگانه", callback_data="p:1.1"),
-         B(text="🔐 قفل کل گروه",    callback_data="p:1.2")],
-    )
+def settings_panel_text(s: dict) -> str:
+    def st(key: str) -> str:
+        return "🟢 روشن" if s.get(key) else "⚫ خاموش"
 
-def panel_1_1() -> InlineKeyboardMarkup:
-    return _sub("1",
-        [_act("✨ وضعیت زیبا", "locks_status_pretty")],
-        [_act("📋 وضعیت لیستی", "locks_status")],
-        *_lock_toggle_rows(),
-    )
+    night = s.get("night")
+    night_txt = f"🌙 {night[0]}:00–{night[1]}:00" if night else "⚫ خاموش"
+    return "\n".join([
+        panel_header("⚙️", "تنظیمات گروه", "هر دکمه وضعیت را نشان می‌دهد و با یک کلیک تغییر می‌کند."),
+        f"🤖 ربات: <b>{st('bot')}</b>",
+        f"🎉 خوشامد: <b>{st('welcome')}</b>",
+        f"🔐 کپچا: <b>{st('captcha')}</b>",
+        f"🚫 آنتی‌فلود: <b>{st('flood')}</b>",
+        f"🚨 ضد رید: <b>{st('antiraid')}</b>",
+        f"🌙 حالت شب: <b>{night_txt}</b>",
+    ])
 
-def panel_1_2() -> InlineKeyboardMarkup:
-    return _sub("1",
-        [_act("🔐 قفل کردن گروه", "group_lock"),
-         _act("🔓 باز کردن",      "group_unlock")],
-    )
 
-def panel_2_1() -> InlineKeyboardMarkup:
-    return _sub("cat_manage",
-        [_act("👑 مالک فعلی", "owner_info")],
-    )
-
-def panel_2_2() -> InlineKeyboardMarkup:
-    return _sub("cat_manage",
-        [_act("📋 لیست ادمین‌ها",       "admin_list")],
-        [_act("🔄 همگام‌سازی ادمین‌ها", "sync_admins")],
-    )
-
-def panel_2_3() -> InlineKeyboardMarkup:
-    return _sub("cat_manage",
-        [_act("📋 لیست ویژه",          "vip_list"),
-         _act("🗑 پاکسازی",            "vip_clear")],
-    )
-
-def panel_2_4() -> InlineKeyboardMarkup:
-    return _sub("cat_manage",
-        [_act("📋 لیست بن",            "ban_list"),
-         _act("🗑 پاکسازی",            "ban_clear")],
-    )
-
-def panel_2_5() -> InlineKeyboardMarkup:
-    return _sub("cat_manage",
-        [_act("📋 لیست سکوت",          "mute_list"),
-         _act("🗑 پاکسازی",            "mute_clear")],
-    )
-
-def panel_2_6() -> InlineKeyboardMarkup:
-    return _sub("cat_manage",
-        [_act("📣 تگ همه اعضا", "tag_all")],
-    )
-
-def panel_2_7() -> InlineKeyboardMarkup:
-    return _sub("cat_settings",
-        [_act("🏷 لقب من در گروه", "my_alias")],
-    )
-
-def panel_3() -> InlineKeyboardMarkup:
-    return _sub("cat_manage",
-        [_act("📊 اخطارهای من", "my_warnings")],
-    )
-
-def panel_4_1() -> InlineKeyboardMarkup:
-    return _sub("cat_game",
-        [_act("🎲 پرتاب تاس",      "dice_hint"),
-         _act("📊 آمار تاس",       "dice_stats")],
-    )
-
-def panel_4_2() -> InlineKeyboardMarkup:
-    return _sub("cat_game",
-        [_act("🏀 بسکتبال", "basketball"), _act("⚽ پنالتی",  "penalty"),  _act("🎳 بولینگ", "bowling")],
-        [_act("🎯 دارت",    "dart"),        _act("🎰 اسلات",   "slots"),    _act("🪙 سکه",    "coin")],
-        [_act("🍀 شانس",    "luck"),        _act("✂️ سنگ‌کاغذ‌قیچی", "rps")],
-    )
-
-def panel_4_3() -> InlineKeyboardMarkup:
-    return _sub("cat_game",
-        [_act("📊 آمار تاس",        "dice_stats")],
-        [_act("🏆 برترین کاربران",  "top_users")],
-    )
-
-def panel_4_4() -> InlineKeyboardMarkup:
-    return _sub("cat_game",
-        [_act("🎨 تم فعلی تاس",     "dice_theme"),
-         _act("🎮 وضعیت ایموجی",   "tg_emoji_status")],
-        [_act("✅ ایموجی روشن",    "tg_emoji_on"),
-         _act("❌ ایموجی خاموش",   "tg_emoji_off")],
-        [_act("💹 کارمزد",         "fee_show")],
-    )
-
-def panel_5() -> InlineKeyboardMarkup:
-    return _sub("cat_manage",
-        [_act("📋 لیست کلمات فیلتر", "filter_list")],
-    )
-
-def panel_6_1() -> InlineKeyboardMarkup:
-    return _sub("cat_game",
-        [_act("🔊 روشن",  "speaker_on"),
-         _act("🔇 خاموش", "speaker_off")],
-    )
-
-def panel_6_2() -> InlineKeyboardMarkup:
-    return _sub("cat_game",
-        [_act("📋 لیست یادگیری", "learn_list")],
-    )
-
-def panel_6_3() -> InlineKeyboardMarkup:
-    return _sub("cat_settings",
-        [_act("📊 وضعیت گروه", "group_status")],
-    )
-
-def panel_7() -> InlineKeyboardMarkup:
-    return _sub("cat_settings",
-        [_act("📊 وضعیت گروه",       "group_status")],
-        [_act("✅ روشن کردن ربات",   "bot_on"),
-         _act("💤 خاموش کردن ربات", "bot_off")],
-    )
-
-def panel_8_1() -> InlineKeyboardMarkup:
-    return _sub("cat_finance",
-        [_act("👛 موجودی من",       "my_balance"),
-         _act("📊 حساب همه اعضا",  "accounts")],
-    )
-
-def panel_8_2() -> InlineKeyboardMarkup:
-    return _sub("cat_finance",
-        [_act("💳 کارت مالک", "card_show")],
-    )
-
-def panel_8_3() -> InlineKeyboardMarkup:
-    return _sub("cat_finance",
-        [_act("📑 گزارش تراکنش‌ها", "report"),
-         _act("🤝 تسویه من",        "settle_me")],
-    )
-
-def panel_8_4() -> InlineKeyboardMarkup:
-    return _sub("cat_finance",
-        [_act("💹 کارمزد فعلی", "fee_show")],
+def settings_panel_kb(s: dict) -> InlineKeyboardMarkup:
+    return _nav(
+        [_toggle("ربات", "bot", s["bot"]), _toggle("خوشامد", "welcome", s["welcome"])],
+        [_toggle("کپچا", "captcha", s["captcha"]), _toggle("آنتی‌فلود", "flood", s["flood"])],
+        [_toggle("ضد رید", "antiraid", s["antiraid"])],
+        [_cmd("📊 جزئیات کامل", "group_status")],
+        parent="0",
     )
 
 
-def panel_welcome() -> InlineKeyboardMarkup:
-    return _sub("cat_settings",
-        [_act("📋 وضعیت خوشامد",     "welcome_status")],
-        [_act("✅ روشن کردن",         "welcome_on"),
-         _act("❌ خاموش کردن",        "welcome_off")],
-        [_act("🗑 حذف گیف",           "welcome_gif_del")],
+def game_panel_text(s: dict) -> str:
+    theme = s.get("theme", 1)
+    fee = s.get("fee", 10)
+    return "\n".join([
+        panel_header("🎲", "بازی و سرگرمی"),
+        f"🔊 سخنگو: <b>{'🟢 روشن' if s.get('speaker') else '⚫ خاموش'}</b>",
+        f"🎮 ایموجی تلگرام: <b>{'🟢 روشن' if s.get('tg_emoji') else '⚫ خاموش'}</b>",
+        f"🎨 تم تاس: <b>{theme}</b>",
+        f"💹 حق واسطه: <b>{fee}٪</b>",
+        "",
+        "<i>💡 برای بازی بنویس: تاس · بسکتبال · پنالتی</i>",
+    ])
+
+
+def game_panel_kb(s: dict) -> InlineKeyboardMarkup:
+    return _nav(
+        [_toggle("سخنگو", "speaker", s["speaker"]), _toggle("ایموجی تلگرام", "tg_emoji", s["tg_emoji"])],
+        [_go("🎯 بازی‌ها", "games"), _go("📊 آمار", "stats")],
+        [_cmd("🎨 تم تاس", "dice_theme"), _cmd("💹 حق واسطه", "fee_show")],
+        parent="0",
     )
 
 
-def panel_antispam() -> InlineKeyboardMarkup:
-    return _sub("cat_settings",
-        [_act("📋 وضعیت فلود",        "flood_status")],
-        [_act("✅ روشن کردن",         "flood_on"),
-         _act("❌ خاموش کردن",        "flood_off")],
+def manage_panel_text() -> str:
+    return panel_header(
+        "👥", "مدیریت اعضا",
+        "برای افزودن/حذف، روی پیام کاربر ریپلای کن و دستور بزن.",
     )
 
 
-def panel_captcha() -> InlineKeyboardMarkup:
-    return _sub("cat_settings",
-        [_act("📋 وضعیت کپچا",        "captcha_status")],
-        [_act("✅ روشن کردن",         "captcha_on"),
-         _act("❌ خاموش کردن",        "captcha_off")],
+def manage_panel_kb() -> InlineKeyboardMarkup:
+    return _nav(
+        [_go("👮 ادمین‌ها", "admins"), _go("⭐ اعضای ویژه", "vip")],
+        [_go("🚫 بن", "ban"), _go("🤫 سکوت", "mute")],
+        [_cmd("📣 تگ همه", "tag_all"), _cmd("⚠️ اخطار من", "my_warnings")],
+        [_cmd("👑 مالک گروه", "owner_info"), _cmd("🔤 فیلتر کلمات", "filter_list")],
+        parent="0",
     )
 
 
-def panel_antiraid() -> InlineKeyboardMarkup:
-    return _sub("cat_settings",
-        [_act("📋 وضعیت ضد رید",      "antiraid_status")],
-        [_act("✅ روشن کردن",         "antiraid_on"),
-         _act("❌ خاموش کردن",        "antiraid_off")],
+def finance_panel_text() -> str:
+    return panel_header("💰", "مالی", "مدیریت موجودی، کارت و گزارش‌ها.")
+
+
+def finance_panel_kb() -> InlineKeyboardMarkup:
+    return _nav(
+        [_cmd("👛 موجودی من", "my_balance"), _cmd("📊 حساب همه", "accounts")],
+        [_cmd("💳 کارت مالک", "card_show"), _cmd("💹 حق واسطه", "fee_show")],
+        [_cmd("📑 گزارش", "report"), _cmd("🤝 تسویه", "settle_me")],
+        parent="0",
     )
 
 
-# ─── صفحات دسته‌بندی‌ها ──────────────────────────────────────────────────────
+# ─── زیرصفحات (لیست و اطلاعات) ─────────────────────────────────────────────
 
-_KB_MAP = {
-    "":           panel_main,
-    "0":          panel_main,
-    "cat_manage": panel_cat_manage,
-    "cat_game":   panel_cat_game,
-    "cat_finance":  panel_cat_finance,
-    "cat_settings": panel_cat_settings,
-    "1":    panel_1,   "1.1": panel_1_1, "1.2": panel_1_2,
-    "2.1":  panel_2_1, "2.2": panel_2_2, "2.3": panel_2_3,
-    "2.4":  panel_2_4, "2.5": panel_2_5, "2.6": panel_2_6, "2.7": panel_2_7,
-    "3":    panel_3,
-    "4.1":  panel_4_1, "4.2": panel_4_2, "4.3": panel_4_3, "4.4": panel_4_4,
-    "5":    panel_5,
-    "6.1":  panel_6_1, "6.2": panel_6_2, "6.3": panel_6_3,
-    "7":    panel_7,
-    "8.1":  panel_8_1, "8.2": panel_8_2, "8.3": panel_8_3, "8.4": panel_8_4,
-    "welcome":  panel_welcome,
-    "antispam": panel_antispam,
-    "captcha":  panel_captcha,
-    "antiraid": panel_antiraid,
+def panel_admins() -> InlineKeyboardMarkup:
+    return _nav(
+        [_cmd("📋 لیست ادمین‌ها", "admin_list"), _cmd("🔄 همگام‌سازی", "sync_admins")],
+        parent="manage",
+    )
+
+
+def panel_vip() -> InlineKeyboardMarkup:
+    return _nav(
+        [_cmd("📋 لیست ویژه", "vip_list"), _cmd("🗑 پاکسازی", "vip_clear")],
+        parent="manage",
+    )
+
+
+def panel_ban() -> InlineKeyboardMarkup:
+    return _nav(
+        [_cmd("📋 لیست بن", "ban_list")],
+        parent="manage",
+    )
+
+
+def panel_mute() -> InlineKeyboardMarkup:
+    return _nav(
+        [_cmd("📋 لیست سکوت", "mute_list")],
+        parent="manage",
+    )
+
+
+def panel_games() -> InlineKeyboardMarkup:
+    return _nav(
+        [_cmd("🏀 بسکتبال", "basketball"), _cmd("⚽ پنالتی", "penalty"), _cmd("🎳 بولینگ", "bowling")],
+        [_cmd("🎯 دارت", "dart"), _cmd("🎰 اسلات", "slots"), _cmd("🪙 سکه", "coin")],
+        [_cmd("🍀 شانس", "luck"), _cmd("✂️ سنگ‌کاغذ‌قیچی", "rps")],
+        parent="game",
+    )
+
+
+def panel_stats() -> InlineKeyboardMarkup:
+    return _nav(
+        [_cmd("📊 آمار تاس", "dice_stats"), _cmd("🏆 برترین‌ها", "top_users")],
+        parent="game",
+    )
+
+
+# ─── نگاشت صفحات ─────────────────────────────────────────────────────────────
+
+_LIVE_PAGES = {"locks", "1", "1.1", "settings", "game", "manage", "finance"}
+
+_STATIC_KB = {
+    "": panel_main, "0": panel_main,
+    "locks": lambda: locks_panel_kb({}),
+    "1": lambda: locks_panel_kb({}), "1.1": lambda: locks_panel_kb({}),
+    "settings": lambda: settings_panel_kb({}),
+    "game": lambda: game_panel_kb({}),
+    "manage": manage_panel_kb,
+    "finance": finance_panel_kb,
+    "admins": panel_admins, "vip": panel_vip,
+    "ban": panel_ban, "mute": panel_mute,
+    "games": panel_games, "stats": panel_stats,
+    # سازگاری با کدهای قدیمی
+    "cat_manage": manage_panel_kb, "cat_game": lambda: game_panel_kb({}),
+    "cat_finance": finance_panel_kb, "cat_settings": lambda: settings_panel_kb({}),
+    "2.1": panel_admins, "2.2": panel_admins, "2.3": panel_vip,
+    "2.4": panel_ban, "2.5": panel_mute, "2.6": manage_panel_kb,
+    "2.7": manage_panel_kb, "3": manage_panel_kb,
+    "4.1": panel_stats, "4.2": panel_games, "4.3": panel_stats, "4.4": lambda: game_panel_kb({}),
+    "5": manage_panel_kb, "6.1": lambda: game_panel_kb({}),
+    "6.2": panel_games, "6.3": lambda: settings_panel_kb({}),
+    "7": lambda: settings_panel_kb({}),
+    "8.1": finance_panel_kb, "8.2": finance_panel_kb,
+    "8.3": finance_panel_kb, "8.4": finance_panel_kb,
+    "welcome": lambda: settings_panel_kb({}),
+    "antispam": lambda: settings_panel_kb({}),
+    "captcha": lambda: settings_panel_kb({}),
+    "antiraid": lambda: settings_panel_kb({}),
+}
+
+_CAT_TEXTS = {
+    "manage": manage_panel_text(),
+    "finance": finance_panel_text(),
+    "admins": "👮 <b>ادمین‌ها</b>\n\nبرای افزودن: ریپلای + <code>ادمین</code>",
+    "vip": "⭐ <b>اعضای ویژه</b>\n\nبرای افزودن: ریپلای + <code>ویژه</code>",
+    "ban": "🚫 <b>بن</b>\n\nبرای بن: ریپلای + <code>بن</code>",
+    "mute": "🤫 <b>سکوت</b>\n\nبرای سکوت: ریپلای + <code>سکوت</code>",
+    "games": "🎮 <b>بازی‌ها</b>\n\nروی هر بازی بزن تا دستورش رو ببینی.",
+    "stats": "📊 <b>آمار</b>",
+    "cat_manage": manage_panel_text(),
+    "cat_game": panel_header("🎲", "بازی و سرگرمی"),
+    "cat_finance": finance_panel_text(),
+    "cat_settings": panel_header("⚙️", "تنظیمات گروه"),
 }
 
 
-def get_panel(code: str):
+def is_live_page(code: str) -> bool:
+    return code in _LIVE_PAGES
+
+
+def get_static_panel(code: str):
     from bot.group_help import PAGES, ALIASES, _norm
     code = _norm(code).strip()
     if code not in PAGES and code in ALIASES:
         code = ALIASES[code]
-    # صفحات دسته‌بندی متن ندارن — از PAGES_EXTRA می‌خونیم
-    page = PAGES.get(code) or _CAT_TEXTS.get(code)
-    if page is None:
+    text = PAGES.get(code) or _CAT_TEXTS.get(code)
+    if text is None:
         return None, None
-    kb_fn = _KB_MAP.get(code, panel_main)
-    return page, kb_fn()
+    kb_fn = _STATIC_KB.get(code, panel_main)
+    kb = kb_fn() if callable(kb_fn) else kb_fn
+    return text, kb
 
 
-# متن صفحات دسته‌بندی (جداگانه از group_help)
-_CAT_TEXTS = {
-    "cat_manage":   "🛠 <b>مدیریت گروه</b>\n\nبخش مورد نظر رو انتخاب کن:",
-    "cat_game":     "🎲 <b>بازی و سرگرمی</b>\n\nبخش مورد نظر رو انتخاب کن:",
-    "cat_finance":  "💰 <b>مالی و تراکنش</b>\n\nبخش مورد نظر رو انتخاب کن:",
-    "cat_settings": "⚙️ <b>تنظیمات</b>\n\nبخش مورد نظر رو انتخاب کن:",
-    "welcome":  (
-        "🎉 <b>خوشامدگویی</b>\n\n"
-        "وقتی عضو جدیدی وارد گروه می‌شه، ربات پیام خوشامد می‌فرسته.\n\n"
-        "دستورات متنی:\n"
-        "  <code>خوشامد روشن / خاموش</code>\n"
-        "  <code>متن خوشامد [پیام]</code>\n"
-        "  <code>گیف خوشامد</code> — ریپلای روی گیف\n"
-        "  <code>حذف گیف خوشامد</code>\n\n"
-        "متغیرها:\n"
-        "  <code>{mention}</code> = منشن عضو جدید\n"
-        "  <code>{group}</code> = نام گروه"
-    ),
-    "antispam": (
-        "🚫 <b>آنتی فلود</b>\n\n"
-        "اگه کاربری بیش از حد مجاز پیام بفرسته، ۵ دقیقه سکوت می‌شه.\n\n"
-        "دستورات متنی:\n"
-        "  <code>فلود روشن / خاموش</code>\n"
-        "  <code>حد فلود [تعداد] [ثانیه]</code>\n"
-        "  مثال: <code>حد فلود 5 10</code>"
-    ),
-    "captcha": (
-        "🔐 <b>کپچا</b>\n\n"
-        "اعضای جدید باید دکمه‌ی «من ربات نیستم» رو بزنن تا بتونن پیام بدن.\n\n"
-        "دستورات متنی:\n"
-        "  <code>کپچا روشن / خاموش</code>\n"
-        "  <code>زمان کپچا [ثانیه]</code> — مثال: <code>زمان کپچا 180</code>\n"
-        "  <code>کپچا</code> — وضعیت\n\n"
-        "⚠️ ربات باید ادمین با دسترسی محدودسازی اعضا باشه."
-    ),
-    "antiraid": (
-        "🚨 <b>حالت ضد رید</b>\n\n"
-        "هر عضو جدیدی که وارد بشه بلافاصله اخراج می‌شه.\n"
-        "بعد از رفع خطر حتماً خاموشش کن.\n\n"
-        "دستورات متنی:\n"
-        "  <code>ضد رید روشن / خاموش</code>\n"
-        "  <code>ضد رید</code> — وضعیت"
-    ),
-}
+def get_panel(code: str):
+    """سازگاری با کد قدیمی — پنل‌های زنده در هندلر رندر می‌شوند."""
+    return get_static_panel(code)
