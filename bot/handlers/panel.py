@@ -373,7 +373,7 @@ async def _execute(action: str, chat_id: int, user_id: int, bot: Bot) -> str:
         db_get_learned_responses, db_get_word_filters,
         db_get_top_users, db_get_member, db_get_alias,
         db_get_group_fee, db_get_group_theme, db_set_telegram_emoji,
-        sync_telegram_roles, sync_bot_admins_from_telegram,
+        sync_telegram_roles, sync_bot_admins_from_telegram, user_mention_id,
     )
 
     if action == "admin_list":
@@ -396,10 +396,11 @@ async def _execute(action: str, chat_id: int, user_id: int, bot: Bot) -> str:
             return f"❌ خطا: {result.get('error')}"
         owner_id = result.get("creator_id")
         if not owner_id:
-            return "👑 creator گروه یافت نشد."
+            return "👑 مالک گروه یافت نشد."
+        owner_mention = await user_mention_id(owner_id, bot, chat_id)
         return (
-            f"👑 مالک گروه (creator تلگرام):\n"
-            f"<a href='tg://user?id={owner_id}'>{owner_id}</a>\n\n"
+            "👑 مالک گروه:\n"
+            f"{owner_mention}\n\n"
             f"انتقال: از تنظیمات تلگرام"
         )
 

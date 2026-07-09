@@ -158,7 +158,7 @@ async def verify_bot_channel_access(bot: Bot, channel_id: int) -> tuple[bool, st
         return False, f"دسترسی به کانال ممکن نیست: {e}"
 
 
-async def is_user_channel_member(bot: Bot, user_id: int) -> bool:
+async def is_user_channel_member(bot: Bot, user_id: int, bypass_cache: bool = False) -> bool:
     if not is_forced_join_active():
         return True
     if is_creator(user_id):
@@ -169,7 +169,7 @@ async def is_user_channel_member(bot: Bot, user_id: int) -> bool:
     key = (int(channel_id), int(user_id))
     now = time.monotonic()
     cached = cache.FORCED_JOIN_MEMBER_CHECK.get(key)
-    if cached and cached[1] > now:
+    if (not bypass_cache) and cached and cached[1] > now:
         return cached[0]
     try:
         member = await bot.get_chat_member(channel_id, user_id)
@@ -200,7 +200,7 @@ def join_required_text() -> str:
     cfg = cache.FORCED_JOIN
     title = cfg.get("channel_title") or "کانال رسمی تاسینو"
     username = cfg.get("channel_username") or ""
-    channel_line = f"@{username.lstrip('@')}" if username else f"<code>{cfg.get('channel_id')}</code>"
+    channel_line = f"@{username.lstrip('@')}" if username else "کانال اصلی ربات"
     return (
         "🔒 <b>دسترسی به ربات نیازمند عضویت است</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -233,7 +233,6 @@ def creator_status_text() -> str:
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         f"📣 کانال: <b>{cfg.get('channel_title') or '—'}</b>\n"
         f"🔗 {uname}\n"
-        f"🆔 <code>{cfg.get('channel_id')}</code>\n"
         f"⚙️ وضعیت: {status}\n\n"
         "<b>دستورات:</b>\n"
         "• <code>جوین اجباری روشن</code>\n"

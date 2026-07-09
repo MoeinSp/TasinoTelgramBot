@@ -60,7 +60,6 @@ def _creator_panel_text(name: str) -> str:
         "به <b>پنل سازنده تاسینو</b> خوش آمدید.\n"
         "از اینجا می‌توانید جوین اجباری، کش و تنظیمات کلیدی ربات را سریع مدیریت کنید.\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"🆔 Creator: <code>{CREATOR_USER_ID}</code>\n"
         f"⚙️ Forced Join: {'🟢 فعال' if is_forced_join_active() else '⚫ غیرفعال'}"
     )
 
@@ -110,7 +109,7 @@ async def msg_start_alias(message: Message, bot: Bot):
 
 @router.callback_query(F.data == "join:recheck")
 async def cb_join_recheck(call: CallbackQuery, bot: Bot):
-    if await is_user_channel_member(bot, call.from_user.id):
+    if await is_user_channel_member(bot, call.from_user.id, bypass_cache=True):
         await call.answer("✅ عضویت شما تأیید شد!", show_alert=True)
         try:
             await call.message.edit_text(
@@ -268,7 +267,7 @@ async def _setup_channel(bot: Bot, channel_id: int) -> tuple[bool, str]:
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         f"📣 <b>{chat.title}</b>\n"
         f"🔗 {uname}\n"
-        f"🆔 <code>{channel_id}</code>\n\n"
+        "\n"
         "🟢 جوین اجباری فعال شد.\n"
         "کاربران بدون عضویت در پیوی خدمات دریافت نمی‌کنند."
     )

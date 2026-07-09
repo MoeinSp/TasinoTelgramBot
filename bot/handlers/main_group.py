@@ -944,12 +944,26 @@ async def cmd_tag(message: Message, bot: Bot):
     top = await db_get_top_users(chat_id, 50)
     if not top:
         return await _reply(message, "📭 هنوز عضوی ثبت نشده.")
-    mentions = " ".join(
-        f'<a href="tg://user?id={u["telegram_user_id"]}">‏</a>'
-        for u in top
-    )
+    # منشن مخفی در بعضی کلاینت‌ها درست عمل نمی‌کند؛
+    # پس منشن‌ها را با نام نمایشی ارسال می‌کنیم.
+    mention_items = []
+    for u in top:
+        uid = u["telegram_user_id"]
+        mention_items.append(await _mention(uid, bot, chat_id))
+
+    # برای خوانایی و کاهش ریسک محدودیت طول پیام
+    mentions = []
+    line = []
+    for i, m in enumerate(mention_items, 1):
+        line.append(m)
+        if i % 5 == 0:
+            mentions.append(" | ".join(line))
+            line = []
+    if line:
+        mentions.append(" | ".join(line))
+
     header = custom_text or "📢 اطلاعیه"
-    await safe_send(bot, chat_id, f"{header}\n{mentions}")
+    await safe_send(bot, chat_id, f"{header}\n\n" + "\n".join(mentions))
 
 
 # ─── لینک ────────────────────────────────────────────────────────────────────
@@ -1394,7 +1408,6 @@ async def cmd_owner_info(message: Message, bot: Bot):
         "👑 مالک گروه\n"
         "━━━━━━━━━━━━━━━━\n\n"
         f"• {mention}\n"
-        f"📌 منبع: creator تلگرام\n"
         f"👥 ادمین تلگرام: {tg_count} نفر\n\n"
         "━━━━━━━━━━━━━━━━\n"
         "انتقال مالک: از تنظیمات تلگرام\n"
@@ -2937,6 +2950,44 @@ async def cmd_report_to_admins(message: Message, bot: Bot):
 
 
 # ─── پاکسازی پیام‌ها (Purge) ──────────────────────────────────────────────────
+
+@router.message(F.text.regexp(r"^پاکسازی\s+(\d+)$"))
+async def cmd_purge_last_n(message: Message, bot: Bot):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return
+
+    try:
+        count = int(message.text.split()[1])
+    except Exception:
+        return await _reply(message, "❌ فرمت نادرست است. مثال: <code>پاکسازی 100</code>")
+
+    if count < 1:
+        return await _reply(message, "❌ عدد باید حداقل ۱ باشد.")
+    if count > 300:
+        return await _reply(message, "❌ حداکثر در هر بار ۳۰۰ پیام قابل پاکسازی است.")
+
+    # فرمان پاکسازی هم جزو حذف‌شده‌ها حساب می‌شود.
+    start_id = max(1, message.message_id - count + 1)
+    end_id = message.message_id
+
+    deleted = 0
+    for mid in range(end_id, start_id - 1, -1):
+        try:
+            await bot.delete_message(chat_id, mid)
+            deleted += 1
+        except Exception:
+            pass
+
+    status_msg = await bot.send_message(chat_id, f"🧹 {deleted} پیام از آخرین پیام‌ها پاکسازی شد.")
+    await log_action(bot, chat_id, f"🧹 پاکسازی عددی: {deleted} پیام توسط ادمین انجام شد")
+    await asyncio.sleep(3)
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+
 
 @router.message(F.text.in_(["پاکسازی", "پاکسازی پیام", "پاکسازی پیام‌ها"]))
 async def cmd_purge(message: Message, bot: Bot):
