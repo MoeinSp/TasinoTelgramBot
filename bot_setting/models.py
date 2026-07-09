@@ -71,3 +71,25 @@ class JoinMessage(models.Model):
     def save(self, *args, **kwargs):
         super().save(*args, **kwargs)
         cache.delete('join_active_message')
+
+
+class ForcedJoinConfig(models.Model):
+    """تنظیم جوین اجباری کانال اصلی — یک رکورد (pk=1)."""
+    enabled = models.BooleanField(default=False, verbose_name="فعال")
+    channel_id = models.BigIntegerField(null=True, blank=True, verbose_name="شناسه کانال")
+    channel_title = models.CharField(max_length=200, blank=True, default="", verbose_name="نام کانال")
+    channel_username = models.CharField(max_length=100, blank=True, default="", verbose_name="یوزرنیم")
+    invite_link = models.CharField(max_length=512, blank=True, default="", verbose_name="لینک دعوت")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "جوین اجباری کانال"
+        verbose_name_plural = "جوین اجباری کانال"
+
+    def __str__(self):
+        return self.channel_title or str(self.channel_id or "—")
+
+    @classmethod
+    def get_singleton(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj

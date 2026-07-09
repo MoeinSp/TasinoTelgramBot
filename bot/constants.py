@@ -26,3 +26,6 @@ DEFAULT_WELCOME_GIF_FILE_ID = ""
 # عکس پیش‌فرض خوشامدگویی (فایل محلی)
 from pathlib import Path
 DEFAULT_WELCOME_PHOTO_PATH = Path(__file__).resolve().parent / "assets" / "welcome_dice.png"
+
+# سازنده ربات — دسترسی تنظیم جوین اجباری و دستورات ویژه
+CREATOR_USER_ID = 8810788620

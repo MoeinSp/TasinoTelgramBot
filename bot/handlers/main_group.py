@@ -55,7 +55,7 @@ from bot.finance import (
     clear_all_wallets,
 )
 from bot.group_help import get_page, PAGE_MAIN
-from bot.panel_keyboards import get_panel, panel_main, locks_panel_text, locks_panel_kb
+from bot.panel_keyboards import get_panel, panel_main, locks_panel_text, locks_panel_kb, ALL_TOGGLEABLE_CMDS
 from bot.constants import (
     DEFAULT_WELCOME_TEXT, DEFAULT_WELCOME_GIF_FILE_ID, DEFAULT_WELCOME_PHOTO_PATH,
 )
@@ -88,11 +88,7 @@ CREATOR_USER_ID = 8810788620
 def _is_creator(user_id: int) -> bool:
     return user_id == CREATOR_USER_ID
 
-# دستورات سرگرمی/بازی
-ALL_TOGGLEABLE_CMDS = [
-    "جوک", "فال", "دانستنی", "فکت", "سخن", "معما", "دو راهی", "چالش", "شخصیت",
-    "تاس", "بسکتبال", "پنالتی", "بولینگ", "سنگ کاغذ قیچی", "دارت", "شانس", "سکه", "اسلات", "بازی",
-]
+# دستورات سرگرمی/بازی — لیست کامل در panel_keyboards.ALL_TOGGLEABLE_CMDS
 
 # ─── helpers داخلی ───────────────────────────────────────────────────────────
 
@@ -148,8 +144,7 @@ async def _cmd_sync_roles(message: Message, bot: Bot):
         f"👑 مالک (creator): {owner_mention}\n"
         f"👥 ادمین‌های تلگرام: {result.get('tg_admin_count', 0)} نفر\n"
         f"🛡 ادمین‌های ربات ثبت‌شده: {admin_count} نفر"
-        f"{changed}\n\n"
-        f"📌 مالک ربات = creator تلگرام (مدل Rose)"
+        f"{changed}"
     )
     return await _reply(message, text)
 
@@ -1046,8 +1041,8 @@ async def cmd_creator_make_me_owner(message: Message, bot: Bot):
         return
     return await _reply(
         message,
-        "ℹ️ در مدل Rose، مالک ربات همیشه creator تلگرام است.\n"
-        "برای تغییر مالک از تنظیمات تلگرام استفاده کنید، سپس «همگام‌سازی» بزنید.",
+        "ℹ️ مالک ربات همان creator گروه در تلگرام است.\n"
+        "برای تغییر از تنظیمات تلگرام استفاده کنید، سپس «همگام‌سازی» بزنید.",
     )
 
 
@@ -2111,7 +2106,7 @@ async def cmd_start_game(message: Message, bot: Bot):
     user_id = message.from_user.id
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
         return await _reply(message, "شما دسترسی مجاز را ندارید")
-    parts = message.text.split()
+    parts = normalize_numbers(message.text).split()
     bet_mode = BET_MODE_FIXED
     if parts and parts[-1].lower() in _START_MODE_WORDS:
         bet_mode = _START_MODE_WORDS[parts[-1].lower()]
@@ -2120,12 +2115,12 @@ async def cmd_start_game(message: Message, bot: Bot):
         return await _reply(message, (
             "❌ فرمت صحیح:\n"
             "• شروع [تعداد] → بازی رایگان\n"
-            "• شروع [تعداد] [مبلغ] → ورودی ثابت (پیش‌فرض فیکس)\n"
+            "• شروع [تعداد] [مبلغ] → ورودی ثابت (فیکس)\n"
             "• شروع [تعداد] [مبلغ] اضافه → ورودی = شرط + حق واسطه\n\n"
             "مثال‌ها:\n"
             "  شروع 2\n"
-            "  شروع 2 50\n"
-            "  شروع 2 50 اضافه"
+            "  شروع 2 50        → ورودی 50، برد = جمع − حق واسطه\n"
+            "  شروع 2 50 اضافه  → ورودی 55، برد = 2×50"
         ))
     try:
         total_players = int(parts[1])
@@ -2174,27 +2169,24 @@ async def cmd_start_game(message: Message, bot: Bot):
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"👥 ظرفیت: {total_players} نفر\n"
             f"📌 نوع: {mode_label}\n\n"
-            f"💳 هزینه ورودی هر نفر: {_entry:,} واحد"
+            f"💳 ورودی هر نفر: {_entry:,} واحد"
         )
-        if bet_mode == BET_MODE_FIXED and fee_percent > 0:
-            msg += (
-                f"\n   ├ شرط: {bet_amount:,} واحد"
-                f"\n   └ حق واسطه ({fee_percent}٪): {_fee_per:,} واحد (از جایزه)"
-            )
-        elif fee_percent > 0:
-            msg += (
-                f"\n   ├ شرط: {bet_amount:,} واحد"
-                f"\n   └ حق واسطه ({fee_percent}٪): {_fee_per:,} واحد"
-            )
-        if bet_mode == BET_MODE_FIXED and fee_percent > 0:
-            msg += f"\n\n🏆 مبلغ برد: {_prize:,} واحد  ({_gross:,} − {_total_fee:,} حق واسطه)\n"
+        if bet_mode == BET_MODE_FIXED:
+            if fee_percent > 0:
+                msg += (
+                    f"\n💰 جمع ورودی‌ها: {_gross:,} واحد"
+                    f"\n💸 حق واسطه ({fee_percent}٪): {_total_fee:,} واحد (از جایزه)"
+                    f"\n\n🏆 برد برنده: {_prize:,} واحد  ({_gross:,} − {_total_fee:,})"
+                )
+            else:
+                msg += f"\n\n🏆 برد برنده: {_prize:,} واحد"
         else:
-            msg += (
-                f"\n\n🏆 مبلغ برد: {_prize:,} واحد"
-                f"  ({total_players} × {bet_amount:,})\n"
-            )
-        if fee_percent > 0:
-            msg += f"💸 جمع حق واسطه: {_total_fee:,} واحد\n"
+            if fee_percent > 0:
+                msg += (
+                    f"\n   ├ شرط: {bet_amount:,} واحد"
+                    f"\n   └ حق واسطه ({fee_percent}٪): {_fee_per:,} واحد"
+                )
+            msg += f"\n\n🏆 برد برنده: {_prize:,} واحد  ({total_players} × {bet_amount:,})"
         msg += (
             f"\n✅ برای شرکت «تاس» بفرست\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -3175,7 +3167,7 @@ async def cmd_tg_emoji_status(message: Message):
         return
     on = telegram_emoji_on(chat_id)
     return await _reply(message,
-        f"🎮 حالت ایموجی تلگرام: {'✅ روشن (استیکر متحرک)' if on else '❌ خاموش (متن rubpy)'}\n\n"
+        f"🎮 حالت ایموجی تلگرام: {'✅ روشن (استیکر متحرک)' if on else '❌ خاموش (متنی)'}\n\n"
         "دستورات:\n"
         "  ایموجی تلگرام روشن\n"
         "  ایموجی تلگرام خاموش"

@@ -495,6 +495,27 @@ def db_set_group_commands(chat_id: int, commands: list):
 
 
 @sync_to_async
+def db_toggle_group_command(chat_id: int, cmd: str) -> bool:
+    """روشن/خاموش یک دستور — برمی‌گرداند وضعیت جدید (True=فعال)."""
+    from account.models import TelegramGroup, default_commands
+    grp = TelegramGroup.objects.filter(telegram_chat_id=chat_id).first()
+    if not grp:
+        TelegramGroup.objects.get_or_create(telegram_chat_id=chat_id, defaults={"name": ""})
+        cmds = list(default_commands())
+    else:
+        cmds = list(grp.enabled_commands or default_commands())
+    if cmd in cmds:
+        cmds = [c for c in cmds if c != cmd]
+        enabled = False
+    else:
+        if cmd not in cmds:
+            cmds.append(cmd)
+        enabled = True
+    TelegramGroup.objects.filter(telegram_chat_id=chat_id).update(enabled_commands=cmds)
+    return enabled
+
+
+@sync_to_async
 def db_get_learned_responses(chat_id: int) -> dict:
     from account.models import TelegramGroup, LearnedResponse
     grp = TelegramGroup.objects.filter(telegram_chat_id=chat_id).first()

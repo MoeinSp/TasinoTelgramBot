@@ -1,13 +1,17 @@
 """
-Middleware برای شمارش پیام‌ها — قبل از همه handler‌ها اجرا می‌شه
+Middleware — شمارش پیام گروه + جوین اجباری پیوی
 """
-from typing import Any, Awaitable, Callable, Dict
+from typing import Any, Awaitable, Callable, Dict, Union
 
-from aiogram import BaseMiddleware
-from aiogram.types import Message
+from aiogram import BaseMiddleware, Bot
+from aiogram.types import Message, CallbackQuery
 from asgiref.sync import sync_to_async
 
 from bot import cache
+from bot.required_join import (
+    is_creator, is_forced_join_active, is_user_channel_member,
+    is_creator_setup_message, join_required_text, join_required_keyboard,
+)
 
 
 @sync_to_async
@@ -56,3 +60,60 @@ class MessageTrackingMiddleware(BaseMiddleware):
                     pass
 
         return await handler(event, data)
+
+
+class RequiredJoinMiddleware(BaseMiddleware):
+    """در پیوی، بدون عضویت در کانال اصلی خدمات داده نمی‌شود."""
+
+    async def __call__(
+        self,
+        handler: Callable[[Union[Message, CallbackQuery], Dict[str, Any]], Awaitable[Any]],
+        event: Union[Message, CallbackQuery],
+        data: Dict[str, Any],
+    ) -> Any:
+        if not is_forced_join_active():
+            return await handler(event, data)
+
+        chat = None
+        user = None
+        if isinstance(event, Message):
+            chat = event.chat
+            user = event.from_user
+        elif isinstance(event, CallbackQuery):
+            user = event.from_user
+            if event.message:
+                chat = event.message.chat
+
+        if not chat or chat.type != "private" or not user or user.is_bot:
+            return await handler(event, data)
+
+        if is_creator(user.id):
+            return await handler(event, data)
+
+        if isinstance(event, CallbackQuery) and event.data == "join:recheck":
+            return await handler(event, data)
+
+        if isinstance(event, Message):
+            if event.text and event.text.startswith("/start"):
+                return await handler(event, data)
+            if is_creator_setup_message(event.text):
+                return await handler(event, data)
+
+        bot: Bot = data.get("bot")
+        if bot and await is_user_channel_member(bot, user.id):
+            return await handler(event, data)
+
+        text = join_required_text()
+        kb = join_required_keyboard()
+        if isinstance(event, CallbackQuery):
+            try:
+                await event.answer("هنوز عضو کانال نشده‌اید.", show_alert=True)
+                if event.message:
+                    await event.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            except Exception:
+                if event.message:
+                    await event.message.answer(text, reply_markup=kb, parse_mode="HTML")
+            return None
+
+        await event.answer(text, reply_markup=kb, parse_mode="HTML")
+        return None

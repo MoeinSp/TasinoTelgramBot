@@ -173,11 +173,19 @@ def create_game(chat_id, total_players, bet_amount=0, fee_percent=0, has_bet=Fal
 
 def calc_bet_costs(bet_amount: int, fee_percent: int, bet_mode: str = BET_MODE_FIXED,
                    player_count: int = 0) -> dict:
-    """محاسبه هزینه ورود، حق واسطه و جایزه."""
-    fee_per = int(bet_amount * fee_percent / 100)
+    """
+    محاسبه ورودی، حق واسطه و جایزه.
+
+    فیکس (شروع 2 50):
+      ورودی = 50 | جمع = 100 | برد = 100 − حق‌واسطه = 90 (با ۱۰٪)
+
+    اضافه (شروع 2 50 اضافه):
+      ورودی = 50 + حق‌واسطه = 55 | برد = 2×50 = 100
+    """
     stake = bet_amount
-    fixed = bet_mode == BET_MODE_FIXED
-    entry = bet_amount if fixed else bet_amount + fee_per
+    fee_per = int(stake * fee_percent / 100) if fee_percent > 0 else 0
+    is_fixed = bet_mode == BET_MODE_FIXED
+    entry = stake if is_fixed else stake + fee_per
     result = {
         "entry": entry,
         "fee_per": fee_per,
@@ -186,8 +194,8 @@ def calc_bet_costs(bet_amount: int, fee_percent: int, bet_mode: str = BET_MODE_F
     }
     if player_count > 0:
         gross_prize = stake * player_count
-        total_fee = fee_per * player_count
-        winner_total = gross_prize - total_fee if fixed else gross_prize
+        total_fee = int(gross_prize * fee_percent / 100) if fee_percent > 0 else 0
+        winner_total = gross_prize - total_fee if is_fixed else gross_prize
         result.update(
             gross_prize=gross_prize,
             total_fee=total_fee,
@@ -197,7 +205,12 @@ def calc_bet_costs(bet_amount: int, fee_percent: int, bet_mode: str = BET_MODE_F
 
 
 def _game_bet_mode(game: dict) -> str:
-    return game.get("bet_mode") or (BET_MODE_FIXED if game.get("fixed_entry") else BET_MODE_EXTRA)
+    mode = game.get("bet_mode")
+    if mode in (BET_MODE_FIXED, BET_MODE_EXTRA):
+        return mode
+    if game.get("fixed_entry") is False:
+        return BET_MODE_EXTRA
+    return BET_MODE_FIXED
 
 
 def _game_has_money_bet(game: dict) -> bool:
@@ -664,13 +677,14 @@ async def send_final_results(chat_id, bot, message_id):
         lines.append("💰 جایزه نقدی")
         lines.append("────────────────────")
         mode_label = "فیکس" if bet_mode == BET_MODE_FIXED else "اضافه"
-        lines.append(f"💳 هزینه ورودی هر نفر: {entry_amount:,} واحد ({mode_label})")
+        lines.append(f"💳 ورودی هر نفر: {entry_amount:,} واحد ({mode_label})")
         if fee_percent > 0:
+            lines.append(f"💰 جمع ورودی‌ها: {gross_prize:,} واحد")
             lines.append(f"💸 حق واسطه ({fee_percent}%): {fee_amount:,} واحد")
         if bet_mode == BET_MODE_FIXED and fee_percent > 0:
-            lines.append(f"🏆 مبلغ برد: {winner_amount:,} واحد  ({gross_prize:,} − {fee_amount:,})")
+            lines.append(f"🏆 برد برنده: {winner_amount:,} واحد  ({gross_prize:,} − {fee_amount:,})")
         else:
-            lines.append(f"🏆 مبلغ برد: {winner_amount:,} واحد")
+            lines.append(f"🏆 برد برنده: {winner_amount:,} واحد")
         lines.append("")
         lines.append("📊 تغییرات موجودی:")
         for uid in players_list:

@@ -44,4 +44,13 @@ SILENCE_ALL_USERS: dict[int, set[int]] = {}  # chat_id → user_ids محدودش
 # ─── کانال لاگ ────────────────────────────────────────────────────────────
 LOG_CHANNEL: dict[int, int] = {}           # chat_id → log_channel_id
 
+# ─── جوین اجباری کانال (پیوی) ─────────────────────────────────────────────
+FORCED_JOIN: dict = {
+    "enabled": False,
+    "channel_id": None,
+    "channel_title": "",
+    "channel_username": "",
+    "invite_link": "",
+}
+
 CACHE_LOADED = False

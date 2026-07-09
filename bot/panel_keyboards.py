@@ -22,9 +22,55 @@ def _cmd(label: str, action: str) -> B:
     return B(text=label, callback_data=f"cmd:{action}")
 
 
+# ─── دستورات بازی و سرگرمی (toggle از پنل) ───────────────────────────────────
+
+GAME_CMDS = [
+    ("تاس", "🎲 تاس"),
+    ("بسکتبال", "🏀 بسکتبال"),
+    ("پنالتی", "⚽ پنالتی"),
+    ("بولینگ", "🎳 بولینگ"),
+    ("دارت", "🎯 دارت"),
+    ("سنگ کاغذ قیچی", "✂️ سنگ‌قیچی"),
+    ("شانس", "🍀 شانس"),
+    ("سکه", "🪙 سکه"),
+    ("اسلات", "🎰 اسلات"),
+    ("بازی", "🎮 بازی"),
+]
+
+FUN_CMDS = [
+    ("جوک", "😂 جوک"),
+    ("فال", "📜 فال"),
+    ("دانستنی", "💡 دانستنی"),
+    ("فکت", "💡 فکت"),
+    ("سخن", "💎 سخن"),
+    ("معما", "🤔 معما"),
+    ("دو راهی", "⚖️ دو راهی"),
+    ("چالش", "🎯 چالش"),
+    ("شخصیت", "💕 شخصیت"),
+]
+
+ALL_TOGGLEABLE_CMDS = [c for c, _ in FUN_CMDS + GAME_CMDS]
+FUN_CMD_SET = {c for c, _ in FUN_CMDS}
+
+
+def _cmds_panel_kb(items: list, enabled: set, prefix: str) -> InlineKeyboardMarkup:
+    rows, row = [], []
+    for cmd, label in items:
+        on = cmd in enabled
+        icon = "🟢" if on else "⚫"
+        row.append(B(text=f"{icon} {label}", callback_data=f"cmd:tglc:{cmd}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([_back(prefix), _home()])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _toggle(label: str, key: str, on: bool) -> B:
-  icon = "🟢" if on else "⚫"
-  return B(text=f"{icon} {label}", callback_data=f"cmd:tgl_{key}")
+    icon = "🟢" if on else "⚫"
+    return B(text=f"{icon} {label}", callback_data=f"cmd:tgl_{key}")
 
 
 def _mk(*rows) -> InlineKeyboardMarkup:
@@ -123,24 +169,53 @@ def settings_panel_kb(s: dict) -> InlineKeyboardMarkup:
 def game_panel_text(s: dict) -> str:
     theme = s.get("theme", 1)
     fee = s.get("fee", 10)
+    enabled = s.get("enabled_commands", set())
+    games_on = sum(1 for c, _ in GAME_CMDS if c in enabled)
+    fun_on = sum(1 for c, _ in FUN_CMDS if c in enabled)
     return "\n".join([
-        panel_header("🎲", "بازی و سرگرمی"),
+        panel_header("🎲", "بازی و سرگرمی", "روی هر دکمه بزن تا روشن/خاموش بشه."),
         f"🔊 سخنگو: <b>{'🟢 روشن' if s.get('speaker') else '⚫ خاموش'}</b>",
         f"🎮 ایموجی تلگرام: <b>{'🟢 روشن' if s.get('tg_emoji') else '⚫ خاموش'}</b>",
-        f"🎨 تم تاس: <b>{theme}</b>",
-        f"💹 حق واسطه: <b>{fee}٪</b>",
-        "",
-        "<i>💡 برای بازی بنویس: تاس · بسکتبال · پنالتی</i>",
+        f"🎲 تاس متوالی: <b>{'🟢 روشن' if s.get('dice_option') else '⚫ خاموش'}</b>",
+        f"🎯 بازی‌ها: <b>{games_on}/{len(GAME_CMDS)}</b> فعال",
+        f"🎭 سرگرمی: <b>{fun_on}/{len(FUN_CMDS)}</b> فعال",
+        f"🎨 تم تاس: <b>{theme}</b>  ·  💹 حق واسطه: <b>{fee}٪</b>",
     ])
 
 
 def game_panel_kb(s: dict) -> InlineKeyboardMarkup:
     return _nav(
         [_toggle("سخنگو", "speaker", s["speaker"]), _toggle("ایموجی تلگرام", "tg_emoji", s["tg_emoji"])],
-        [_go("🎯 بازی‌ها", "games"), _go("📊 آمار", "stats")],
+        [_toggle("تاس متوالی", "dice_option", s["dice_option"])],
+        [_go("🎯 بازی‌ها", "games"), _go("🎭 سرگرمی", "fun")],
+        [_go("📊 آمار", "stats")],
         [_cmd("🎨 تم تاس", "dice_theme"), _cmd("💹 حق واسطه", "fee_show")],
         parent="0",
     )
+
+
+def games_panel_text(enabled: set) -> str:
+    on = sum(1 for c, _ in GAME_CMDS if c in enabled)
+    return panel_header(
+        "🎯", "بازی‌ها",
+        f"🟢 فعال: {on}  ·  ⚫ خاموش: {len(GAME_CMDS) - on}",
+    )
+
+
+def games_panel_kb(enabled: set) -> InlineKeyboardMarkup:
+    return _cmds_panel_kb(GAME_CMDS, enabled, "game")
+
+
+def fun_panel_text(enabled: set) -> str:
+    on = sum(1 for c, _ in FUN_CMDS if c in enabled)
+    return panel_header(
+        "🎭", "سرگرمی",
+        f"🟢 فعال: {on}  ·  ⚫ خاموش: {len(FUN_CMDS) - on}",
+    )
+
+
+def fun_panel_kb(enabled: set) -> InlineKeyboardMarkup:
+    return _cmds_panel_kb(FUN_CMDS, enabled, "game")
 
 
 def manage_panel_text() -> str:
@@ -204,12 +279,11 @@ def panel_mute() -> InlineKeyboardMarkup:
 
 
 def panel_games() -> InlineKeyboardMarkup:
-    return _nav(
-        [_cmd("🏀 بسکتبال", "basketball"), _cmd("⚽ پنالتی", "penalty"), _cmd("🎳 بولینگ", "bowling")],
-        [_cmd("🎯 دارت", "dart"), _cmd("🎰 اسلات", "slots"), _cmd("🪙 سکه", "coin")],
-        [_cmd("🍀 شانس", "luck"), _cmd("✂️ سنگ‌کاغذ‌قیچی", "rps")],
-        parent="game",
-    )
+    return _nav([_go("🔙 به پنل بازی", "game")], parent="game")
+
+
+def panel_fun() -> InlineKeyboardMarkup:
+    return _nav([_go("🔙 به پنل بازی", "game")], parent="game")
 
 
 def panel_stats() -> InlineKeyboardMarkup:
@@ -221,7 +295,7 @@ def panel_stats() -> InlineKeyboardMarkup:
 
 # ─── نگاشت صفحات ─────────────────────────────────────────────────────────────
 
-_LIVE_PAGES = {"locks", "1", "1.1", "settings", "game", "manage", "finance"}
+_LIVE_PAGES = {"locks", "1", "1.1", "settings", "game", "manage", "finance", "games", "fun"}
 
 _STATIC_KB = {
     "": panel_main, "0": panel_main,
@@ -259,7 +333,8 @@ _CAT_TEXTS = {
     "vip": "⭐ <b>اعضای ویژه</b>\n\nبرای افزودن: ریپلای + <code>ویژه</code>",
     "ban": "🚫 <b>بن</b>\n\nبرای بن: ریپلای + <code>بن</code>",
     "mute": "🤫 <b>سکوت</b>\n\nبرای سکوت: ریپلای + <code>سکوت</code>",
-    "games": "🎮 <b>بازی‌ها</b>\n\nروی هر بازی بزن تا دستورش رو ببینی.",
+    "games": "🎯 <b>بازی‌ها</b>\n\nروی هر دکمه وضعیت را تغییر بده.",
+    "fun": "🎭 <b>سرگرمی</b>\n\nروی هر دکمه وضعیت را تغییر بده.",
     "stats": "📊 <b>آمار</b>",
     "cat_manage": manage_panel_text(),
     "cat_game": panel_header("🎲", "بازی و سرگرمی"),

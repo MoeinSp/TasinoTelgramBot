@@ -13,9 +13,11 @@ from bot.panel_keyboards import (
     locks_panel_text, locks_panel_kb,
     settings_panel_text, settings_panel_kb,
     game_panel_text, game_panel_kb,
+    games_panel_text, games_panel_kb,
+    fun_panel_text, fun_panel_kb,
     manage_panel_text, manage_panel_kb,
     finance_panel_text, finance_panel_kb,
-    panel_header,
+    panel_header, FUN_CMD_SET,
 )
 from bot.group_help import PAGE_MAIN
 
@@ -26,7 +28,7 @@ _log = logging.getLogger(__name__)
 _TOGGLE_PAGE = {
     "welcome": "settings", "captcha": "settings", "flood": "settings",
     "antiraid": "settings", "bot": "settings",
-    "speaker": "game", "tg_emoji": "game",
+    "speaker": "game", "tg_emoji": "game", "dice_option": "game",
     "group_lock": "locks",
 }
 
@@ -40,7 +42,8 @@ async def _fetch_locks(chat_id: int) -> dict:
 
 
 async def _group_snapshot(chat_id: int) -> dict:
-    from bot.helpers import db_get_group_fee, db_get_group_theme
+    from bot.helpers import db_get_group_fee, db_get_group_theme, db_get_group_commands
+    enabled = await db_get_group_commands(chat_id)
     return {
         "bot": chat_id not in cache.OFF_GROUP,
         "welcome": chat_id not in cache.WELCOME_DISABLED,
@@ -49,10 +52,12 @@ async def _group_snapshot(chat_id: int) -> dict:
         "antiraid": chat_id in cache.ANTIRAID_ENABLED,
         "speaker": chat_id in cache.SPEAKER_ON,
         "tg_emoji": chat_id in cache.TELEGRAM_EMOJI_ON,
+        "dice_option": chat_id in cache.DICE_OPTION,
         "group_lock": chat_id in cache.GROUP_LOCK,
         "night": cache.NIGHT_MODE.get(chat_id),
         "theme": await db_get_group_theme(chat_id),
         "fee": await db_get_group_fee(chat_id),
+        "enabled_commands": set(enabled),
     }
 
 
@@ -65,6 +70,12 @@ async def _render_live_panel(code: str, chat_id: int):
         return settings_panel_text(snap), settings_panel_kb(snap)
     if code == "game":
         return game_panel_text(snap), game_panel_kb(snap)
+    if code == "games":
+        enabled = snap["enabled_commands"]
+        return games_panel_text(enabled), games_panel_kb(enabled)
+    if code == "fun":
+        enabled = snap["enabled_commands"]
+        return fun_panel_text(enabled), fun_panel_kb(enabled)
     if code == "manage":
         return manage_panel_text(), manage_panel_kb()
     if code == "finance":
@@ -190,6 +201,24 @@ async def cb_cmd(call: CallbackQuery, bot: Bot):
         await call.answer(toast)
         return
 
+    # toggle دستور بازی/سرگرمی
+    if action.startswith("tglc:"):
+        cmd_name = action[5:]
+        from bot.panel_keyboards import ALL_TOGGLEABLE_CMDS
+        if cmd_name not in ALL_TOGGLEABLE_CMDS:
+            await call.answer("❌ نامعتبر", show_alert=True)
+            return
+        from bot.helpers import db_toggle_group_command
+        on = await db_toggle_group_command(chat_id, cmd_name)
+        page = "fun" if cmd_name in FUN_CMD_SET else "games"
+        text, kb = await _render_live_panel(page, chat_id)
+        try:
+            await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        except Exception as e:
+            _log.error("cmd toggle refresh: %s", e)
+        await call.answer(f"{'🟢' if on else '⚫'} {cmd_name}")
+        return
+
     # toggle ویژگی‌ها (خوشامد، کپچا، ...)
     if action.startswith("tgl_"):
         key = action[4:]
@@ -232,6 +261,7 @@ async def _toggle_feature(key: str, chat_id: int, bot: Bot) -> str:
         "welcome": "خوشامد", "captcha": "کپچا", "flood": "آنتی‌فلود",
         "antiraid": "ضد رید", "bot": "ربات", "speaker": "سخنگو",
         "tg_emoji": "ایموجی تلگرام", "group_lock": "قفل کل گروه",
+        "dice_option": "تاس متوالی",
     }
     label = labels.get(key, key)
 
@@ -320,6 +350,15 @@ async def _toggle_feature(key: str, chat_id: int, bot: Bot) -> str:
             await db_disable_group_lock(chat_id)
         else:
             await db_enable_group_lock(chat_id)
+        on = not on
+
+    elif key == "dice_option":
+        from bot.helpers import db_enable_dice_option, db_disable_dice_option
+        on = chat_id in cache.DICE_OPTION
+        if on:
+            await db_disable_dice_option(chat_id)
+        else:
+            await db_enable_dice_option(chat_id)
         on = not on
 
     else:
@@ -451,6 +490,7 @@ async def _execute(action: str, chat_id: int, user_id: int, bot: Bot) -> str:
             f"🚨 ضد رید: {'🟢' if snap['antiraid'] else '⚫'}\n"
             f"🔊 سخنگو: {'🟢' if snap['speaker'] else '⚫'}\n"
             f"🎮 ایموجی: {'🟢' if snap['tg_emoji'] else '⚫'}\n"
+            f"🎲 تاس متوالی: {'🟢' if snap['dice_option'] else '⚫'}\n"
             f"🌙 شب: {f'{night[0]}:00–{night[1]}:00' if night else '⚫ خاموش'}\n"
             f"🎨 تم تاس: {snap['theme']}\n"
             f"💹 حق واسطه: {snap['fee']}٪"
