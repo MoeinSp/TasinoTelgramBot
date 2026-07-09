@@ -26,6 +26,7 @@ from bot.helpers import (
     db_enable_speaker, db_disable_speaker,
     db_update_lock, db_get_locks,
     db_set_owner,
+    sync_telegram_roles, sync_bot_admins_from_telegram,
     db_add_admin, db_del_admin,
     db_add_vip, db_del_vip,
     db_get_admins, db_get_vips, db_clear_vips,
@@ -57,8 +58,18 @@ from bot.dice_game import (
     handle_dice, handle_round_selection, WAITING_ROUNDS, ACTIVE_GAMES as DICE_ACTIVE_GAMES,
     is_user_in_game, can_player_roll, save_roll_result, register_and_save_dice,
     should_continue, LAST_DICE, calc_bet_costs,
+    BET_MODE_FIXED, BET_MODE_EXTRA,
     _handle_game_roll_silent,
 )
+
+_START_MODE_WORDS = {
+    "فیکس": BET_MODE_FIXED, "fix": BET_MODE_FIXED, "fixed": BET_MODE_FIXED,
+    "اضافه": BET_MODE_EXTRA, "شرط": BET_MODE_EXTRA, "extra": BET_MODE_EXTRA,
+}
+_START_MODE_LABELS = {
+    BET_MODE_FIXED: "فیکس",
+    BET_MODE_EXTRA: "اضافه",
+}
 
 router = Router()
 router.message.filter(F.chat.type.in_({"group", "supergroup"}))
@@ -93,12 +104,48 @@ async def _mention(user_id: int, bot: Bot, chat_id: int) -> str:
 
 @router.message(F.text == "مالک فیکس")
 async def cmd_fix_owner(message: Message, bot: Bot):
+    """همگام‌سازی مالک با creator تلگرام (جایگزین مالک فیکس قدیمی)."""
     chat_id = message.chat.id
     user_id = message.from_user.id
-    if not is_owner(chat_id, user_id):
-        return
-    await db_set_owner(chat_id, user_id)
-    await _reply(message, "✅ مالکیت تثبیت شد.")
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        if not _is_creator(user_id):
+            return
+    return await _cmd_sync_roles(message, bot)
+
+
+@router.message(F.text.in_(["همگام سازی", "همگام‌سازی", "سینک ادمین", "سینک", "sync admin", "admincache"]))
+async def cmd_sync_admins(message: Message, bot: Bot):
+    return await _cmd_sync_roles(message, bot)
+
+
+async def _cmd_sync_roles(message: Message, bot: Bot):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_owner(chat_id, user_id) and not is_admin(chat_id, user_id) and not _is_creator(user_id):
+        return await _reply(message, "❌ فقط مالک یا ادمین می‌تواند این دستور را اجرا کند.")
+
+    result = await sync_telegram_roles(chat_id, bot)
+    if not result.get("ok"):
+        return await _reply(message, f"❌ خطا در همگام‌سازی:\n{result.get('error', 'نامشخص')}")
+
+    creator_id = result.get("creator_id")
+    admin_count = await sync_bot_admins_from_telegram(chat_id, bot, creator_id)
+    owner_mention = await _mention(creator_id, bot, chat_id) if creator_id else "یافت نشد"
+
+    changed = ""
+    if result.get("creator_changed"):
+        changed = "\n🔄 مالک گروه تغییر کرد و به‌روز شد.\n"
+
+    text = (
+        f"✅ همگام‌سازی با تلگرام انجام شد\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👑 مالک (creator): {owner_mention}\n"
+        f"👥 ادمین‌های تلگرام: {result.get('tg_admin_count', 0)} نفر\n"
+        f"🛡 ادمین‌های ربات ثبت‌شده: {admin_count} نفر"
+        f"{changed}\n\n"
+        f"📌 مالک ربات = creator تلگرام (مدل Rose)"
+    )
+    return await _reply(message, text)
 
 
 # ─── ربات خاموش/روشن ─────────────────────────────────────────────────────────
@@ -353,19 +400,15 @@ async def cmd_del_admin(message: Message, bot: Bot):
 
 @router.message(F.text == "انتقال مالکیت")
 async def cmd_transfer_owner(message: Message, bot: Bot):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    if not is_owner(chat_id, user_id):
-        return await _reply(message, "❌ فقط مالک می‌تواند مالکیت را منتقل کند.")
-    target_id = await get_target_from_reply(message, bot)
-    if not target_id:
-        return
-    if target_id == user_id:
-        return await _reply(message, "❌ نمی‌توانید مالکیت را به خودتان منتقل کنید.")
-    await db_set_owner(chat_id, target_id)
-    mention = await _mention(target_id, bot, chat_id)
-    old_mention = await _mention(user_id, bot, chat_id)
-    return await _reply(message, f"✅ مالکیت از {old_mention} به {mention} منتقل شد.")
+    return await _reply(
+        message,
+        "👑 انتقال مالکیت گروه\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        "انتقال مالک فقط از طریق تلگرام انجام می‌شود:\n"
+        "تنظیمات گروه ← مدیران ← انتقال مالکیت\n\n"
+        "پس از انتقال، ربات خودکار مالک جدید را شناسایی می‌کند.\n"
+        "در صورت نیاز دستور «همگام‌سازی» را بزنید.",
+    )
 
 
 # ─── عضو ویژه ─────────────────────────────────────────────────────────────────
@@ -993,15 +1036,13 @@ async def cmd_creator_make_me_admin(message: Message, bot: Bot):
 
 @router.message(F.text == "مالک شم")
 async def cmd_creator_make_me_owner(message: Message, bot: Bot):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    if not _is_creator(user_id):
+    if not _is_creator(message.from_user.id):
         return
-
-    from bot.helpers import db_set_owner
-    await db_set_owner(chat_id, user_id)
-    mention = await _mention(user_id, bot, chat_id)
-    return await _reply(message, f"👑 مالکیت ربات در این گروه به {mention} منتقل شد.")
+    return await _reply(
+        message,
+        "ℹ️ در مدل Rose، مالک ربات همیشه creator تلگرام است.\n"
+        "برای تغییر مالک از تنظیمات تلگرام استفاده کنید، سپس «همگام‌سازی» بزنید.",
+    )
 
 
 @router.message(F.text == "خفه")
@@ -1325,6 +1366,41 @@ async def cmd_warn_status(message: Message, bot: Bot):
     if not warns:
         return await _reply(message, f"› {mention}\n\n›› اخطاری ثبت نشده است.")
     return await _reply(message, f"› {mention}\n\n›› وضعیت اخطارها:\n• مجموع اخطار: {warns}/{max_w}")
+
+
+# ─── مالک گروه ───────────────────────────────────────────────────────────────
+
+@router.message(F.text.in_(["مالک", "مالک فعلی", "مالک گروه", "owner", "مالک واقعی"]))
+async def cmd_owner_info(message: Message, bot: Bot):
+    chat_id = message.chat.id
+    result = await sync_telegram_roles(chat_id, bot)
+
+    if not result.get("ok"):
+        return await _reply(message, f"❌ خطا در دریافت مالک گروه:\n{result.get('error', 'نامشخص')}")
+
+    creator_id = result.get("creator_id")
+    if not creator_id:
+        return await _reply(
+            message,
+            "👑 مالک گروه\n"
+            "━━━━━━━━━━━━━━━━\n\n"
+            "⚠️ creator گروه در تلگرام یافت نشد.\n\n"
+            "📌 ربات را ادمین کامل کنید و «همگام‌سازی» بزنید.",
+        )
+
+    mention = await _mention(creator_id, bot, chat_id)
+    tg_count = result.get("tg_admin_count", 0)
+    return await _reply(
+        message,
+        "👑 مالک گروه\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        f"• {mention}\n"
+        f"📌 منبع: creator تلگرام\n"
+        f"👥 ادمین تلگرام: {tg_count} نفر\n\n"
+        "━━━━━━━━━━━━━━━━\n"
+        "انتقال مالک: از تنظیمات تلگرام\n"
+        "به‌روزرسانی: «همگام‌سازی»",
+    )
 
 
 # ─── لیست ادمین با فرمت کامل ─────────────────────────────────────────────────
@@ -1791,8 +1867,8 @@ async def cmd_fee(message: Message, bot: Bot):
     else:
         text += (
             f"📊 نحوه محاسبه:\n"
-            f"   • حالت عادی: هر بازیکن = شرط + {new_fee}% حق واسطه\n"
-            f"   • حالت فیکس: ورودی ثابت، حق واسطه از جایزه کسر می‌شود\n\n"
+            f"   • حالت فیکس (پیش‌فرض): ورودی ثابت، حق واسطه از جایزه\n"
+            f"   • حالت اضافه: ورودی = شرط + حق واسطه\n\n"
         )
     text += f"🔔 از این به بعد مسابقات تاس با حق واسطه {new_fee}% برگزار می‌شود."
     return await _reply(message, text)
@@ -1899,20 +1975,20 @@ async def cmd_start_game(message: Message, bot: Bot):
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
         return await _reply(message, "شما دسترسی مجاز را ندارید")
     parts = message.text.split()
-    fixed_entry = False
-    if parts and parts[-1].lower() in ("فیکس", "fix", "fixed"):
-        fixed_entry = True
+    bet_mode = BET_MODE_FIXED
+    if parts and parts[-1].lower() in _START_MODE_WORDS:
+        bet_mode = _START_MODE_WORDS[parts[-1].lower()]
         parts = parts[:-1]
     if len(parts) < 2:
         return await _reply(message, (
             "❌ فرمت صحیح:\n"
-            "• شروع [تعداد] → بازی معمولی\n"
-            "• شروع [تعداد] [مبلغ] → بازی اعتباری\n"
-            "• شروع [تعداد] [مبلغ] فیکس → ورودی ثابت\n\n"
+            "• شروع [تعداد] → بازی رایگان\n"
+            "• شروع [تعداد] [مبلغ] → ورودی ثابت (پیش‌فرض فیکس)\n"
+            "• شروع [تعداد] [مبلغ] اضافه → ورودی = شرط + حق واسطه\n\n"
             "مثال‌ها:\n"
             "  شروع 2\n"
             "  شروع 2 50\n"
-            "  شروع 2 50 فیکس"
+            "  شروع 2 50 اضافه"
         ))
     try:
         total_players = int(parts[1])
@@ -1929,7 +2005,7 @@ async def cmd_start_game(message: Message, bot: Bot):
         except ValueError:
             return await _reply(message, (
                 "❌ مبلغ بازی باید عدد باشد!\n"
-                "مثال: شروع 2 50  یا  شروع 2 50 فیکس"
+                "مثال: شروع 2 50  |  شروع 2 50 اضافه"
             ))
     if total_players < 2:
         return await _reply(message, "❌ حداقل تعداد بازیکن‌ها 2 نفر است!")
@@ -1946,35 +2022,34 @@ async def cmd_start_game(message: Message, bot: Bot):
     create_game(
         chat_id, total_players,
         bet_amount=bet_amount, fee_percent=fee_percent,
-        has_bet=has_bet, fixed_entry=fixed_entry and has_bet,
+        has_bet=has_bet, bet_mode=bet_mode if has_bet else BET_MODE_FIXED,
     )
+    mode_label = _START_MODE_LABELS.get(bet_mode, bet_mode)
     if has_bet:
-        costs = calc_bet_costs(bet_amount, fee_percent, fixed_entry, total_players)
+        costs = calc_bet_costs(bet_amount, fee_percent, bet_mode, total_players)
         _entry = costs["entry"]
         _fee_per = costs["fee_per"]
         _gross = costs["gross_prize"]
         _total_fee = costs["total_fee"]
         _prize = costs["winner_total"]
-        mode = "فیکس" if fixed_entry else "عادی"
         msg = (
             f"🎲 رقابت تاس شروع شد!\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"👥 ظرفیت: {total_players} نفر\n"
-            f"📌 نوع: {mode}\n\n"
+            f"📌 نوع: {mode_label}\n\n"
             f"💳 هزینه ورودی هر نفر: {_entry:,} واحد"
         )
-        if fixed_entry:
-            if fee_percent > 0:
-                msg += (
-                    f"\n   ├ شرط: {bet_amount:,} واحد"
-                    f"\n   └ حق واسطه ({fee_percent}٪): {_fee_per:,} واحد (از جایزه)"
-                )
+        if bet_mode == BET_MODE_FIXED and fee_percent > 0:
+            msg += (
+                f"\n   ├ شرط: {bet_amount:,} واحد"
+                f"\n   └ حق واسطه ({fee_percent}٪): {_fee_per:,} واحد (از جایزه)"
+            )
         elif fee_percent > 0:
             msg += (
                 f"\n   ├ شرط: {bet_amount:,} واحد"
                 f"\n   └ حق واسطه ({fee_percent}٪): {_fee_per:,} واحد"
             )
-        if fixed_entry and fee_percent > 0:
+        if bet_mode == BET_MODE_FIXED and fee_percent > 0:
             msg += f"\n\n🏆 مبلغ برد: {_prize:,} واحد  ({_gross:,} − {_total_fee:,} حق واسطه)\n"
         else:
             msg += (
@@ -2240,70 +2315,6 @@ async def cmd_round_selection(message: Message, bot: Bot):
     if chat_id not in WAITING_ROUNDS:
         return
     await handle_round_selection(chat_id, user_id, message.text, bot, message.message_id)
-
-
-# ─── همگام‌سازی ادمین‌های واقعی تلگرام ──────────────────────────────────────
-
-@router.message(F.text.in_(["همگام سازی", "همگام‌سازی", "سینک ادمین", "سینک", "sync admin"]))
-async def cmd_sync_admins(message: Message, bot: Bot):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    if not is_owner(chat_id, user_id) and not is_admin(chat_id, user_id):
-        return await _reply(message, "❌ فقط مالک یا ادمین می‌تواند این دستور را اجرا کند.")
-
-    try:
-        tg_admins = await bot.get_chat_administrators(chat_id)
-    except Exception as e:
-        return await _reply(message, f"❌ خطا در دریافت ادمین‌های تلگرام:\n{e}")
-
-    owner_id = None
-    admin_ids = []
-    for member in tg_admins:
-        if member.status == "creator":
-            owner_id = member.user.id
-        elif member.status == "administrator":
-            admin_ids.append(member.user.id)
-
-    if owner_id:
-        await db_set_owner(chat_id, owner_id)
-        cache.OWNER_CACHE[chat_id] = owner_id
-
-    for aid in admin_ids:
-        await db_add_admin(chat_id, aid)
-        cache.ADMINS_CACHE.setdefault(chat_id, set()).add(aid)
-
-    owner_mention = await _mention(owner_id, bot, chat_id) if owner_id else "یافت نشد"
-    text = (
-        f"✅ همگام‌سازی با تلگرام انجام شد\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"👑 مالک: {owner_mention}\n"
-        f"👥 ادمین‌های همگام‌سازی‌شده: {len(admin_ids)} نفر\n\n"
-        f"📌 حالا ربات مالک و ادمین‌های واقعی گروه را می‌شناسد."
-    )
-    return await _reply(message, text)
-
-
-@router.message(F.text == "مالک واقعی")
-async def cmd_real_owner(message: Message, bot: Bot):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    if not is_owner(chat_id, user_id) and not is_admin(chat_id, user_id):
-        return
-
-    try:
-        tg_admins = await bot.get_chat_administrators(chat_id)
-    except Exception as e:
-        return await _reply(message, f"❌ خطا: {e}")
-
-    creator = next((m for m in tg_admins if m.status == "creator"), None)
-    if not creator:
-        return await _reply(message, "❌ مالک گروه یافت نشد (شاید گروه creator ندارد).")
-
-    owner_id = creator.user.id
-    await db_set_owner(chat_id, owner_id)
-    cache.OWNER_CACHE[chat_id] = owner_id
-    mention = await _mention(owner_id, bot, chat_id)
-    return await _reply(message, f"👑 مالک واقعی گروه:\n{mention}\n\nبه عنوان مالک در ربات ثبت شد.")
 
 
 # ─── خوشامدگویی ──────────────────────────────────────────────────────────────

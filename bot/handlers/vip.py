@@ -155,7 +155,7 @@ async def activate_code(message: Message):
         TelegramGroupMember.objects.update_or_create(
             telegram_chat_id=cid,
             telegram_user_id=sender.id,
-            defaults={"group": group, "is_owner": True},
+            defaults={"group": group, "is_admin": True, "role": "admin"},
         )
 
         return until, None
@@ -165,7 +165,9 @@ async def activate_code(message: Message):
         await message.reply(f"❌ {error}")
         return
 
-    cache.OWNER_CACHE[cid] = sender.id
+    from bot.helpers import sync_telegram_roles
+    await sync_telegram_roles(message.chat.id, message.bot)
+
     await message.reply(
         f"✅ گروه فعال شد!\n"
         f"📅 انقضا: {until.strftime('%Y-%m-%d')}",

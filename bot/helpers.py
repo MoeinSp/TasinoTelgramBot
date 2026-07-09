@@ -264,6 +264,61 @@ def db_has_owner(chat_id: int) -> bool:
     return chat_id in cache.OWNER_CACHE
 
 
+async def sync_telegram_roles(chat_id: int, bot: Bot) -> dict:
+    """همگام‌سازی مالک (creator) و ادمین‌های تلگرام — منبع حقیقت: API تلگرام."""
+    try:
+        tg_admins = await bot.get_chat_administrators(chat_id)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+    old_creator = cache.OWNER_CACHE.get(chat_id)
+    creator_id = None
+    tg_admin_ids: list[int] = []
+
+    for member in tg_admins:
+        if member.user.is_bot:
+            continue
+        if member.status == "creator":
+            creator_id = member.user.id
+        elif member.status == "administrator":
+            tg_admin_ids.append(member.user.id)
+
+    creator_changed = bool(creator_id and creator_id != old_creator)
+
+    if creator_id:
+        await db_set_owner(chat_id, creator_id)
+
+    cache.TG_ADMINS_CACHE[chat_id] = set(tg_admin_ids)
+
+    return {
+        "ok": True,
+        "creator_id": creator_id,
+        "creator_changed": creator_changed,
+        "old_creator_id": old_creator,
+        "tg_admin_ids": tg_admin_ids,
+        "tg_admin_count": len(tg_admin_ids),
+    }
+
+
+async def sync_bot_admins_from_telegram(chat_id: int, bot: Bot, creator_id: int | None = None) -> int:
+    """ادمین‌های تلگرام را در لیست ادمین ربات ثبت می‌کند."""
+    try:
+        tg_admins = await bot.get_chat_administrators(chat_id)
+    except Exception:
+        return 0
+    creator_id = creator_id or cache.OWNER_CACHE.get(chat_id)
+    count = 0
+    for member in tg_admins:
+        if member.user.is_bot or member.status == "creator":
+            continue
+        if creator_id and member.user.id == creator_id:
+            continue
+        if member.status == "administrator":
+            await db_add_admin(chat_id, member.user.id)
+            count += 1
+    return count
+
+
 @sync_to_async
 def db_add_admin(chat_id: int, user_id: int):
     from account.models import TelegramGroup, TelegramGroupMember

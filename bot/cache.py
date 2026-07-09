@@ -1,5 +1,6 @@
-OWNER_CACHE: dict[int, int] = {}            # chat_id → user_id
-ADMINS_CACHE: dict[int, set[int]] = {}     # chat_id → set of user_ids
+OWNER_CACHE: dict[int, int] = {}            # chat_id → creator تلگرام (مالک)
+TG_ADMINS_CACHE: dict[int, set[int]] = {}  # chat_id → ادمین‌های واقعی تلگرام
+ADMINS_CACHE: dict[int, set[int]] = {}     # chat_id → ادمین‌های ربات
 VIP_USERS_CACHE: dict[int, set[int]] = {}  # chat_id → set of user_ids
 SPEAKER_ON: set[int] = set()               # chat_ids with speaker on
 OFF_GROUP: set[int] = set()                # chat_ids with bot off

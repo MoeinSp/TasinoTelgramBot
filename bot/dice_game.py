@@ -144,8 +144,12 @@ WAITING_ROUNDS: dict = {}  # chat_id → winner_id (منتظر انتخاب را
 
 # ─── توابع مدیریت بازی ───────────────────────────────────────────────────────
 
+BET_MODE_FIXED = "fixed"    # شروع 2 50 — ورودی ثابت، حق واسطه از جایزه
+BET_MODE_EXTRA = "extra"    # شروع 2 50 اضافه — ورودی = شرط + حق واسطه
+
+
 def create_game(chat_id, total_players, bet_amount=0, fee_percent=0, has_bet=False,
-                fixed_entry=False):
+                bet_mode: str = BET_MODE_FIXED):
     game = {
         "chat_id": chat_id,
         "total_players": total_players,
@@ -155,7 +159,8 @@ def create_game(chat_id, total_players, bet_amount=0, fee_percent=0, has_bet=Fal
         "has_bet": has_bet,
         "bet_amount": bet_amount,
         "fee_percent": fee_percent,
-        "fixed_entry": fixed_entry,
+        "bet_mode": bet_mode,
+        "fixed_entry": bet_mode == BET_MODE_FIXED,
         "rounds": 0,
         "total_rounds": 0,
         "is_turn_based": False,
@@ -166,27 +171,37 @@ def create_game(chat_id, total_players, bet_amount=0, fee_percent=0, has_bet=Fal
     return game
 
 
-def calc_bet_costs(bet_amount: int, fee_percent: int, fixed_entry: bool = False,
+def calc_bet_costs(bet_amount: int, fee_percent: int, bet_mode: str = BET_MODE_FIXED,
                    player_count: int = 0) -> dict:
     """محاسبه هزینه ورود، حق واسطه و جایزه."""
     fee_per = int(bet_amount * fee_percent / 100)
     stake = bet_amount
-    entry = bet_amount if fixed_entry else bet_amount + fee_per
+    fixed = bet_mode == BET_MODE_FIXED
+    entry = bet_amount if fixed else bet_amount + fee_per
     result = {
         "entry": entry,
         "fee_per": fee_per,
         "stake": stake,
+        "bet_mode": bet_mode,
     }
     if player_count > 0:
         gross_prize = stake * player_count
         total_fee = fee_per * player_count
-        winner_total = gross_prize - total_fee if fixed_entry else gross_prize
+        winner_total = gross_prize - total_fee if fixed else gross_prize
         result.update(
             gross_prize=gross_prize,
             total_fee=total_fee,
             winner_total=winner_total,
         )
     return result
+
+
+def _game_bet_mode(game: dict) -> str:
+    return game.get("bet_mode") or (BET_MODE_FIXED if game.get("fixed_entry") else BET_MODE_EXTRA)
+
+
+def _game_has_money_bet(game: dict) -> bool:
+    return bool(game.get("has_bet") and game.get("bet_amount", 0) > 0)
 
 
 def get_game(chat_id) -> Optional[dict]:
@@ -597,15 +612,13 @@ async def send_final_results(chat_id, bot, message_id):
             winner_id = None
 
     # پرداخت شرط
-    if game_data.get("has_bet") and game_data.get("bet_amount", 0) > 0 and not is_tie and winner_id:
+    if _game_has_money_bet(game_data) and not is_tie and winner_id:
         bet_amount = game_data["bet_amount"]
         fee_percent = game_data.get("fee_percent", 0)
-        fixed_entry = game_data.get("fixed_entry", False)
-        costs = calc_bet_costs(bet_amount, fee_percent, fixed_entry, len(players_list))
+        bet_mode = _game_bet_mode(game_data)
+        costs = calc_bet_costs(bet_amount, fee_percent, bet_mode, len(players_list))
         entry_amount = costs["entry"]
-        fee_per_player = costs["fee_per"]
         winner_amount = costs["winner_total"]
-
         for player_id in players_list:
             await _decrease_wallet(chat_id, player_id, entry_amount)
         await _increase_wallet(chat_id, winner_id, winner_amount)
@@ -637,11 +650,11 @@ async def send_final_results(chat_id, bot, message_id):
 
     lines.append("━━━━━━━━━━━━━━━━━━━━")
 
-    if game_data.get("has_bet") and game_data.get("bet_amount", 0) > 0 and not is_tie and winner_id:
+    if _game_has_money_bet(game_data) and not is_tie and winner_id:
         bet_amount = game_data["bet_amount"]
         fee_percent = game_data.get("fee_percent", 0)
-        fixed_entry = game_data.get("fixed_entry", False)
-        costs = calc_bet_costs(bet_amount, fee_percent, fixed_entry, len(players_list))
+        bet_mode = _game_bet_mode(game_data)
+        costs = calc_bet_costs(bet_amount, fee_percent, bet_mode, len(players_list))
         entry_amount = costs["entry"]
         winner_amount = costs["winner_total"]
         fee_amount = costs["total_fee"]
@@ -650,10 +663,11 @@ async def send_final_results(chat_id, bot, message_id):
         lines.append("")
         lines.append("💰 جایزه نقدی")
         lines.append("────────────────────")
-        lines.append(f"💳 هزینه ورودی هر نفر: {entry_amount:,} واحد" + (" (فیکس)" if fixed_entry else ""))
+        mode_label = "فیکس" if bet_mode == BET_MODE_FIXED else "اضافه"
+        lines.append(f"💳 هزینه ورودی هر نفر: {entry_amount:,} واحد ({mode_label})")
         if fee_percent > 0:
             lines.append(f"💸 حق واسطه ({fee_percent}%): {fee_amount:,} واحد")
-        if fixed_entry and fee_percent > 0:
+        if bet_mode == BET_MODE_FIXED and fee_percent > 0:
             lines.append(f"🏆 مبلغ برد: {winner_amount:,} واحد  ({gross_prize:,} − {fee_amount:,})")
         else:
             lines.append(f"🏆 مبلغ برد: {winner_amount:,} واحد")
@@ -735,22 +749,22 @@ async def handle_dice(text, chat_id, message_id, bot, user_id, dice_option_off, 
     game = get_game(chat_id)
 
     # چک موجودی برای بازی شرطی در مرحله waiting
-    if game and game.get("status") == "waiting" and game.get("has_bet") and game.get("bet_amount", 0) > 0:
-        bet_amount = game["bet_amount"]
+    if game and game.get("status") == "waiting" and _game_has_money_bet(game):
+        bet_mode = _game_bet_mode(game)
         fee_percent = game.get("fee_percent", 0)
-        fixed_entry = game.get("fixed_entry", False)
-        costs = calc_bet_costs(bet_amount, fee_percent, fixed_entry)
+        bet_amount = game["bet_amount"]
+        costs = calc_bet_costs(bet_amount, fee_percent, bet_mode)
         entry_cost = costs["entry"]
         fee_per = costs["fee_per"]
         balance = await _get_balance(chat_id, user_id)
         if balance < entry_cost:
-            if fixed_entry and fee_per > 0:
+            if bet_mode == BET_MODE_FIXED and fee_per > 0:
                 fee_line = f"\n   └ حق واسطه ({fee_percent}٪): {fee_per:,} واحد (از جایزه)"
             elif fee_per > 0:
                 fee_line = f"\n   ├ شرط: {bet_amount:,} واحد\n   └ حق واسطه: {fee_per:,} واحد"
             else:
                 fee_line = ""
-            mode_line = " (فیکس)" if fixed_entry else ""
+            mode_line = " (فیکس)" if bet_mode == BET_MODE_FIXED else " (اضافه)"
             await bot.send_message(
                 chat_id=chat_id,
                 text=(f"❌ موجودی ناکافی!\n\n"

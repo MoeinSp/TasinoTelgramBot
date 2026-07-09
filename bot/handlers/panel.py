@@ -181,7 +181,7 @@ async def cb_cmd(call: CallbackQuery, bot: Bot):
 
     # toggle قفل تکی
     if action.startswith("lock_toggle_"):
-        toast = await _toggle_lock(action[13:], chat_id)
+        toast = await _toggle_lock(action[12:], chat_id)
         text, kb = await _render_live_panel("locks", chat_id)
         try:
             await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -334,6 +334,7 @@ async def _execute(action: str, chat_id: int, user_id: int, bot: Bot) -> str:
         db_get_learned_responses, db_get_word_filters,
         db_get_top_users, db_get_member, db_get_alias,
         db_get_group_fee, db_get_group_theme, db_set_telegram_emoji,
+        sync_telegram_roles, sync_bot_admins_from_telegram,
     )
 
     if action == "admin_list":
@@ -344,21 +345,24 @@ async def _execute(action: str, chat_id: int, user_id: int, bot: Bot) -> str:
         return "👮 لیست ادمین‌ها:\n\n" + "\n".join(lines)
 
     if action == "sync_admins":
-        try:
-            members = await bot.get_chat_administrators(chat_id)
-            from bot.helpers import db_add_admin, db_set_owner
-            synced = 0
-            for m in members:
-                if m.user.is_bot:
-                    continue
-                if m.status == "creator":
-                    await db_set_owner(chat_id, m.user.id)
-                else:
-                    await db_add_admin(chat_id, m.user.id)
-                synced += 1
-            return f"🔄 {synced} ادمین همگام‌سازی شد."
-        except Exception as e:
-            return f"❌ خطا: {e}"
+        result = await sync_telegram_roles(chat_id, bot)
+        if not result.get("ok"):
+            return f"❌ خطا: {result.get('error')}"
+        count = await sync_bot_admins_from_telegram(chat_id, bot, result.get("creator_id"))
+        return f"🔄 همگام‌سازی انجام شد — مالک + {count} ادمین"
+
+    if action == "owner_info":
+        result = await sync_telegram_roles(chat_id, bot)
+        if not result.get("ok"):
+            return f"❌ خطا: {result.get('error')}"
+        owner_id = result.get("creator_id")
+        if not owner_id:
+            return "👑 creator گروه یافت نشد."
+        return (
+            f"👑 مالک گروه (creator تلگرام):\n"
+            f"<a href='tg://user?id={owner_id}'>{owner_id}</a>\n\n"
+            f"انتقال: از تنظیمات تلگرام"
+        )
 
     if action == "vip_list":
         vips = await db_get_vips(chat_id)
@@ -475,16 +479,6 @@ async def _execute(action: str, chat_id: int, user_id: int, bot: Bot) -> str:
     if action == "dice_theme":
         theme = await db_get_group_theme(chat_id)
         return f"🎨 تم تاس: {theme}\n\nتغییر: <code>تاس تم 4</code>"
-
-    if action == "owner_info":
-        owner_id = cache.OWNER_CACHE.get(chat_id)
-        if not owner_id:
-            return "👑 مالکی ثبت نشده."
-        return (
-            f"👑 مالک گروه:\n"
-            f"<a href='tg://user?id={owner_id}'>{owner_id}</a>\n\n"
-            f"انتقال: ریپلای + <code>انتقال مالکیت</code>"
-        )
 
     if action == "filter_list":
         filters = cache.WORD_FILTERS.get(chat_id) or await db_get_word_filters(chat_id)

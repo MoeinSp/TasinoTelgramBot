@@ -9,7 +9,10 @@ from aiogram.types import ChatMemberUpdated
 from asgiref.sync import sync_to_async
 
 from bot import cache
-from bot.helpers import db_set_owner, db_add_admin, db_get_locks, user_mention_id, LOCK_NAMES
+from bot.helpers import (
+    db_get_locks, user_mention_id, LOCK_NAMES,
+    sync_telegram_roles, sync_bot_admins_from_telegram,
+)
 
 router = Router()
 _log = logging.getLogger(__name__)
@@ -60,7 +63,7 @@ async def on_bot_membership_change(event: ChatMemberUpdated, bot: Bot):
                 await bot.delete_message(chat_id, pending_id)
             except Exception:
                 pass
-        await _finish_setup(chat_id, event, bot)
+        await _finish_setup(chat_id, bot)
         return
 
     # ─── ربات از گروه حذف/اخراج شد ───
@@ -68,34 +71,59 @@ async def on_bot_membership_change(event: ChatMemberUpdated, bot: Bot):
         cache.PENDING_SETUP_MSG.pop(chat_id, None)
 
 
-async def _sync_real_admins(chat_id: int, owner_id: int | None, bot: Bot) -> int:
-    """ادمین‌های واقعی تلگرام رو (به‌جز مالک و ربات‌ها) در دیتابیس ثبت می‌کنه و تعدادشون رو برمی‌گردونه."""
-    try:
-        tg_admins = await bot.get_chat_administrators(chat_id)
-    except Exception:
-        return 0
-    count = 0
-    for member in tg_admins:
-        if member.user.is_bot or member.status == "creator" or member.user.id == owner_id:
-            continue
-        await db_add_admin(chat_id, member.user.id)
-        count += 1
-    return count
+@router.chat_member()
+async def on_group_member_role_change(event: ChatMemberUpdated, bot: Bot):
+    """وقتی مالک یا ادمین تلگرام عوض شد، کش ربات به‌روز می‌شود."""
+    if event.chat.type not in ("group", "supergroup"):
+        return
+    if event.new_chat_member.user.is_bot:
+        return
+
+    old_status = event.old_chat_member.status
+    new_status = event.new_chat_member.status
+    if old_status == new_status:
+        return
+
+    if old_status not in ("creator", "administrator") and new_status not in ("creator", "administrator"):
+        return
+
+    chat_id = event.chat.id
+    if chat_id not in cache.OWNER_CACHE and new_status != "creator":
+        return
+
+    result = await sync_telegram_roles(chat_id, bot)
+    if not result.get("ok"):
+        return
+
+    if result.get("creator_changed") and result.get("creator_id"):
+        try:
+            mention = await user_mention_id(result["creator_id"], bot, chat_id)
+            await bot.send_message(
+                chat_id,
+                "👑 مالک گروه به‌روز شد\n"
+                "━━━━━━━━━━━━━━━━\n\n"
+                f"• {mention}\n\n"
+                "📌 مالک ربات همیشه با creator تلگرام یکسان است.",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            _log.error("خطا در اعلان تغییر مالک: %s", e)
 
 
-async def _finish_setup(chat_id: int, event: ChatMemberUpdated, bot: Bot):
-    actor_id = event.from_user.id if event.from_user else None
-    if actor_id:
-        await db_set_owner(chat_id, actor_id)
-        owner_mention = await user_mention_id(actor_id, bot, chat_id)
+async def _finish_setup(chat_id: int, bot: Bot):
+    result = await sync_telegram_roles(chat_id, bot)
+    creator_id = result.get("creator_id") if result.get("ok") else None
+
+    if creator_id:
+        owner_mention = await user_mention_id(creator_id, bot, chat_id)
     else:
-        owner_mention = "نامشخص"
+        owner_mention = "⚠️ creator گروه یافت نشد — «همگام‌سازی» بزنید"
 
-    admin_count = await _sync_real_admins(chat_id, actor_id, bot)
+    admin_count = await sync_bot_admins_from_telegram(chat_id, bot, creator_id)
     if admin_count > 0:
-        admin_line = f"👮 {admin_count} ادمین گروه شناسایی و ثبت شد"
+        admin_line = f"👮 {admin_count} ادمین تلگرام در ربات ثبت شد"
     else:
-        admin_line = "⚠️ ادمینی در گروه یافت نشد!"
+        admin_line = "⚠️ ادمین تلگرامی یافت نشد"
 
     locks = await db_get_locks(chat_id)
     active_locks = [LOCK_NAMES[key] for key, on in locks.items() if on and key in LOCK_NAMES]
@@ -104,7 +132,7 @@ async def _finish_setup(chat_id: int, event: ChatMemberUpdated, bot: Bot):
 
     text = (
         "🔰 ربات با موفقیت در گروه نصب شد\n\n"
-        "✚ مالک گروه:\n"
+        "✚ مالک گروه (creator تلگرام):\n"
         f"▸ {owner_mention}\n\n"
         f"{admin_line}\n\n"
         "🛠 به‌طور پیش‌فرض قفل‌های زیر در گروه شما فعال شد:\n\n"
