@@ -9,7 +9,10 @@ import time
 
 import jdatetime
 from aiogram import Bot, Router, F
-from aiogram.types import Message, ChatPermissions, CallbackQuery, ChatMemberUpdated
+from aiogram.types import (
+    Message, ChatPermissions, CallbackQuery, ChatMemberUpdated,
+    InlineKeyboardMarkup, InlineKeyboardButton as IKB,
+)
 from aiogram.filters import ChatMemberUpdatedFilter, JOIN_TRANSITION, LEAVE_TRANSITION
 from aiogram.dispatcher.event.bases import skip
 from asgiref.sync import sync_to_async
@@ -1033,8 +1036,6 @@ async def cb_tag_menu(call: CallbackQuery, bot: Bot):
 
 
 # ─── لینک ────────────────────────────────────────────────────────────────────
-
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton as IKB
 
 def _link_panel() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
