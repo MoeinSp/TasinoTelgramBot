@@ -40,13 +40,19 @@ from bot.helpers import (
     db_ban_user, db_unban_user, db_mute_user, db_unmute_user,
     db_get_dice_stats, db_record_dice_roll,
     db_update_card, db_get_card, db_delete_card,
-    safe_calc, LOCK_MAP, LOCK_NAMES, LOCK_ORDER,
+    LOCK_MAP, LOCK_NAMES, LOCK_ORDER,
     db_set_welcome, db_set_anti_flood,
     db_set_captcha, db_set_antiraid, db_set_log_channel, log_action,
     full_permissions, unrestrict_user,
     db_save_note, db_get_note, db_delete_note, db_list_notes,
     db_set_rules, db_get_rules, db_set_night_mode, is_night_time,
     db_set_telegram_emoji, telegram_emoji_on,
+)
+from bot.utils import normalize_numbers, safe_calc as utils_safe_calc
+from bot.finance import (
+    get_balance, increase_wallet, decrease_wallet, clear_wallet,
+    get_active_accounts, get_transactions, get_transactions_count,
+    clear_all_wallets,
 )
 from bot.group_help import get_page, PAGE_MAIN
 from bot.panel_keyboards import get_panel, panel_main, locks_panel_text, locks_panel_kb
@@ -1106,22 +1112,20 @@ async def cmd_time(message: Message):
 
 # ─── ماشین حساب ──────────────────────────────────────────────────────────────
 
-_MATH_RE = re.compile(r"^[\d\s\+\-\*\/\(\)\.\،\,×÷]+$")
+_CALC_OP_RE = re.compile(r"[+\-*/×÷]")
 
-@router.message(F.text.func(lambda t: bool(t and _MATH_RE.match(t) and any(c in t for c in "+-*/×÷"))))
+@router.message(F.text.func(lambda t: bool(t and _CALC_OP_RE.search(normalize_numbers(t)))))
 async def cmd_calc_direct(message: Message):
-    result = safe_calc(message.text.strip())
+    chat_id = message.chat.id
+    text = normalize_numbers(message.text.strip())
+    if chat_id in WAITING_ROUNDS and text.replace(" ", "").isdigit():
+        return
+    result = utils_safe_calc(text)
     if result is None:
         return
-    return await _reply(message, f"🔢 {message.text.strip()} = {result}")
-
-@router.message(F.text.regexp(r"^حساب\s+.+$"))
-async def cmd_calc(message: Message):
-    expr = message.text.split(maxsplit=1)[1].strip()
-    result = safe_calc(expr)
-    if result is None:
-        return await _reply(message, "❌ عبارت ریاضی معتبر نیست.")
-    return await _reply(message, f"🔢 {expr} = {result}")
+    if isinstance(result, float) and result.is_integer():
+        result = int(result)
+    return await _reply(message, f"محاسبـه شد ↻ : {result}")
 
 
 # ─── وضعیت کاربر ─────────────────────────────────────────────────────────────
@@ -1619,59 +1623,6 @@ async def cmd_target_profile(message: Message, bot: Bot):
 # ─── کیف پول و مالی ──────────────────────────────────────────────────────────
 
 @sync_to_async
-def _get_wallet(chat_id, user_id):
-    from account.models import TelegramGroupMember
-    m, _ = TelegramGroupMember.objects.get_or_create(
-        telegram_chat_id=chat_id, telegram_user_id=user_id,
-        defaults={"role": "member"}
-    )
-    return m
-
-# موجودی کاربران در فیلد point ذخیره می‌شه
-@sync_to_async
-def _increase_wallet(chat_id, user_id, amount):
-    from account.models import TelegramGroupMember
-    m, _ = TelegramGroupMember.objects.get_or_create(
-        telegram_chat_id=chat_id, telegram_user_id=user_id,
-        defaults={"role": "member"}
-    )
-    m.point = (m.point or 0) + amount
-    m.save(update_fields=["point"])
-    return m.point
-
-@sync_to_async
-def _decrease_wallet(chat_id, user_id, amount):
-    from account.models import TelegramGroupMember
-    m, _ = TelegramGroupMember.objects.get_or_create(
-        telegram_chat_id=chat_id, telegram_user_id=user_id,
-        defaults={"role": "member"}
-    )
-    m.point = (m.point or 0) - amount
-    m.save(update_fields=["point"])
-    return m.point
-
-@sync_to_async
-def _get_balance(chat_id, user_id):
-    from account.models import TelegramGroupMember
-    m = TelegramGroupMember.objects.filter(
-        telegram_chat_id=chat_id, telegram_user_id=user_id
-    ).first()
-    return (m.point or 0) if m else 0
-
-@sync_to_async
-def _clear_wallet(chat_id, user_id):
-    from account.models import TelegramGroupMember
-    m = TelegramGroupMember.objects.filter(
-        telegram_chat_id=chat_id, telegram_user_id=user_id
-    ).first()
-    if not m:
-        return 0
-    old = m.point or 0
-    m.point = 0
-    m.save(update_fields=["point"])
-    return old
-
-@sync_to_async
 def _get_fee(chat_id):
     from account.models import TelegramGroup
     try:
@@ -1690,6 +1641,17 @@ def _set_fee(chat_id, fee):
     g.save(update_fields=["fee_percent"])
 
 
+def _tx_label(tx_type: str) -> tuple[str, str]:
+    labels = {
+        "admin_increase": ("➕ افزایش", "➕"),
+        "admin_decrease": ("➖ کاهش", "➖"),
+        "admin_clear": ("🧾 تسویه", "🧾"),
+        "bet": ("🎲 شرط مسابقه", "🎲"),
+        "win": ("🏆 برد در مسابقه", "🏆"),
+    }
+    return labels.get(tx_type, ("🔹 تراکنش", "🔹"))
+
+
 @router.message(F.text.regexp(r"^(افزایش موجودی|افزایش)\s+\d+"))
 async def cmd_increase_wallet(message: Message, bot: Bot):
     chat_id = message.chat.id
@@ -1702,12 +1664,11 @@ async def cmd_increase_wallet(message: Message, bot: Bot):
     if not target_id:
         return
     parts = message.text.split()
-    amount_text = parts[-1]
     try:
-        amount = int(amount_text)
+        amount = int(parts[-1])
     except ValueError:
         return await _reply(message, "❗ مقدار افزایش عدد معتبر نیست.")
-    new_balance = await _increase_wallet(chat_id, target_id, amount)
+    new_balance = await increase_wallet(chat_id, target_id, amount, admin_id=user_id)
     user_tag = await _mention(target_id, bot, chat_id)
     admin_tag = await _mention(user_id, bot, chat_id)
     text = (
@@ -1732,12 +1693,11 @@ async def cmd_decrease_wallet(message: Message, bot: Bot):
     if not target_id:
         return
     parts = message.text.split()
-    amount_text = parts[-1]
     try:
-        amount = int(amount_text)
+        amount = int(parts[-1])
     except ValueError:
         return await _reply(message, "❗ مقدار کاهش عدد معتبر نیست.")
-    new_balance = await _decrease_wallet(chat_id, target_id, amount)
+    new_balance = await decrease_wallet(chat_id, target_id, amount, admin_id=user_id)
     user_tag = await _mention(target_id, bot, chat_id)
     admin_tag = await _mention(user_id, bot, chat_id)
     text = (
@@ -1750,18 +1710,20 @@ async def cmd_decrease_wallet(message: Message, bot: Bot):
     return await _reply(message, text)
 
 
-@router.message(F.text.in_(["موجودی", "موجودی من"]))
+@router.message(F.text.regexp(r"^موجودی(\s|$)"))
 async def cmd_balance(message: Message, bot: Bot):
     chat_id = message.chat.id
     user_id = message.from_user.id
+    parts = message.text.split()
+    if len(parts) > 2:
+        return await _reply(message, "❌ دستور نامعتبر است.")
     if message.reply_to_message and message.reply_to_message.from_user:
         target_id = message.reply_to_message.from_user.id
     else:
         target_id = user_id
-    balance = await _get_balance(chat_id, target_id)
+    balance = await get_balance(chat_id, target_id)
     user_tag = await _mention(target_id, bot, chat_id)
-    now = jdatetime.datetime.now()
-    j_time_str = now.strftime("%Y/%m/%d - %H:%M")
+    j_time_str = jdatetime.datetime.now().strftime("%Y/%m/%d - %H:%M")
     if balance < 0:
         balance_text = f"🔻 {abs(balance):,} واحد بدهکار"
     else:
@@ -1777,48 +1739,165 @@ async def cmd_balance(message: Message, bot: Bot):
     return await _reply(message, text)
 
 
-@router.message(F.text.in_(["تسویه", "تسویه حساب"]))
+@router.message(F.text.startswith("تسویه"))
 async def cmd_settle(message: Message, bot: Bot):
     chat_id = message.chat.id
     user_id = message.from_user.id
+    text = message.text.strip()
+
+    if text in ("تسویه همه حساب ها", "تسویه تمام حساب ها", "تسویه حساب ها"):
+        if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+            return
+        results = await clear_all_wallets(chat_id, admin_id=user_id)
+        if not results:
+            return await _reply(message, "✅ همه حساب‌ها از قبل صفر بودند.")
+        admin_tag = await _mention(user_id, bot, chat_id)
+        lines = []
+        total = 0
+        for uid, cleared in results[:35]:
+            tag = await _mention(uid, bot, chat_id)
+            total += cleared
+            if cleared < 0:
+                lines.append(f"🔻 {tag} → {abs(cleared):,} واحد بدهکار تسویه شد")
+            else:
+                lines.append(f"✅ {tag} → {cleared:,} واحد تسویه شد")
+        extra = f"\n… و {len(results) - 35} حساب دیگر" if len(results) > 35 else ""
+        result_text = (
+            "🧾 گزارش تسویه کامل حساب‌ها\n━━━━━━━━━━━━━━━━━━\n"
+            + "\n".join(lines) + extra
+            + f"\n━━━━━━━━━━━━━━━━━━\n🛡 مدیر اجراکننده: {admin_tag}\n"
+            f"🔢 تعداد تسویه‌شده: {len(results)}\n"
+            f"💰 مجموع کل: {total:,} واحد اعتباری"
+        )
+        return await _reply(message, result_text)
+
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
         return
+
+    parts = text.split()
+
+    if "کاربر" in text:
+        number = next((int(p) for p in parts if p.isdigit()), None)
+        if number is None:
+            return await _reply(message, "❌ فرمت صحیح: `تسویه کاربر 1`")
+        accounts = await get_active_accounts(chat_id)
+        if not accounts:
+            return await _reply(message, "📭 همه حساب‌ها صاف هستند!")
+        if number < 1 or number > len(accounts):
+            return await _reply(
+                message,
+                f"❌ شماره وارد شده نامعتبر است!\n\n"
+                f"📊 تعداد حساب‌های فعال: {len(accounts)} عدد\n"
+                f"🔢 شماره مجاز: ۱ تا {len(accounts)}\n\n"
+                f"💡 برای مشاهده لیست: `حساب ها`",
+            )
+        target_id = accounts[number - 1]["telegram_user_id"]
+        cleared = await clear_wallet(chat_id, target_id, admin_id=user_id)
+        user_tag = await _mention(target_id, bot, chat_id)
+        admin_tag = await _mention(user_id, bot, chat_id)
+        return await _reply(
+            message,
+            f"🧾 تسویه حساب کاربر شماره {number}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"👤 کاربر: {user_tag}\n"
+            f"🛡 مدیر اجراکننده: {admin_tag}\n\n"
+            f"💸 مبلغ تسویه شده: {cleared:,} واحد\n"
+            f"📊 موجودی فعلی: 0 واحد\n"
+            f"✅ حساب کاربر به طور کامل تسویه شد.",
+        )
+
+    if len(parts) >= 2 and parts[1].isdigit() and not message.reply_to_message:
+        amount = int(parts[1])
+        accounts = await get_active_accounts(chat_id)
+        return await _reply(
+            message,
+            f"⚠️ روش صحیح کاهش موجودی\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"شما دستور `تسویه {amount}` را بدون ریپلای ارسال کردید.\n\n"
+            f"📌 برای کاهش موجودی: روی پیام کاربر ریپلای کنید و `تسویه {amount}` بفرستید.\n"
+            f"📌 برای تسویه کامل: روی پیام کاربر ریپلای کنید و `تسویه` بفرستید.\n"
+            f"📌 برای تسویه از روی لیست: `تسویه کاربر 1`\n\n"
+            f"📊 تعداد حساب‌های فعال: {len(accounts)} عدد",
+        )
+
     if not message.reply_to_message:
-        return await _reply(message, "⚠️ لطفاً روی پیام کاربر مورد نظر ریپلای کنید.")
+        accounts = await get_active_accounts(chat_id)
+        return await _reply(
+            message,
+            f"📖 راهنمای دستور تسویه\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🔹 تسویه یک کاربر (با ریپلای): `تسویه`\n"
+            f"🔹 کاهش مبلغ (با ریپلای): `تسویه 5000`\n"
+            f"🔹 تسویه از لیست: `تسویه کاربر 1`\n"
+            f"🔹 تسویه همه: `تسویه همه حساب ها`\n\n"
+            f"📊 تعداد حساب‌های فعال: {len(accounts)} عدد",
+        )
+
     target_id = await get_target_from_reply(message, bot)
     if not target_id:
         return
-    cleared = await _clear_wallet(chat_id, target_id)
+
+    if len(parts) >= 2 and parts[1].isdigit():
+        amount = int(parts[1])
+        new_balance = await decrease_wallet(chat_id, target_id, amount, admin_id=user_id)
+        user_tag = await _mention(target_id, bot, chat_id)
+        admin_tag = await _mention(user_id, bot, chat_id)
+        return await _reply(
+            message,
+            "⚠️ عملیات کاهش موجودی انجام شد\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"👤 کاربر: {user_tag}\n"
+            f"🛡 مدیر اجراکننده: {admin_tag}\n\n"
+            f"💳 مبلغ کسر شده: {amount:,} واحد\n"
+            f"📊 موجودی فعلی: {new_balance:,} واحد",
+        )
+
+    cleared = await clear_wallet(chat_id, target_id, admin_id=user_id)
     user_tag = await _mention(target_id, bot, chat_id)
     admin_tag = await _mention(user_id, bot, chat_id)
-    j_date = jdatetime.datetime.now()
-    j_time_str = j_date.strftime("%Y/%m/%d - %H:%M")
-    text = (
-        "🧾 عملیات تسویه حساب با موفقیت انجام شد\n\n"
+    return await _reply(
+        message,
+        "🧾 عملیات تسویه حساب با موفقیت انجام شد\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"👤 کاربر: {user_tag}\n"
         f"🛡 مدیر اجراکننده: {admin_tag}\n\n"
-        f"💸 مبلغ تسویه شده: {cleared:,} واحد اعتباری\n"
-        f"📊 موجودی فعلی: 0 واحد اعتباری\n"
-        "✔ حساب کاربر به طور کامل تسویه شد."
+        f"💸 مبلغ تسویه شده: {cleared:,} واحد\n"
+        f"📊 موجودی فعلی: 0 واحد\n"
+        f"✅ حساب کاربر به طور کامل تسویه شد.",
     )
-    return await _reply(message, text)
 
 
-@router.message(F.text.in_(["حساب ها", "حساب‌ها"]))
+@router.message(F.text.func(lambda t: bool(t and (t.startswith("حساب ها") or t.startswith("حساب‌ها")))))
 async def cmd_accounts(message: Message, bot: Bot):
     chat_id = message.chat.id
     user_id = message.from_user.id
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
         return
-    members = await db_get_all_members_balance(chat_id)
-    if not members:
-        return await _reply(message, "📊 هیچ عضوی ثبت نشده.")
+    accounts = await get_active_accounts(chat_id)
+    if not accounts:
+        return await _reply(message, "✅ همه حساب‌ها صاف شده!")
     lines = []
-    for i, m in enumerate(members[:30], 1):
-        name = m["alias"] or str(m["telegram_user_id"])
-        balance = m["point"] or 0
-        lines.append(f"  {i}. {name}: {balance:,} تومان")
-    text = "💰 موجودی اعضا:\n━━━━━━━━━━━━━━━━\n" + "\n".join(lines)
+    total_balance = 0
+    limit = 34
+    for idx, acc in enumerate(accounts[:limit], start=1):
+        uid = acc["telegram_user_id"]
+        balance = acc["point"] or 0
+        total_balance += balance
+        tag = await _mention(uid, bot, chat_id)
+        if balance < 0:
+            lines.append(f"{idx}. {tag} — 🔻 {abs(balance):,} واحد بدهکار")
+        else:
+            lines.append(f"{idx}. {tag} — {balance:,} واحد")
+    if len(accounts) > limit:
+        lines.append(f"… و {len(accounts) - limit} حساب دیگر")
+    text = (
+        "📒 لیست حساب‌های فعال گروه\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        + "\n".join(lines)
+        + "\n━━━━━━━━━━━━━━━━━━\n"
+        f"💼 مجموع تراز گروه: {total_balance:,} واحد\n"
+        f"🔢 تعداد حساب‌های تسویه نشده: {len(accounts)}"
+    )
     return await _reply(message, text)
 
 
@@ -1826,7 +1905,65 @@ async def cmd_accounts(message: Message, bot: Bot):
 async def cmd_report(message: Message, bot: Bot):
     chat_id = message.chat.id
     user_id = message.from_user.id
-    return await _reply(message, "📭 سیستم گزارش مالی در این نسخه فعال نیست.")
+    parts = message.text.split()
+    page = 1
+    if len(parts) >= 2:
+        try:
+            page = max(1, int(parts[1]))
+        except ValueError:
+            page = 1
+    limit = 5
+    offset = (page - 1) * limit
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_id = message.reply_to_message.from_user.id
+    else:
+        target_id = user_id
+    total_transactions = await get_transactions_count(chat_id, target_id)
+    total_pages = (total_transactions + limit - 1) // limit if total_transactions > 0 else 1
+    if page > total_pages and total_pages > 0:
+        target_tag = await _mention(target_id, bot, chat_id)
+        return await _reply(
+            message,
+            f"❌ صفحه مورد نظر یافت نشد!\n\n"
+            f"👤 {target_tag}\n"
+            f"📊 تعداد کل تراکنش‌ها: {total_transactions} عدد\n"
+            f"📄 آخرین صفحه موجود: {total_pages}\n\n"
+            f"💡 برای مشاهده صفحه آخر: `گزارش {total_pages}`",
+        )
+    transactions = await get_transactions(chat_id, target_id, limit, offset)
+    if not transactions:
+        return await _reply(message, "📭 گزارشی برای این کاربر ثبت نشده است.")
+    target_tag = await _mention(target_id, bot, chat_id)
+    current_balance = await get_balance(chat_id, target_id)
+    text = (
+        f"📊 گزارش مالی\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 {target_tag}\n"
+        f"🆔 <code>{target_id}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📄 صفحه {page} از {total_pages}\n"
+        f"💰 موجودی فعلی: {current_balance:,} واحد\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    for t in transactions:
+        action, emoji = _tx_label(t.type)
+        j_time_str = jdatetime.datetime.fromgregorian(datetime=t.created_at).strftime("%Y/%m/%d - %H:%M")
+        text += f"{emoji} {action}\n"
+        text += f"   💰 مبلغ: {t.amount:,} واحد\n"
+        text += f"   📊 موجودی پس از تراکنش: {t.balance_after:,} واحد\n"
+        if t.type in ("bet", "win"):
+            text += "   🤖 عامل: ربات (سیستم خودکار)\n"
+        elif t.admin_id:
+            admin_tag = await _mention(t.admin_id, bot, chat_id)
+            text += f"   👤 عامل: {admin_tag}\n"
+        else:
+            text += "   🤖 عامل: ربات (سیستم خودکار)\n"
+        if t.description:
+            text += f"   📝 توضیح: {t.description}\n"
+        text += f"   🕒 {j_time_str}\n\n"
+    if total_pages > 1:
+        text += f"💡 صفحه بعد: `گزارش {page + 1}`" if page < total_pages else ""
+    return await _reply(message, text)
 
 
 @router.message(F.text.regexp(r"^(کارمزد|حق واسطه|نرخ کارمزد)(\s+\d+)?$"))

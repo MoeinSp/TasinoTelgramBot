@@ -503,3 +503,32 @@ class Note(models.Model):
 
     def __str__(self):
         return f"#{self.name}"
+
+
+class WalletTransaction(models.Model):
+    TYPES = (
+        ("admin_increase", "افزایش ادمین"),
+        ("admin_decrease", "کاهش ادمین"),
+        ("admin_clear", "تسویه"),
+        ("bet", "شرط"),
+        ("win", "برد"),
+    )
+
+    telegram_chat_id = models.BigIntegerField(db_index=True)
+    telegram_user_id = models.BigIntegerField(db_index=True)
+    admin_id = models.BigIntegerField(null=True, blank=True)
+    type = models.CharField(max_length=32, choices=TYPES)
+    amount = models.BigIntegerField()
+    balance_after = models.BigIntegerField()
+    description = models.CharField(max_length=256, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["telegram_chat_id", "telegram_user_id", "-created_at"]),
+            models.Index(fields=["type"]),
+        ]
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.telegram_user_id} | {self.type} | {self.amount}"

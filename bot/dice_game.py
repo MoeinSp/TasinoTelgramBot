@@ -620,8 +620,8 @@ async def send_final_results(chat_id, bot, message_id):
         entry_amount = costs["entry"]
         winner_amount = costs["winner_total"]
         for player_id in players_list:
-            await _decrease_wallet(chat_id, player_id, entry_amount)
-        await _increase_wallet(chat_id, winner_id, winner_amount)
+            await record_game_bet(chat_id, player_id, entry_amount)
+        await record_game_win(chat_id, winner_id, winner_amount)
 
     lines = []
     if winner_display and not is_tie:
@@ -756,7 +756,7 @@ async def handle_dice(text, chat_id, message_id, bot, user_id, dice_option_off, 
         costs = calc_bet_costs(bet_amount, fee_percent, bet_mode)
         entry_cost = costs["entry"]
         fee_per = costs["fee_per"]
-        balance = await _get_balance(chat_id, user_id)
+        balance = await get_balance(chat_id, user_id)
         if balance < entry_cost:
             if bet_mode == BET_MODE_FIXED and fee_per > 0:
                 fee_line = f"\n   └ حق واسطه ({fee_percent}٪): {fee_per:,} واحد (از جایزه)"
@@ -928,36 +928,4 @@ async def _bulk_mentions(user_ids: list, bot, chat_id: int) -> dict:
     return result
 
 
-# موجودی کاربران در فیلد point ذخیره می‌شه
-async def _get_balance(chat_id, user_id):
-    from asgiref.sync import sync_to_async
-    @sync_to_async
-    def _q():
-        from account.models import TelegramGroupMember
-        m = TelegramGroupMember.objects.filter(
-            telegram_chat_id=chat_id, telegram_user_id=user_id
-        ).first()
-        return (m.point or 0) if m else 0
-    return await _q()
-
-
-async def _increase_wallet(chat_id, user_id, amount):
-    from asgiref.sync import sync_to_async
-    @sync_to_async
-    def _q():
-        from account.models import TelegramGroupMember
-        m, _ = TelegramGroupMember.objects.get_or_create(telegram_chat_id=chat_id, telegram_user_id=user_id, defaults={"role": "member"})
-        m.point = (m.point or 0) + amount
-        m.save(update_fields=["point"])
-    await _q()
-
-
-async def _decrease_wallet(chat_id, user_id, amount):
-    from asgiref.sync import sync_to_async
-    @sync_to_async
-    def _q():
-        from account.models import TelegramGroupMember
-        m, _ = TelegramGroupMember.objects.get_or_create(telegram_chat_id=chat_id, telegram_user_id=user_id, defaults={"role": "member"})
-        m.point = (m.point or 0) - amount
-        m.save(update_fields=["point"])
-    await _q()
+from bot.finance import get_balance, record_game_bet, record_game_win

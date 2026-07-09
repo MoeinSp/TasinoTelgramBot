@@ -1,5 +1,5 @@
 aiogram==3.28.2
-django>=4.2
+django==6.0.5
 django-jalali
 jdatetime
 asgiref
