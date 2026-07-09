@@ -52,5 +52,6 @@ FORCED_JOIN: dict = {
     "channel_username": "",
     "invite_link": "",
 }
+FORCED_JOIN_MEMBER_CHECK: dict[tuple[int, int], tuple[bool, float]] = {}
 
 CACHE_LOADED = False

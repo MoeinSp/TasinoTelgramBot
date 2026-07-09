@@ -1,6 +1,8 @@
 """جوین اجباری کانال — بررسی عضویت در پیوی ربات."""
 from __future__ import annotations
 
+import time
+
 from aiogram import Bot
 from aiogram.enums import ChatMemberStatus
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -58,6 +60,7 @@ def db_load_forced_join() -> dict:
 def apply_forced_join_cache(data: dict) -> None:
     cache.FORCED_JOIN.clear()
     cache.FORCED_JOIN.update(data)
+    cache.FORCED_JOIN_MEMBER_CHECK.clear()
 
 
 @sync_to_async
@@ -163,10 +166,20 @@ async def is_user_channel_member(bot: Bot, user_id: int) -> bool:
     channel_id = cache.FORCED_JOIN.get("channel_id")
     if not channel_id:
         return True
+    key = (int(channel_id), int(user_id))
+    now = time.monotonic()
+    cached = cache.FORCED_JOIN_MEMBER_CHECK.get(key)
+    if cached and cached[1] > now:
+        return cached[0]
     try:
         member = await bot.get_chat_member(channel_id, user_id)
-        return member.status in _JOINED_STATUSES
+        is_joined = member.status in _JOINED_STATUSES
+        ttl = 300.0 if is_joined else 20.0
+        cache.FORCED_JOIN_MEMBER_CHECK[key] = (is_joined, now + ttl)
+        return is_joined
     except Exception:
+        # در خطاهای لحظه‌ای شبکه، کمی کش کوتاه می‌زنیم تا هر آپدیت دوباره ریکوئست نشود.
+        cache.FORCED_JOIN_MEMBER_CHECK[key] = (False, now + 8.0)
         return False
 
 
