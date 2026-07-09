@@ -1,6 +1,6 @@
 # ─── Stage 1: build ──────────────────────────────────────────────────────────
 # gcc و libpq-dev فقط برای کامپایل psycopg2 لازمه، به runtime نمیره
-FROM python:3.11-alpine AS builder
+FROM python:3.12-alpine AS builder
 
 RUN apk add --no-cache gcc musl-dev libpq-dev
 
@@ -9,14 +9,14 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # ─── Stage 2: runtime ────────────────────────────────────────────────────────
-FROM python:3.11-alpine
+FROM python:3.12-alpine
 
 # فقط کتابخونه runtime پستگرس (بدون gcc)
 RUN apk add --no-cache libpq
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/install/lib/python3.11/site-packages
+    PYTHONPATH=/install/lib/python3.12/site-packages
 
 WORKDIR /app
 
