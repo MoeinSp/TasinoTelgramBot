@@ -934,24 +934,23 @@ async def cmd_top_users(message: Message, bot: Bot):
 
 # ─── تگ همگانی ───────────────────────────────────────────────────────────────
 
-@router.message(F.text.regexp(r"^تگ(\s+.*)?$"))
-async def cmd_tag(message: Message, bot: Bot):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
-        return await _reply(message, "❌ فقط ادمین‌ها می‌توانند تگ همگانی بزنند.")
-    custom_text = message.text[3:].strip()
-    top = await db_get_top_users(chat_id, 50)
-    if not top:
-        return await _reply(message, "📭 هنوز عضوی ثبت نشده.")
-    # منشن مخفی در بعضی کلاینت‌ها درست عمل نمی‌کند؛
-    # پس منشن‌ها را با نام نمایشی ارسال می‌کنیم.
-    mention_items = []
-    for u in top:
-        uid = u["telegram_user_id"]
+def _tag_panel_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [IKB(text="📣 تگ همه", callback_data="tmenu:all")],
+        [IKB(text="🛡 تگ ادمین‌ها", callback_data="tmenu:admins"), IKB(text="⭐ تگ ویژه‌ها", callback_data="tmenu:vips")],
+        [IKB(text="🏆 تگ ۱۰ کاربر برتر", callback_data="tmenu:top10")],
+        [IKB(text="❌ بستن", callback_data="tmenu:close")],
+    ])
+
+
+async def _send_tag_message(bot: Bot, chat_id: int, user_ids: list[int], header: str):
+    if not user_ids:
+        return await safe_send(bot, chat_id, "📭 کاربری برای تگ یافت نشد.")
+
+    mention_items: list[str] = []
+    for uid in user_ids:
         mention_items.append(await _mention(uid, bot, chat_id))
 
-    # برای خوانایی و کاهش ریسک محدودیت طول پیام
     mentions = []
     line = []
     for i, m in enumerate(mention_items, 1):
@@ -962,8 +961,75 @@ async def cmd_tag(message: Message, bot: Bot):
     if line:
         mentions.append(" | ".join(line))
 
-    header = custom_text or "📢 اطلاعیه"
     await safe_send(bot, chat_id, f"{header}\n\n" + "\n".join(mentions))
+
+
+@router.message(F.text.regexp(r"^تگ(\s+.*)?$"))
+async def cmd_tag(message: Message, bot: Bot):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return await _reply(message, "❌ فقط ادمین‌ها می‌توانند تگ همگانی بزنند.")
+    custom_text = message.text[3:].strip()
+    if not custom_text:
+        return await safe_send(
+            bot,
+            chat_id,
+            "📣 <b>منوی تگ گروه</b>\n\nنوع تگ موردنظر رو انتخاب کن:",
+            reply_to=message.message_id,
+            reply_markup=_tag_panel_kb(),
+        )
+
+    top = await db_get_top_users(chat_id, 50)
+    if not top:
+        return await _reply(message, "📭 هنوز عضوی ثبت نشده.")
+    user_ids = [u["telegram_user_id"] for u in top]
+    await _send_tag_message(bot, chat_id, user_ids, custom_text or "📢 اطلاعیه")
+
+
+@router.callback_query(F.data.startswith("tmenu:"))
+async def cb_tag_menu(call: CallbackQuery, bot: Bot):
+    chat_id = call.message.chat.id
+    user_id = call.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return await call.answer("❌ فقط ادمین‌ها", show_alert=True)
+
+    action = call.data[6:]
+    if action == "close":
+        try:
+            await call.message.delete()
+        except Exception:
+            pass
+        return await call.answer()
+
+    if action == "all":
+        top = await db_get_top_users(chat_id, 50)
+        await _send_tag_message(bot, chat_id, [u["telegram_user_id"] for u in top], "📣 تگ همه اعضای فعال")
+        return await call.answer("انجام شد")
+
+    if action == "admins":
+        admin_ids = await db_get_admins(chat_id)
+        owner_id = cache.OWNER_CACHE.get(chat_id)
+        ids = []
+        if owner_id:
+            ids.append(owner_id)
+        for aid in admin_ids:
+            if aid not in ids:
+                ids.append(aid)
+        await _send_tag_message(bot, chat_id, ids, "🛡 تگ ادمین‌های گروه")
+        return await call.answer("انجام شد")
+
+    if action == "vips":
+        vip_ids = await db_get_vips(chat_id)
+        await _send_tag_message(bot, chat_id, vip_ids, "⭐ تگ کاربران ویژه")
+        return await call.answer("انجام شد")
+
+    if action == "top10":
+        top10 = await db_get_top_users(chat_id, 10)
+        await _send_tag_message(bot, chat_id, [u["telegram_user_id"] for u in top10], "🏆 تگ ۱۰ کاربر برتر")
+        return await call.answer("انجام شد")
+
+    await call.answer()
 
 
 # ─── لینک ────────────────────────────────────────────────────────────────────
