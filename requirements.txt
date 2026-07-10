@@ -9,3 +9,4 @@ psycopg2-binary
 redis>=4.0,<5
 aiohttp
 django-unfold
+APScheduler>=3.10,<4
