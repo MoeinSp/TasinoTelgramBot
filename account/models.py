@@ -96,6 +96,12 @@ class TelegramGroup(models.Model):
         verbose_name="تاس متوالی"
     )
 
+    dice_turn_limit = models.PositiveIntegerField(
+        default=0,
+        verbose_name="محدودیت تعداد نوبت تاس",
+        help_text="۰ = بدون محدودیت. مثلاً ۲ یعنی همه تاس‌ها باید در دقیقاً ۲ نوبت ریخته شوند.",
+    )
+
     warning_enabled = models.BooleanField(
         default=True,
         verbose_name="اخطار خودکار"

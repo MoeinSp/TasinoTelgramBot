@@ -24,6 +24,8 @@ def _load_from_db():
             cache.SPEAKER_ON.add(cid)
         if group.dice_option:
             cache.DICE_OPTION.add(cid)
+        if getattr(group, "dice_turn_limit", 0):
+            cache.DICE_TURN_LIMIT[cid] = int(group.dice_turn_limit)
 
         cache.GROUP_LOCKS[cid] = group.locks
         cache.ADMINS_CACHE.setdefault(cid, set())

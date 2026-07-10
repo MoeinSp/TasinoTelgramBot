@@ -206,6 +206,26 @@ def db_disable_dice_option(chat_id: int):
 
 
 @sync_to_async
+def db_get_dice_turn_limit(chat_id: int) -> int:
+    from account.models import TelegramGroup
+    if chat_id in cache.DICE_TURN_LIMIT:
+        return int(cache.DICE_TURN_LIMIT.get(chat_id) or 0)
+    g = TelegramGroup.objects.filter(telegram_chat_id=chat_id).only("dice_turn_limit").first()
+    val = int(getattr(g, "dice_turn_limit", 0) or 0) if g else 0
+    cache.DICE_TURN_LIMIT[chat_id] = val
+    return val
+
+
+@sync_to_async
+def db_set_dice_turn_limit(chat_id: int, limit: int) -> int:
+    from account.models import TelegramGroup
+    limit = max(0, int(limit))
+    TelegramGroup.objects.filter(telegram_chat_id=chat_id).update(dice_turn_limit=limit)
+    cache.DICE_TURN_LIMIT[chat_id] = limit
+    return limit
+
+
+@sync_to_async
 def db_enable_speaker(chat_id: int):
     from account.models import TelegramGroup
     TelegramGroup.objects.filter(telegram_chat_id=chat_id).update(is_speaker_enabled=True)

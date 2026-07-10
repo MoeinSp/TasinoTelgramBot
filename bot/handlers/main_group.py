@@ -26,6 +26,7 @@ from bot.helpers import (
     db_enable_group_off, db_disable_group_off,
     db_enable_group_lock, db_disable_group_lock,
     db_enable_dice_option, db_disable_dice_option,
+    db_get_dice_turn_limit, db_set_dice_turn_limit,
     db_enable_speaker, db_disable_speaker,
     db_update_lock, db_get_locks,
     db_set_owner,
@@ -1385,6 +1386,47 @@ async def cmd_dice_option_off(message: Message):
     return await _reply(message, "• تاس متوالی با موفقیت خاموش شد.\n• دیگه دو عدد پشت هم نمیاد!")
 
 
+@router.message(F.text.regexp(r"^محدودیت تعداد تاس(\s+\d+)?$"))
+async def cmd_dice_turn_limit(message: Message):
+    """محدودیت تعداد تاس 2 → همه تاس‌ها باید در دقیقاً ۲ نوبت ریخته شوند."""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return
+    parts = message.text.strip().split()
+    if len(parts) == 3:
+        current = await db_get_dice_turn_limit(chat_id)
+        if current <= 0:
+            return await _reply(
+                message,
+                "📌 محدودیت تعداد تاس: خاموش\n\n"
+                "برای فعال‌سازی مثلاً بگو:\n"
+                "• محدودیت تعداد تاس 2\n"
+                "برای خاموش کردن: محدودیت تعداد تاس 0",
+            )
+        return await _reply(
+            message,
+            f"📌 محدودیت تعداد تاس این گپ: {current}\n\n"
+            f"هر بازیکن باید همهٔ تاس‌هایش را در دقیقاً {current} نوبت بریزد.\n"
+            f"خاموش کردن: محدودیت تعداد تاس 0",
+        )
+    try:
+        limit = int(parts[-1])
+    except ValueError:
+        return
+    if limit < 0:
+        return await _reply(message, "❌ عدد باید ۰ یا بیشتر باشد.")
+    await db_set_dice_turn_limit(chat_id, limit)
+    if limit == 0:
+        return await _reply(message, "✅ محدودیت تعداد تاس خاموش شد.")
+    return await _reply(
+        message,
+        f"✅ محدودیت تعداد تاس روی {limit} تنظیم شد.\n\n"
+        f"در مسابقه، هر بازیکن باید همهٔ تاس‌هایش را در دقیقاً {limit} نوبت بریزد.\n"
+        f"مثال: راند ۲۵ و محدودیت ۲ → اگر اول «تاس ۱» بزند، نوبت بعد حتماً «تاس ۲۴».",
+    )
+
+
 # ─── قفل ها با نمایش اخطار ────────────────────────────────────────────────────
 
 @router.message(F.text.in_(["قفل ها", "قفل‌ها", "وضعیت قفل", "پنل قفل"]))
@@ -2410,7 +2452,7 @@ async def cmd_start_game(message: Message, bot: Bot):
         msg += (
             f"\n✅ برای شرکت «تاس» بفرست\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"⏱️ مهلت ثبت‌نام: ۵ دقیقه\n"
+            f"⏱️ مهلت ثبت‌نام: ۱۰ دقیقه\n"
             f"📌 جایگاه‌های خالی: {total_players}\n\n"
             f"❌ لغو بازی: «لغو»"
         )
@@ -2422,7 +2464,7 @@ async def cmd_start_game(message: Message, bot: Bot):
             f"✅ برای شرکت در مسابقه، همین حالا\n"
             f"دستور «تاس» را ارسال کنید.\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"⏱️ مهلت ثبت‌نام: ۵ دقیقه\n"
+            f"⏱️ مهلت ثبت‌نام: ۱۰ دقیقه\n"
             f"📌 جایگاه‌های خالی: {total_players}\n\n"
             f"❌ لغو بازی: کلمه «لغو»"
         )
@@ -2580,6 +2622,12 @@ async def cmd_dice(message: Message, bot: Bot):
         await handle_round_selection(chat_id, user_id, text, bot, message.message_id)
         return
 
+    # تاس خاموش → فقط وقتی بازی فعال نیست بلاک شود
+    if not has_active_game(chat_id):
+        group_cmds = await db_get_group_commands(chat_id)
+        if "تاس" not in group_cmds:
+            return await _reply(message, "این قابلیت توسط ادمین گروه غیرفعال شده است.")
+
     theme_id = await db_get_group_theme(chat_id)
     dice_option_off = chat_id not in cache.DICE_OPTION
     await handle_dice(
@@ -2625,6 +2673,12 @@ async def handle_native_dice(message: Message, bot: Bot):
 
     # فقط تاس 🎲 با game logic کامل درگیر می‌شه
     if emoji == "🎲":
+        # تاس خاموش و بدون بازی → نادیده
+        if not has_active_game(chat_id):
+            group_cmds = await db_get_group_commands(chat_id)
+            if "تاس" not in group_cmds:
+                return
+
         LAST_DICE[chat_id] = value
         await db_record_dice_roll(chat_id, user_id, value)
 
