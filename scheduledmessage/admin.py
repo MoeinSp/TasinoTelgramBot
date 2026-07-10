@@ -1,11 +1,15 @@
 from django.contrib import admin
 from django.utils.html import format_html
+from django.utils.safestring import mark_safe
 from django.utils import timezone
+from unfold.admin import ModelAdmin
+from unfold.decorators import display
+
 from .models import ScheduledMessage
 
 
 @admin.register(ScheduledMessage)
-class ScheduledMessageAdmin(admin.ModelAdmin):
+class ScheduledMessageAdmin(ModelAdmin):
     list_display = (
         "title", "type_badge", "target_info", "is_active", "status_badge",
         "last_sent", "created_at",
@@ -15,24 +19,16 @@ class ScheduledMessageAdmin(admin.ModelAdmin):
     list_editable = ("is_active",)
     ordering = ("-is_active", "-id")
     readonly_fields = ("created_at", "last_sent", "next_send_preview")
+    list_per_page = 30
 
     fieldsets = (
-        ("محتوا", {
-            "fields": ("title", "text")
-        }),
+        ("محتوا", {"fields": ("title", "text")}),
         ("نوع زمان‌بندی", {
             "fields": ("type", "interval_minutes", "run_at"),
-            "description": (
-                "⏱ دوره‌ای: فاصله دقیقه را وارد کنید | "
-                "📅 زمان مشخص: تاریخ و ساعت دقیق ارسال را وارد کنید"
-            ),
+            "description": "⏱ دوره‌ای: فاصله دقیقه | 📅 زمان مشخص: تاریخ و ساعت",
         }),
         ("هدف ارسال", {
             "fields": ("send_to_all", "send_to_pv", "chat_id"),
-            "description": (
-                "ارسال به همه گروه‌ها ← send_to_all | "
-                "گروه خاص ← فقط chat_id را وارد کنید"
-            ),
         }),
         ("تنظیمات تبلیغات", {
             "fields": ("ignore_group_ad_setting", "queue_ad_until_message"),
@@ -43,41 +39,40 @@ class ScheduledMessageAdmin(admin.ModelAdmin):
         }),
     )
 
-    # ─── نمایشی ───────────────────────────────────────────────────────────────
-
+    @display(description="نوع")
     def type_badge(self, obj):
         if obj.type == "interval":
             mins = obj.interval_minutes or "؟"
             return format_html(
-                '<span style="color:#2196F3;font-weight:bold">⏱ هر {} دقیقه</span>', mins
+                '<span style="color:#3b82f6;font-weight:700">⏱ هر {} دقیقه</span>', mins
             )
         if obj.type == "fixed":
             t = obj.run_at.strftime("%Y-%m-%d %H:%M") if obj.run_at else "—"
             return format_html(
-                '<span style="color:#9C27B0;font-weight:bold">📅 {}</span>', t
+                '<span style="color:#a855f7;font-weight:700">📅 {}</span>', t
             )
         return obj.type
-    type_badge.short_description = "نوع"
 
+    @display(description="هدف")
     def target_info(self, obj):
         parts = []
         if obj.send_to_all:
             parts.append("🌐 همه گروه‌ها")
         if obj.send_to_pv:
-            parts.append("💬 پیوی کاربران")
+            parts.append("💬 پیوی")
         if obj.chat_id and not obj.send_to_all:
-            parts.append(f"👥 گروه {obj.chat_id}")
+            parts.append(f"👥 {obj.chat_id}")
         return " | ".join(parts) if parts else "—"
-    target_info.short_description = "هدف"
 
+    @display(description="وضعیت")
     def status_badge(self, obj):
         if not obj.is_active:
-            return format_html('<span style="color:#999">⛔ غیرفعال</span>')
+            return mark_safe('<span style="color:#94a3b8">⛔ غیرفعال</span>')
         if obj.type == "fixed" and obj.last_sent:
-            return format_html('<span style="color:green">✅ ارسال شد</span>')
-        return format_html('<span style="color:green;font-weight:bold">🟢 فعال</span>')
-    status_badge.short_description = "وضعیت"
+            return mark_safe('<span style="color:#22c55e">✅ ارسال شد</span>')
+        return mark_safe('<span style="color:#22c55e;font-weight:700">🟢 فعال</span>')
 
+    @display(description="ارسال بعدی")
     def next_send_preview(self, obj):
         if not obj.is_active:
             return "—"
@@ -101,4 +96,3 @@ class ScheduledMessageAdmin(admin.ModelAdmin):
                 return "⚡ آماده ارسال"
             return "⚡ اولین ارسال در دقیقه آینده"
         return "—"
-    next_send_preview.short_description = "ارسال بعدی"

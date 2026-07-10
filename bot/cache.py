@@ -54,4 +54,16 @@ FORCED_JOIN: dict = {
 }
 FORCED_JOIN_MEMBER_CHECK: dict[tuple[int, int], tuple[bool, float]] = {}
 
+# ─── تنظیمات سراسری سایت/ربات ─────────────────────────────────────────────
+SITE_CONFIG: dict = {
+    "link_directory_url": "https://t.me/TasinoBot",
+    "link_directory_title": "🔥 بزرگترین لینکدونی",
+    "support_url": "https://t.me/Spayers",
+    "support_title": "گروه پشتیبانی",
+    "channel_url": "https://t.me/TasinoBot",
+}
+
+# ─── پنل پیوی (گروه انتخاب‌شده برای تنظیمات) ───────────────────────────────
+PV_PANEL_GROUP: dict[int, int] = {}        # user_id → group chat_id
+
 CACHE_LOADED = False

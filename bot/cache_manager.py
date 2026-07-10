@@ -90,8 +90,9 @@ def _load_from_db():
     for wf in WordFilter.objects.all():
         cache.WORD_FILTERS.setdefault(wf.chat_id, []).append(wf.word.lower())
 
-    from bot_setting.models import ForcedJoinConfig
+    from bot_setting.models import ForcedJoinConfig, BotSiteConfig
     from bot.required_join import apply_forced_join_cache
+    from bot.site_config import apply_site_config_cache
     fj = ForcedJoinConfig.get_singleton()
     apply_forced_join_cache({
         "enabled": fj.enabled,
@@ -99,6 +100,14 @@ def _load_from_db():
         "channel_title": fj.channel_title or "",
         "channel_username": fj.channel_username or "",
         "invite_link": fj.invite_link or "",
+    })
+    sc = BotSiteConfig.get_singleton()
+    apply_site_config_cache({
+        "link_directory_url": sc.link_directory_url,
+        "link_directory_title": sc.link_directory_title,
+        "support_url": sc.support_url,
+        "support_title": sc.support_title,
+        "channel_url": sc.channel_url or "",
     })
 
 

@@ -32,6 +32,9 @@ ALLOWED_HOSTS = [h.strip() for h in _allowed.split(",") if h.strip()]
 # Application definition
 
 INSTALLED_APPS = [
+    "unfold",
+    "unfold.contrib.filters",
+    "unfold.contrib.forms",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -40,20 +43,10 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
 
     "django_jalali",
-    # my app
-    # "core",
     "account",
-    # "games",
-    # "scheduler",
     "wordfilter",
-    # "groupmessagelog",
-    # 'messages_app.apps.MessagesAppConfig',
-    # "GroupMute",
-    # "wallet",
-    # "Transaction",
     "bot_setting",
     "scheduledmessage",
-
 ]
 
 REDIS_URL = os.getenv(
@@ -225,3 +218,84 @@ STATICFILES_DIRS = [
 
 STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = '/media/'
+# ─── Unfold Admin ────────────────────────────────────────────────────────────
+from django.urls import reverse_lazy
+
+UNFOLD = {
+    "SITE_TITLE": "تاسینو",
+    "SITE_HEADER": "پنل مدیریت تاسینو",
+    "SITE_SUBHEADER": "مدیریت ربات، گروه‌ها و مالی",
+    "SITE_SYMBOL": "casino",
+    "SHOW_HISTORY": True,
+    "SHOW_VIEW_ON_SITE": False,
+    "ENVIRONMENT": "TasinoAiogram3.settings.unfold_environment",
+    "DASHBOARD_CALLBACK": "TasinoAiogram3.admin_dashboard.dashboard_callback",
+    "COLORS": {
+        "primary": {
+            "50": "239 246 255",
+            "100": "219 234 254",
+            "200": "191 219 254",
+            "300": "147 197 253",
+            "400": "96 165 250",
+            "500": "59 130 246",
+            "600": "37 99 235",
+            "700": "29 78 216",
+            "800": "30 64 175",
+            "900": "30 58 138",
+            "950": "23 37 84",
+        },
+    },
+    "SIDEBAR": {
+        "show_search": True,
+        "show_all_applications": True,
+        "navigation": [
+            {
+                "title": "خانه",
+                "separator": True,
+                "items": [
+                    {"title": "داشبورد", "icon": "dashboard", "link": reverse_lazy("admin:index")},
+                ],
+            },
+            {
+                "title": "تنظیمات سراسری",
+                "separator": True,
+                "items": [
+                    {"title": "لینکدونی و پشتیبانی", "icon": "link", "link": reverse_lazy("admin:bot_setting_botsiteconfig_change", args=[1])},
+                    {"title": "جوین اجباری", "icon": "lock", "link": reverse_lazy("admin:bot_setting_forcedjoinconfig_change", args=[1])},
+                    {"title": "پیام‌های عضویت", "icon": "campaign", "link": reverse_lazy("admin:bot_setting_joinmessage_changelist")},
+                ],
+            },
+            {
+                "title": "گروه‌ها و اعضا",
+                "separator": True,
+                "items": [
+                    {"title": "گروه‌ها", "icon": "groups", "link": reverse_lazy("admin:account_telegramgroup_changelist")},
+                    {"title": "اعضا", "icon": "person", "link": reverse_lazy("admin:account_telegramgroupmember_changelist")},
+                    {"title": "فیلتر کلمات", "icon": "filter_alt", "link": reverse_lazy("admin:wordfilter_wordfilter_changelist")},
+                ],
+            },
+            {
+                "title": "مالی و بازی",
+                "separator": True,
+                "items": [
+                    {"title": "تراکنش‌ها", "icon": "payments", "link": reverse_lazy("admin:account_wallettransaction_changelist")},
+                    {"title": "آمار تاس", "icon": "casino", "link": reverse_lazy("admin:account_dicerollstat_changelist")},
+                    {"title": "لایسنس", "icon": "vpn_key", "link": reverse_lazy("admin:account_license_changelist")},
+                ],
+            },
+            {
+                "title": "پیام‌رسانی",
+                "separator": True,
+                "items": [
+                    {"title": "پیام زمان‌بندی", "icon": "schedule", "link": reverse_lazy("admin:scheduledmessage_scheduledmessage_changelist")},
+                    {"title": "یادگیری ربات", "icon": "school", "link": reverse_lazy("admin:account_learnedresponse_changelist")},
+                    {"title": "یادداشت‌ها", "icon": "sticky_note_2", "link": reverse_lazy("admin:account_note_changelist")},
+                ],
+            },
+        ],
+    },
+}
+
+
+def unfold_environment(request):
+    return ["تاسینو", "info"]

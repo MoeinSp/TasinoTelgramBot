@@ -92,13 +92,16 @@ def panel_header(icon: str, title: str, subtitle: str = "") -> str:
 
 # ─── منوی اصلی ───────────────────────────────────────────────────────────────
 
-def panel_main() -> InlineKeyboardMarkup:
-    return _mk(
+def panel_main(pv: bool = False) -> InlineKeyboardMarkup:
+    rows = [
         [_go("🛡 امنیت و قفل", "locks"), _go("👥 مدیریت اعضا", "manage")],
         [_go("🎲 بازی و سرگرمی", "game"), _go("⚙️ تنظیمات گروه", "settings")],
         [_go("💰 مالی", "finance")],
-        [B(text="❌ بستن", callback_data="p:close")],
-    )
+    ]
+    if pv:
+        rows.append([B(text="🔙 لیست گروه‌ها", callback_data="gs:list")])
+    rows.append([B(text="❌ بستن", callback_data="p:close")])
+    return _mk(*rows)
 
 
 # ─── پنل‌های زنده ────────────────────────────────────────────────────────────
@@ -343,11 +346,18 @@ _CAT_TEXTS = {
 }
 
 
+def _wrap_static_kb(code: str, pv: bool = False):
+    kb_fn = _STATIC_KB.get(code, panel_main)
+    if code in ("", "0"):
+        return panel_main(pv=pv)
+    return kb_fn() if callable(kb_fn) else kb_fn
+
+
 def is_live_page(code: str) -> bool:
     return code in _LIVE_PAGES
 
 
-def get_static_panel(code: str):
+def get_static_panel(code: str, pv: bool = False):
     from bot.group_help import PAGES, ALIASES, _norm
     code = _norm(code).strip()
     if code not in PAGES and code in ALIASES:
@@ -355,8 +365,7 @@ def get_static_panel(code: str):
     text = PAGES.get(code) or _CAT_TEXTS.get(code)
     if text is None:
         return None, None
-    kb_fn = _STATIC_KB.get(code, panel_main)
-    kb = kb_fn() if callable(kb_fn) else kb_fn
+    kb = _wrap_static_kb(code, pv=pv)
     return text, kb
 
 

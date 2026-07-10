@@ -1,0 +1,53 @@
+{% extends "admin/base.html" %}
+{% load i18n %}
+
+{% block title %}{% if subtitle %}{{ subtitle }} | {% endif %}{{ title }} | {{ site_title|default:_('Django site admin') }}{% endblock %}
+
+{% block branding %}
+    {% include "unfold/helpers/site_branding.html" %}
+{% endblock %}
+
+{% block content %}
+    {% if tasino_stats %}
+    <div class="mb-8 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+      {% for card in tasino_stats %}
+      <div class="rounded-default border border-base-200 bg-white p-5 shadow-xs dark:border-base-800 dark:bg-base-900">
+        <div class="text-sm text-font-subtle-light dark:text-font-subtle-dark">{{ card.title }}</div>
+        <div class="mt-2 text-3xl font-semibold tracking-tight">{{ card.metric }}</div>
+        {% if card.footer %}
+        <div class="mt-2 text-xs text-font-subtle-light dark:text-font-subtle-dark">{{ card.footer }}</div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if tasino_links %}
+    <div class="mb-8 rounded-default border border-base-200 bg-white p-5 shadow-xs dark:border-base-800 dark:bg-base-900">
+      <h2 class="mb-3 text-lg font-semibold">🔗 لینک‌های سراسری</h2>
+      <div class="grid gap-2 text-sm">
+        <div>🔥 لینکدونی:
+          <a class="text-primary-600 underline dark:text-primary-400" href="{{ tasino_links.link_directory }}" target="_blank" rel="noopener">
+            {{ tasino_links.link_directory }}
+          </a>
+        </div>
+        <div>💬 پشتیبانی:
+          <a class="text-primary-600 underline dark:text-primary-400" href="{{ tasino_links.support }}" target="_blank" rel="noopener">
+            {{ tasino_links.support }}
+          </a>
+        </div>
+        <div>📌 جوین اجباری: <b>{{ tasino_links.forced_join }}</b> — {{ tasino_links.forced_channel }}</div>
+      </div>
+      <p class="mt-4 text-xs text-font-subtle-light dark:text-font-subtle-dark">
+        ویرایش سریع از منوی «تنظیمات سراسری» در سایدبار.
+      </p>
+    </div>
+    {% endif %}
+
+    <div class="flex flex-col lg:flex-row lg:gap-8">
+        <div class="grow">
+            {% include "unfold/helpers/app_list_default.html" %}
+        </div>
+        {% include "unfold/helpers/history.html" %}
+    </div>
+{% endblock %}

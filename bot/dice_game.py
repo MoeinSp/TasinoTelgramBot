@@ -149,7 +149,7 @@ BET_MODE_EXTRA = "extra"    # شروع 2 50 اضافه — ورودی = شرط +
 
 
 def create_game(chat_id, total_players, bet_amount=0, fee_percent=0, has_bet=False,
-                bet_mode: str = BET_MODE_FIXED):
+                bet_mode: str = BET_MODE_FIXED, starter_admin_id: int | None = None):
     game = {
         "chat_id": chat_id,
         "total_players": total_players,
@@ -160,6 +160,7 @@ def create_game(chat_id, total_players, bet_amount=0, fee_percent=0, has_bet=Fal
         "bet_amount": bet_amount,
         "fee_percent": fee_percent,
         "bet_mode": bet_mode,
+        "starter_admin_id": starter_admin_id,
         "fixed_entry": bet_mode == BET_MODE_FIXED,
         "rounds": 0,
         "total_rounds": 0,
@@ -635,6 +636,15 @@ async def send_final_results(chat_id, bot, message_id):
         for player_id in players_list:
             await record_game_bet(chat_id, player_id, entry_amount)
         await record_game_win(chat_id, winner_id, winner_amount)
+        collector_admin_id = game_data.get("starter_admin_id")
+        if collector_admin_id and costs.get("total_fee", 0) > 0:
+            await record_fee_income(
+                chat_id=chat_id,
+                user_id=int(collector_admin_id),
+                amount=int(costs["total_fee"]),
+                admin_id=int(collector_admin_id),
+                description=f"حق واسطه مسابقه تاس ({'فیکس' if bet_mode == BET_MODE_FIXED else 'اضافه'})",
+            )
 
     lines = []
     if winner_display and not is_tie:
@@ -687,10 +697,11 @@ async def send_final_results(chat_id, bot, message_id):
             lines.append(f"🏆 برد برنده: {winner_amount:,} واحد")
         lines.append("")
         lines.append("📊 تغییرات موجودی:")
+        winner_net = winner_amount - entry_amount
         for uid in players_list:
             display = safe_name(uid)
             if uid == winner_id:
-                lines.append(f"   ✅ {display}: +{winner_amount:,} واحد")
+                lines.append(f"   ✅ {display}: +{winner_net:,} واحد")
             else:
                 lines.append(f"   ❌ {display}: -{entry_amount:,} واحد")
 
@@ -942,4 +953,4 @@ async def _bulk_mentions(user_ids: list, bot, chat_id: int) -> dict:
     return result
 
 
-from bot.finance import get_balance, record_game_bet, record_game_win
+from bot.finance import get_balance, record_game_bet, record_game_win, record_fee_income

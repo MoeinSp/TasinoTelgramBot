@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from asgiref.sync import sync_to_async
 from django.db import transaction as db_transaction
+from django.utils import timezone
 
 
 def _get_or_create_member(chat_id: int, user_id: int):
@@ -29,6 +30,18 @@ def _log_tx(chat_id, user_id, tx_type, amount, balance_after, admin_id=None, des
         balance_after=balance_after,
         description=description or "",
     )
+
+
+@sync_to_async
+def record_fee_income(
+    chat_id: int, user_id: int, amount: int,
+    admin_id: int | None = None, description: str | None = None,
+) -> int:
+    """ثبت درآمد حق واسطه بدون تغییر موجودی کیف پول."""
+    m = _get_or_create_member(chat_id, user_id)
+    bal = m.point or 0
+    _log_tx(chat_id, user_id, "fee", amount, bal, admin_id, description)
+    return bal
 
 
 @sync_to_async
@@ -146,3 +159,49 @@ def clear_all_wallets(chat_id: int, admin_id: int | None = None) -> list[tuple[i
             _log_tx(chat_id, m.telegram_user_id, "admin_clear", abs(old), 0, admin_id)
             results.append((m.telegram_user_id, old))
     return results
+
+
+@sync_to_async
+def get_fee_report(
+    chat_id: int,
+    days: int = 7,
+    target_user_id: int | None = None,
+    day_offset: int | None = None,
+) -> dict:
+    from datetime import timedelta
+    from account.models import WalletTransaction
+
+    today = timezone.localdate()
+    qs = WalletTransaction.objects.filter(
+        telegram_chat_id=chat_id,
+        type="fee",
+    )
+    if day_offset is not None:
+        target_date = today - timedelta(days=day_offset)
+        qs = qs.filter(created_at__date=target_date)
+        start_date = end_date = target_date
+    else:
+        start_date = today - timedelta(days=max(0, days - 1))
+        end_date = today
+        qs = qs.filter(created_at__date__gte=start_date)
+    if target_user_id:
+        qs = qs.filter(telegram_user_id=target_user_id)
+
+    per_day = {}
+    per_admin = {}
+    total_fee = 0
+
+    for tx in qs.order_by("created_at"):
+        d = timezone.localtime(tx.created_at).date().isoformat()
+        per_day[d] = per_day.get(d, 0) + int(tx.amount or 0)
+        aid = int(tx.telegram_user_id)
+        per_admin[aid] = per_admin.get(aid, 0) + int(tx.amount or 0)
+        total_fee += int(tx.amount or 0)
+
+    return {
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "total_fee": total_fee,
+        "per_day": per_day,
+        "per_admin": per_admin,
+    }

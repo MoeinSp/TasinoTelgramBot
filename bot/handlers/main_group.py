@@ -55,7 +55,7 @@ from bot.utils import normalize_numbers, safe_calc as utils_safe_calc
 from bot.finance import (
     get_balance, increase_wallet, decrease_wallet, clear_wallet,
     get_active_accounts, get_transactions, get_transactions_count,
-    clear_all_wallets,
+    clear_all_wallets, get_fee_report,
 )
 from bot.group_help import get_page, PAGE_MAIN
 from bot.panel_keyboards import get_panel, panel_main, locks_panel_text, locks_panel_kb, ALL_TOGGLEABLE_CMDS
@@ -101,6 +101,27 @@ async def _reply(message: Message, text: str):
 
 async def _mention(user_id: int, bot: Bot, chat_id: int) -> str:
     return await user_mention_id(user_id, bot, chat_id)
+
+
+_FEE_REPORT_HELP = (
+    "\n\n💡 دستورات:\n"
+    "• حق واسطه امروز\n"
+    "• حق واسطه دیروز\n"
+    "• حق واسطه پریروز\n"
+    "• حق واسطه هفته\n"
+    "• حق واسطه ادمین\n"
+    "• حق واسطه 10 — تنظیم نرخ"
+)
+
+
+async def _fee_admin_lines(per_admin: dict, bot: Bot, chat_id: int) -> list[str]:
+    if not per_admin:
+        return ["• موردی ثبت نشده."]
+    lines = []
+    for aid, amt in sorted(per_admin.items(), key=lambda x: x[1], reverse=True):
+        tag = await _mention(int(aid), bot, chat_id)
+        lines.append(f"• {tag}: {amt:,} واحد")
+    return lines
 
 
 # ─── نصب و فعال‌سازی ─────────────────────────────────────────────────────────
@@ -2041,6 +2062,22 @@ async def cmd_report(message: Message, bot: Bot):
     return await _reply(message, text)
 
 
+@router.message(F.text == "حق واسطه")
+async def cmd_fee_report_today_default(message: Message, bot: Bot):
+    chat_id = message.chat.id
+    report = await get_fee_report(chat_id, day_offset=0)
+    lines = [
+        "💹 گزارش حق واسطه (امروز)",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"💰 مجموع امروز: {report['total_fee']:,} واحد",
+        "",
+        "👮 سهم ادمین‌ها:",
+    ]
+    lines.extend(await _fee_admin_lines(report["per_admin"], bot, chat_id))
+    lines.append(_FEE_REPORT_HELP)
+    return await _reply(message, "\n".join(lines))
+
+
 @router.message(F.text.regexp(r"^(کارمزد|حق واسطه|نرخ کارمزد)(\s+\d+)?$"))
 async def cmd_fee(message: Message, bot: Bot):
     chat_id = message.chat.id
@@ -2084,6 +2121,108 @@ async def cmd_fee(message: Message, bot: Bot):
         )
     text += f"🔔 از این به بعد مسابقات تاس با حق واسطه {new_fee}% برگزار می‌شود."
     return await _reply(message, text)
+
+
+@router.message(F.text.regexp(r"^حق واسطه (امروز|دیروز|پریروز|هفته)$"))
+async def cmd_fee_report_period(message: Message, bot: Bot):
+    chat_id = message.chat.id
+    period = message.text.split()[-1]
+    day_offsets = {"امروز": 0, "دیروز": 1, "پریروز": 2}
+    if period == "هفته":
+        report = await get_fee_report(chat_id, days=7)
+        lines = [
+            "📊 گزارش حق واسطه ۷ روز اخیر",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"💰 مجموع هفتگی: {report['total_fee']:,} واحد",
+            "",
+            "📅 تفکیک تاریخ:",
+        ]
+        if report["per_day"]:
+            for d, amt in sorted(report["per_day"].items()):
+                lines.append(f"• {d}: {amt:,} واحد")
+        else:
+            lines.append("• داده‌ای ثبت نشده")
+        lines.extend(["", "👮 سهم ادمین‌ها:"])
+        lines.extend(await _fee_admin_lines(report["per_admin"], bot, chat_id))
+        return await _reply(message, "\n".join(lines))
+
+    report = await get_fee_report(chat_id, day_offset=day_offsets[period])
+    lines = [
+        f"💹 گزارش حق واسطه ({period})",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"💰 مجموع {period}: {report['total_fee']:,} واحد",
+        "",
+        "👮 سهم ادمین‌ها:",
+    ]
+    lines.extend(await _fee_admin_lines(report["per_admin"], bot, chat_id))
+    return await _reply(message, "\n".join(lines))
+
+
+@router.message(F.text == "حق واسطه هفت روز")
+async def cmd_fee_report_week_days(message: Message, bot: Bot):
+    chat_id = message.chat.id
+    report = await get_fee_report(chat_id, days=7)
+    lines = [
+        "📊 گزارش حق واسطه ۷ روز اخیر",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"💰 مجموع هفتگی: {report['total_fee']:,} واحد",
+        "",
+        "📅 روز به روز:",
+    ]
+    if report["per_day"]:
+        for d, amt in sorted(report["per_day"].items()):
+            lines.append(f"• {d}: {amt:,} واحد")
+    else:
+        lines.append("• داده‌ای ثبت نشده")
+    lines.extend(["", "👮 سهم ادمین‌ها:"])
+    lines.extend(await _fee_admin_lines(report["per_admin"], bot, chat_id))
+    return await _reply(message, "\n".join(lines))
+
+
+@router.message(F.text.regexp(r"^حق واسطه (ادمین|ادمين|admin)(\s+\d+)?$"))
+async def cmd_fee_report_admin(message: Message, bot: Bot):
+    chat_id = message.chat.id
+    target_id = None
+    parts = message.text.split()
+    if len(parts) >= 3 and parts[-1].isdigit():
+        target_id = int(parts[-1])
+    elif message.reply_to_message and message.reply_to_message.from_user:
+        target_id = message.reply_to_message.from_user.id
+
+    if target_id:
+        report = await get_fee_report(chat_id, days=7, target_user_id=target_id)
+        tag = await _mention(target_id, bot, chat_id)
+        lines = [
+            "👮 گزارش حق واسطه ادمین",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"🧑‍💼 ادمین: {tag}",
+            f"💰 مجموع ۷ روز اخیر: {report['total_fee']:,} واحد",
+            "",
+            "📅 تفکیک تاریخ:",
+        ]
+        if report["per_day"]:
+            for d, amt in sorted(report["per_day"].items()):
+                lines.append(f"• {d}: {amt:,} واحد")
+        else:
+            lines.append("• برای این ادمین موردی ثبت نشده")
+    else:
+        report = await get_fee_report(chat_id, days=7)
+        lines = [
+            "👮 گزارش حق واسطه ادمین‌ها",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"💰 مجموع ۷ روز اخیر: {report['total_fee']:,} واحد",
+            "",
+            "👮 سهم ادمین‌ها:",
+        ]
+        lines.extend(await _fee_admin_lines(report["per_admin"], bot, chat_id))
+        lines.extend(["", "📅 تفکیک تاریخ:"])
+        if report["per_day"]:
+            for d, amt in sorted(report["per_day"].items()):
+                lines.append(f"• {d}: {amt:,} واحد")
+        else:
+            lines.append("• داده‌ای ثبت نشده")
+    lines.append(_FEE_REPORT_HELP)
+    return await _reply(message, "\n".join(lines))
 
 
 # ─── شماره کارت ──────────────────────────────────────────────────────────────
@@ -2235,6 +2374,7 @@ async def cmd_start_game(message: Message, bot: Bot):
         chat_id, total_players,
         bet_amount=bet_amount, fee_percent=fee_percent,
         has_bet=has_bet, bet_mode=bet_mode if has_bet else BET_MODE_FIXED,
+        starter_admin_id=user_id,
     )
     mode_label = _START_MODE_LABELS.get(bet_mode, bet_mode)
     if has_bet:

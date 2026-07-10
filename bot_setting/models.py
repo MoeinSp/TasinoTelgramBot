@@ -93,3 +93,46 @@ class ForcedJoinConfig(models.Model):
     def get_singleton(cls):
         obj, _ = cls.objects.get_or_create(pk=1)
         return obj
+
+class BotSiteConfig(models.Model):
+    """تنظیمات سراسری ربات — یک رکورد (pk=1)."""
+    link_directory_url = models.URLField(
+        max_length=512,
+        default="https://t.me/TasinoBot",
+        verbose_name="لینک لینکدونی",
+        help_text="آدرس دکمه «لینکدونی» در پیوی ربات",
+    )
+    link_directory_title = models.CharField(
+        max_length=64,
+        default="🔥 بزرگترین لینکدونی",
+        verbose_name="متن دکمه لینکدونی",
+    )
+    support_url = models.URLField(
+        max_length=512,
+        default="https://t.me/Spayers",
+        verbose_name="لینک پشتیبانی",
+    )
+    support_title = models.CharField(
+        max_length=64,
+        default="گروه پشتیبانی",
+        verbose_name="عنوان پشتیبانی",
+    )
+    channel_url = models.URLField(
+        max_length=512,
+        blank=True,
+        default="https://t.me/TasinoBot",
+        verbose_name="لینک کانال رسمی",
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "تنظیمات سراسری ربات"
+        verbose_name_plural = "تنظیمات سراسری ربات"
+
+    def __str__(self):
+        return "تنظیمات سراسری تاسینو"
+
+    @classmethod
+    def get_singleton(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj

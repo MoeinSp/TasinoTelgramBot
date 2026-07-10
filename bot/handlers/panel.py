@@ -4,10 +4,11 @@
 import logging
 
 from aiogram import Router, F, Bot
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton as Btn
 
 from bot import cache
-from bot.cache_manager import has_privilege
+from bot.cache_manager import has_privilege, is_owner
+from bot.constants import CREATOR_USER_ID
 from bot.panel_keyboards import (
     get_static_panel, panel_main, is_live_page,
     locks_panel_text, locks_panel_kb,
@@ -31,6 +32,40 @@ _TOGGLE_PAGE = {
     "speaker": "game", "tg_emoji": "game", "dice_option": "game",
     "group_lock": "locks",
 }
+
+
+def _is_pv(call: CallbackQuery) -> bool:
+    return call.message.chat.type == "private"
+
+
+def _panel_chat_id(call: CallbackQuery) -> int | None:
+    """در گروه = chat فعلی؛ در پیوی = گروه انتخاب‌شده."""
+    if _is_pv(call):
+        return cache.PV_PANEL_GROUP.get(call.from_user.id)
+    return call.message.chat.id
+
+
+def _can_manage_panel(call: CallbackQuery, chat_id: int) -> bool:
+    user_id = call.from_user.id
+    if user_id == CREATOR_USER_ID:
+        return True
+    if _is_pv(call):
+        return is_owner(chat_id, user_id)
+    return has_privilege(chat_id, user_id)
+
+
+def _with_pv_nav(kb: InlineKeyboardMarkup, is_pv: bool) -> InlineKeyboardMarkup:
+    if not is_pv or kb is None:
+        return kb
+    rows = [list(r) for r in kb.inline_keyboard]
+    # جلوگیری از تکرار دکمه لیست گروه‌ها
+    if any(
+        getattr(btn, "callback_data", None) == "gs:list"
+        for row in rows for btn in row
+    ):
+        return kb
+    rows.append([Btn(text="🔙 لیست گروه‌ها", callback_data="gs:list")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _fetch_locks(chat_id: int) -> dict:
@@ -87,15 +122,23 @@ async def _render_live_panel(code: str, chat_id: int):
 
 @router.callback_query(F.data.startswith("p:"))
 async def cb_panel(call: CallbackQuery):
-    chat_id = call.message.chat.id
     user_id = call.from_user.id
-    if call.message.chat.type != "private" and not has_privilege(chat_id, user_id):
+    is_pv = _is_pv(call)
+    chat_id = _panel_chat_id(call)
+
+    if is_pv and not chat_id:
+        await call.answer("ابتدا از «تنظیمات گروه» یک گروه انتخاب کنید.", show_alert=True)
+        return
+
+    if not chat_id or not _can_manage_panel(call, chat_id):
         await call.answer("❌ شما دسترسی ندارید.", show_alert=True)
         return
 
     code = call.data[2:]
 
     if code == "close":
+        if is_pv:
+            cache.PV_PANEL_GROUP.pop(user_id, None)
         try:
             await call.message.delete()
         except Exception:
@@ -107,17 +150,35 @@ async def cb_panel(call: CallbackQuery):
         return
 
     if code in ("0", ""):
-        text, kb = PAGE_MAIN, panel_main()
+        text, kb = PAGE_MAIN, panel_main(pv=is_pv)
+        if is_pv:
+            title = cache.PV_PANEL_GROUP.get(user_id)
+            # نام گروه را اگر در کش پیام قبلی بود نگه نمی‌داریم؛ از DB می‌گیریم
+            from asgiref.sync import sync_to_async
+            @sync_to_async
+            def _gname(cid):
+                from account.models import TelegramGroup
+                g = TelegramGroup.objects.filter(telegram_chat_id=cid).first()
+                return (g.name if g and g.name else None) or str(cid)
+            gname = await _gname(chat_id)
+            text = (
+                f"⚙️ <b>پنل تنظیمات</b>\n"
+                f"🏷 گروه: <b>{gname}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"{PAGE_MAIN}"
+            )
     elif is_live_page(code):
         text, kb = await _render_live_panel(code, chat_id)
         if text is None:
             await call.answer("❌ بخش یافت نشد", show_alert=True)
             return
+        kb = _with_pv_nav(kb, is_pv)
     else:
-        text, kb = get_static_panel(code)
+        text, kb = get_static_panel(code, pv=is_pv)
         if text is None:
             await call.answer("❌ بخش یافت نشد", show_alert=True)
             return
+        kb = _with_pv_nav(kb, is_pv)
 
     try:
         await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -131,7 +192,14 @@ async def cb_panel(call: CallbackQuery):
 @router.callback_query(F.data.startswith("lnk:"))
 async def cb_link(call: CallbackQuery, bot: Bot):
     action = call.data[4:]
-    chat_id = call.message.chat.id
+    chat_id = _panel_chat_id(call)
+    is_pv = _is_pv(call)
+
+    if is_pv and not chat_id:
+        await call.answer("ابتدا گروه را انتخاب کنید.", show_alert=True)
+        return
+    if not chat_id:
+        chat_id = call.message.chat.id
 
     if action in ("close", "noop"):
         try:
@@ -173,7 +241,9 @@ async def cb_link(call: CallbackQuery, bot: Bot):
                 text = f"❌ خطا:\n{e}"
 
     if text:
-        await bot.send_message(chat_id, text, reply_to_message_id=call.message.message_id, parse_mode="HTML")
+        dest = call.message.chat.id if is_pv else chat_id
+        reply_to = None if is_pv else call.message.message_id
+        await bot.send_message(dest, text, reply_to_message_id=reply_to, parse_mode="HTML")
     await call.answer()
 
 
@@ -182,11 +252,15 @@ async def cb_link(call: CallbackQuery, bot: Bot):
 @router.callback_query(F.data.startswith("cmd:"))
 async def cb_cmd(call: CallbackQuery, bot: Bot):
     action = call.data[4:]
-    chat_id = call.message.chat.id
     user_id = call.from_user.id
-    is_priv = call.message.chat.type == "private"
+    is_pv = _is_pv(call)
+    chat_id = _panel_chat_id(call)
 
-    if not is_priv and not has_privilege(chat_id, user_id):
+    if is_pv and not chat_id:
+        await call.answer("ابتدا از «تنظیمات گروه» یک گروه انتخاب کنید.", show_alert=True)
+        return
+
+    if not chat_id or not _can_manage_panel(call, chat_id):
         await call.answer("❌ فقط ادمین‌ها", show_alert=True)
         return
 
@@ -194,6 +268,7 @@ async def cb_cmd(call: CallbackQuery, bot: Bot):
     if action.startswith("lock_toggle_"):
         toast = await _toggle_lock(action[12:], chat_id)
         text, kb = await _render_live_panel("locks", chat_id)
+        kb = _with_pv_nav(kb, is_pv)
         try:
             await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
         except Exception as e:
@@ -212,6 +287,7 @@ async def cb_cmd(call: CallbackQuery, bot: Bot):
         on = await db_toggle_group_command(chat_id, cmd_name)
         page = "fun" if cmd_name in FUN_CMD_SET else "games"
         text, kb = await _render_live_panel(page, chat_id)
+        kb = _with_pv_nav(kb, is_pv)
         try:
             await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
         except Exception as e:
@@ -225,6 +301,7 @@ async def cb_cmd(call: CallbackQuery, bot: Bot):
         toast = await _toggle_feature(key, chat_id, bot)
         page = _TOGGLE_PAGE.get(key, "settings")
         text, kb = await _render_live_panel(page, chat_id)
+        kb = _with_pv_nav(kb, is_pv)
         try:
             await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
         except Exception as e:
@@ -234,7 +311,10 @@ async def cb_cmd(call: CallbackQuery, bot: Bot):
 
     text = await _execute(action, chat_id, user_id, bot)
     if text:
-        await bot.send_message(chat_id, text, reply_to_message_id=call.message.message_id, parse_mode="HTML")
+        # در پیوی نتیجه را در همان چت نشان بده؛ در گروه به خود گروه
+        dest = call.message.chat.id if is_pv else chat_id
+        reply_to = call.message.message_id if not is_pv else None
+        await bot.send_message(dest, text, reply_to_message_id=reply_to, parse_mode="HTML")
     await call.answer()
 
 

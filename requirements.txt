@@ -8,4 +8,4 @@ dj-database-url
 psycopg2-binary
 redis>=4.0,<5
 aiohttp
-apscheduler==3.11.3
+django-unfold

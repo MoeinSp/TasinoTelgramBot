@@ -512,6 +512,7 @@ class WalletTransaction(models.Model):
         ("admin_clear", "تسویه"),
         ("bet", "شرط"),
         ("win", "برد"),
+        ("fee", "حق واسطه"),
     )
 
     telegram_chat_id = models.BigIntegerField(db_index=True)
