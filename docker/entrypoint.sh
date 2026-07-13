@@ -1,7 +1,6 @@
 #!/bin/sh
 set -e
 
-# ─── منتظر دیتابیس ───────────────────────────────────────────────────────────
 wait_for_db() {
   echo "==> waiting for database..."
   i=0
@@ -32,7 +31,6 @@ PY
 
 run_migrate() {
   echo "==> migrate"
-  # چند بار تلاش تا race با postgres حل شود
   n=0
   while [ "$n" -lt 5 ]; do
     if python manage.py migrate --no-input; then
@@ -46,7 +44,6 @@ run_migrate() {
   exit 1
 }
 
-# فقط مایگریت (سرویس one-shot در compose)
 if [ "${1:-}" = "migrate-only" ]; then
   wait_for_db
   run_migrate
@@ -55,10 +52,15 @@ if [ "${1:-}" = "migrate-only" ]; then
 fi
 
 wait_for_db
-run_migrate
 
-echo "==> collectstatic"
-python manage.py collectstatic --no-input
+if [ "${SKIP_MIGRATE:-0}" != "1" ]; then
+  run_migrate
+fi
+
+if [ "${SKIP_COLLECTSTATIC:-0}" != "1" ]; then
+  echo "==> collectstatic"
+  python manage.py collectstatic --no-input
+fi
 
 echo "==> admin (gunicorn) on :8000"
 python -m gunicorn TasinoAiogram3.wsgi:application \

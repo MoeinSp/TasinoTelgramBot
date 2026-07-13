@@ -20,8 +20,8 @@ build
 .vscode
 .cursor
 .docker-cache
+.deps-image.hash
 *.md
-!README.md
 
 # ─── سکرت و لاگ ──────────────────────────────────────────────────────────────
 .env
@@ -30,16 +30,15 @@ build
 *.log
 *.sqlite3
 
-# ─── خروجی‌های ران‌تایم (داخل image ساخته می‌شوند) ───────────────────────────
+# ─── خروجی‌های ران‌تایم ──────────────────────────────────────────────────────
 staticfiles/
 media/
 docker/ssl/
 
-# ─── فایل‌های غیرضروری برای image ربات ───────────────────────────────────────
+# ─── غیرضروری برای لایه deps ─────────────────────────────────────────────────
 docker/nginx.conf
 docker/nginx-tasino*.conf
 scripts/
-DEPLOY.md
 .pytest_cache
 .mypy_cache
 .ruff_cache

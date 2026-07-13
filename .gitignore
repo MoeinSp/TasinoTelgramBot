@@ -12,3 +12,4 @@ docker/ssl/
 .idea/
 .vscode/
 .docker-cache/
+.deps-image.hash
