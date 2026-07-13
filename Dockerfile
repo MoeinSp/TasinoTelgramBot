@@ -8,9 +8,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# libpq برای psycopg2-binary؛ بدون gcc (wheel آماده)
+# libpq + postgresql-client برای pg_dump/pg_restore/psql (بکاپ از پنل)
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libpq5 curl \
+ && apt-get install -y --no-install-recommends libpq5 curl postgresql-client \
  && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

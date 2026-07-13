@@ -5,6 +5,7 @@ import os
 import django
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.exceptions import TelegramNotFound
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
@@ -26,8 +27,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TOKEN       = os.getenv("BOT_TOKEN", "")
-PROXY       = os.getenv("PROXY", "")
+TOKEN       = (os.getenv("BOT_TOKEN", "") or "").strip().strip('"').strip("'")
+PROXY       = (os.getenv("PROXY", "") or "").strip()
 USE_POLLING = os.getenv("USE_POLLING", "false").lower() in ("1", "true", "yes")
 
 # وبهوک
@@ -50,7 +51,15 @@ async def _build_bot_dp():
     setup_routers(dp)
     await load_all_caches()
 
-    me = await bot.get_me()
+    try:
+        me = await bot.get_me()
+    except TelegramNotFound as exc:
+        hint = (
+            "BOT_TOKEN نامعتبر است (Telegram 404). "
+            "توکن را از @BotFather بگیر، در .env.prod فقط یک خط BOT_TOKEN= بگذار، "
+            "بدون کوتیشن و فاصله اضافه. PROXY را خالی کن اگر لازم نیست."
+        )
+        raise RuntimeError(hint) from exc
     logger.info("بات آماده است: @%s", me.username)
 
     # ─── Scheduler ──────────────────────────────────────────────────────────
