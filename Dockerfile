@@ -1,17 +1,23 @@
-# ─── Stage 1: build ──────────────────────────────────────────────────────────
+# syntax=docker/dockerfile:1.7
+# BuildKit لازم است (docker compose v2 به‌صورت پیش‌فرض روشن است)
+
+# ─── Stage 1: وابستگی‌ها (کش pip/apk بین بیلدها) ─────────────────────────────
 FROM python:3.12-alpine AS builder
 
-RUN apk add --no-cache gcc musl-dev libpq-dev
-
 WORKDIR /app
+
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    apk add gcc musl-dev libpq-dev
+
 COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    pip install --prefix=/install -r requirements.txt
 
 # ─── Stage 2: runtime ────────────────────────────────────────────────────────
 FROM python:3.12-alpine
 
-# libpq + کلاینت دامپ/بازیابی + ابزار شبکه برای healthcheck
-RUN apk add --no-cache libpq postgresql-client curl
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    apk add libpq postgresql-client curl
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -21,6 +27,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY --from=builder /install /install
+
+# کد پروژه — با .dockerignore سبک می‌ماند تا لایه سریع‌تر کپی شود
 COPY . .
 
 COPY docker/entrypoint.sh /entrypoint.sh

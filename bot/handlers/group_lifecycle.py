@@ -23,8 +23,17 @@ _ADMIN_STATUSES = {"administrator", "creator"}
 
 @sync_to_async
 def _ensure_group_exists(chat_id: int) -> None:
-    from account.models import TelegramGroup
-    TelegramGroup.objects.get_or_create(telegram_chat_id=chat_id, defaults={"name": ""})
+    from account.models import TelegramGroup, default_commands
+    grp, created = TelegramGroup.objects.get_or_create(
+        telegram_chat_id=chat_id, defaults={"name": ""}
+    )
+    cache.ENABLED_COMMANDS.setdefault(chat_id, list(grp.enabled_commands or default_commands()))
+    cache.GROUP_THEME.setdefault(chat_id, int(grp.theme or 1))
+    cache.MAX_WARNINGS.setdefault(chat_id, int(grp.max_warnings or 3))
+    if created or chat_id not in cache.GROUP_LOCKS:
+        cache.GROUP_LOCKS.setdefault(chat_id, grp.locks or {})
+        cache.ADMINS_CACHE.setdefault(chat_id, set())
+        cache.VIP_USERS_CACHE.setdefault(chat_id, set())
 
 
 @router.my_chat_member()

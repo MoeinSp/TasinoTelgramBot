@@ -67,6 +67,15 @@ SITE_CONFIG: dict = {
     "dice_themes": {},
 }
 
+# ─── کش تنظیمات پرتکرار گروه (بدون DB روی هر پیام) ─────────────────────────
+ENABLED_COMMANDS: dict[int, list] = {}     # chat_id → لیست دستورات فعال
+GROUP_THEME: dict[int, int] = {}           # chat_id → theme id
+MAX_WARNINGS: dict[int, int] = {}          # chat_id → سقف اخطار
+
+# ─── throttle همگام‌سازی کاربر پیوی ─────────────────────────────────────────
+PV_USER_SYNCED: dict[int, float] = {}      # user_id → monotonic expiry
+PV_USER_SYNC_TTL = 3600.0                  # ثانیه
+
 # ─── پنل پیوی (گروه انتخاب‌شده برای تنظیمات) ───────────────────────────────
 PV_PANEL_GROUP: dict[int, int] = {}        # user_id → group chat_id
 

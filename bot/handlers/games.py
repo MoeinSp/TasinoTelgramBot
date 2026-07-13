@@ -8,7 +8,7 @@ from aiogram.types import Message
 
 from bot import cache
 from bot import game_text
-from bot.helpers import safe_send, db_get_group_commands, telegram_emoji_on
+from bot.helpers import safe_send, get_group_commands, telegram_emoji_on
 
 router = Router()
 router.message.filter(F.chat.type.in_({"group", "supergroup"}))
@@ -28,7 +28,7 @@ async def _check_enabled(message: Message, cmd: str) -> bool:
     if locks.get("fun_text") and not has_privilege(chat_id, message.from_user.id):
         return False
 
-    cmds = await db_get_group_commands(chat_id)
+    cmds = get_group_commands(chat_id)
     if cmd not in cmds:
         await _reply(message, "این قابلیت توسط ادمین گروه غیرفعال شده است.")
         return False

@@ -16,7 +16,7 @@ from bot import cache
 from bot.cache_manager import has_privilege
 from bot.helpers import (
     safe_send, contains_link, contains_username, is_night_time, log_action,
-    db_add_warning, db_get_max_warnings, db_reset_warnings,
+    db_add_warning, db_reset_warnings,
 )
 
 router = Router()
@@ -65,7 +65,8 @@ async def _warn_and_maybe_kick(message: Message, bot: Bot, reason: str) -> None:
         return
 
     warns = await db_add_warning(chat_id, user_id)
-    max_w = await db_get_max_warnings(chat_id)
+    from bot.helpers import get_max_warnings
+    max_w = get_max_warnings(chat_id)
     name = message.from_user.first_name or str(user_id)
     from bot.helpers import user_mention
     mention = await user_mention(user_id, chat_id, fallback=name)
@@ -158,6 +159,16 @@ async def enforce_filters(message: Message, bot: Bot):
     if has_privilege(chat_id, user_id):
         skip()
 
+    locks = cache.GROUP_LOCKS.get(chat_id, {})
+    # بدون قفل/فلود/شب — سریع رد شو (بدون اسکن متن/مدیا)
+    if (
+        chat_id not in cache.GROUP_LOCK
+        and chat_id not in cache.NIGHT_MODE
+        and chat_id not in cache.ANTI_FLOOD_ENABLED
+        and not any(locks.values())
+    ):
+        skip()
+
     # قفل کل گروه
     if chat_id in cache.GROUP_LOCK:
         await _delete(message)
@@ -183,8 +194,6 @@ async def enforce_filters(message: Message, bot: Bot):
         await safe_send(bot, chat_id,
                         "⚠️ کاربر به دلیل ارسال سریع پیام ۵ دقیقه سکوت شد.")
         return
-
-    locks = cache.GROUP_LOCKS.get(chat_id, {})
 
     # ── قفل‌های متنی ──
     text = message.text or message.caption or ""

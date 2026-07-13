@@ -61,6 +61,11 @@ def _load_from_db():
         if group.log_channel_id:
             cache.LOG_CHANNEL[cid] = group.log_channel_id
 
+        from account.models import default_commands
+        cache.ENABLED_COMMANDS[cid] = list(group.enabled_commands or default_commands())
+        cache.GROUP_THEME[cid] = int(group.theme or 1)
+        cache.MAX_WARNINGS[cid] = int(group.max_warnings or 3)
+
     for member in TelegramGroupMember.objects.filter(
         is_owner=True
     ).select_related("group"):

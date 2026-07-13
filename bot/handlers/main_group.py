@@ -22,7 +22,7 @@ from bot.cache_manager import is_owner, is_admin, is_vip, has_privilege
 from bot.helpers import (
     safe_send, get_target_from_reply, user_mention, user_mention_id,
     get_user_status,
-    db_set_group_theme, db_get_group_theme,
+    db_set_group_theme, db_get_group_theme, get_group_theme,
     db_enable_group_off, db_disable_group_off,
     db_enable_group_lock, db_disable_group_lock,
     db_enable_dice_option, db_disable_dice_option,
@@ -35,6 +35,7 @@ from bot.helpers import (
     db_add_vip, db_del_vip,
     db_get_admins, db_get_vips, db_clear_vips,
     db_add_warning, db_reset_warnings, db_get_warnings, db_get_max_warnings, db_set_max_warnings,
+    get_max_warnings, get_group_commands,
     db_get_group_commands, db_set_group_commands,
     db_add_word_filter, db_remove_word_filter, db_get_word_filters,
     db_save_learned_response, db_delete_learned_response, db_get_learned_responses,
@@ -234,7 +235,7 @@ async def cmd_toggle_command(message: Message):
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
         return
     cmd_name, state = message.text.rsplit(" ", 1)
-    group_cmds = await db_get_group_commands(chat_id)
+    group_cmds = get_group_commands(chat_id)
     if state == "روشن":
         if cmd_name not in group_cmds:
             group_cmds.append(cmd_name)
@@ -252,7 +253,7 @@ async def cmd_list_disabled(message: Message):
     user_id = message.from_user.id
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
         return
-    group_cmds = await db_get_group_commands(chat_id)
+    group_cmds = get_group_commands(chat_id)
     disabled = [c for c in ALL_TOGGLEABLE_CMDS if c not in group_cmds]
     if not disabled:
         return await _reply(message, "✅ هیچ دستوری خاموش نیست.")
@@ -671,7 +672,7 @@ async def cmd_warn(message: Message, bot: Bot):
         mention = await _mention(target_id, bot, chat_id)
         return await _reply(message, f"› {mention}\n\n›› در حال حاضر {rank} است!")
     warns = await db_add_warning(chat_id, target_id)
-    max_w = await db_get_max_warnings(chat_id)
+    max_w = get_max_warnings(chat_id)
     mention = await _mention(target_id, bot, chat_id)
     if warns >= max_w:
         try:
@@ -1470,7 +1471,7 @@ async def cmd_locks_inline_panel(message: Message):
 async def cmd_lock_status_full(message: Message):
     chat_id = message.chat.id
     locks = cache.GROUP_LOCKS.get(chat_id) or await db_get_locks(chat_id)
-    max_w = await db_get_max_warnings(chat_id)
+    max_w = get_max_warnings(chat_id)
 
     response = ">🛠 وضعیت قفل‌های گروه\n\n"
     active, inactive = [], []
@@ -1525,7 +1526,7 @@ async def cmd_warn_status(message: Message, bot: Bot):
     if not target_id:
         return
     warns = await db_get_warnings(chat_id, target_id)
-    max_w = await db_get_max_warnings(chat_id)
+    max_w = get_max_warnings(chat_id)
     mention = await _mention(target_id, bot, chat_id)
     if not warns:
         return await _reply(message, f"› {mention}\n\n›› اخطاری ثبت نشده است.")
@@ -2743,11 +2744,11 @@ async def cmd_dice(message: Message, bot: Bot):
 
     # تاس خاموش → فقط وقتی بازی فعال نیست بلاک شود
     if not has_active_game(chat_id):
-        group_cmds = await db_get_group_commands(chat_id)
+        group_cmds = get_group_commands(chat_id)
         if "تاس" not in group_cmds:
             return await _reply(message, "این قابلیت توسط ادمین گروه غیرفعال شده است.")
 
-    theme_id = await db_get_group_theme(chat_id)
+    theme_id = get_group_theme(chat_id)
     dice_option_off = chat_id not in cache.DICE_OPTION
     await handle_dice(
         text=text,
@@ -2794,7 +2795,7 @@ async def handle_native_dice(message: Message, bot: Bot):
     if emoji == "🎲":
         # تاس خاموش و بدون بازی → نادیده
         if not has_active_game(chat_id):
-            group_cmds = await db_get_group_commands(chat_id)
+            group_cmds = get_group_commands(chat_id)
             if "تاس" not in group_cmds:
                 return
 

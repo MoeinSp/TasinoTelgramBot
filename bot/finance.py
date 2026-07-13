@@ -185,18 +185,18 @@ def _alias_needs_name(alias: str | None) -> bool:
 @sync_to_async
 def sync_member_aliases_from_name(user_id: int, name: str) -> int:
     """اگر عضو در گروه‌ها alias ندارد، نام پروفایل را ثبت می‌کند."""
+    from django.db.models import Q
     from account.models import TelegramGroupMember
 
     clean = (name or "").strip()[:255]
     if not clean or clean.lower() in _ALIAS_PLACEHOLDERS:
         return 0
-    updated = 0
-    for m in TelegramGroupMember.objects.filter(telegram_user_id=user_id):
-        if _alias_needs_name(m.alias):
-            m.alias = clean
-            m.save(update_fields=["alias"])
-            updated += 1
-    return updated
+    q = Q(alias__isnull=True) | Q(alias="")
+    for ph in _ALIAS_PLACEHOLDERS:
+        q |= Q(alias__iexact=ph)
+    return TelegramGroupMember.objects.filter(
+        telegram_user_id=user_id,
+    ).filter(q).update(alias=clean)
 
 
 async def register_pv_user(user_id: int, chat_id: int, display_name: str = "") -> None:

@@ -1,20 +1,54 @@
+# ─── محیط مجازی / پایتون ─────────────────────────────────────────────────────
 .venv
+venv
 __pycache__
-*.pyc
-*.pyo
-*.pyd
+**/__pycache__
+*.py[cod]
+*$py.class
 .Python
+*.egg-info
+.eggs
+dist
+build
+
+# ─── گیت / IDE / کش بیلد ─────────────────────────────────────────────────────
 .git
 .gitignore
+.gitattributes
+.github
+.idea
+.vscode
+.cursor
+.docker-cache
+*.md
+!README.md
+
+# ─── سکرت و لاگ ──────────────────────────────────────────────────────────────
 .env
-.env.prod
+.env.*
+!.env.prod.example
 *.log
 *.sqlite3
+
+# ─── خروجی‌های ران‌تایم (داخل image ساخته می‌شوند) ───────────────────────────
 staticfiles/
 media/
 docker/ssl/
-.idea
-.vscode
-# تست‌ها نمیرن تو image
+
+# ─── فایل‌های غیرضروری برای image ربات ───────────────────────────────────────
+docker/nginx.conf
+docker/nginx-tasino*.conf
+scripts/
+DEPLOY.md
+.pytest_cache
+.mypy_cache
+.ruff_cache
+coverage*
+htmlcov
 */tests.py
 */test_*.py
+**/tests/**
+*.bak
+*.tmp
+Thumbs.db
+Desktop.ini

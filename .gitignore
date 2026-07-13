@@ -11,3 +11,4 @@ media/
 docker/ssl/
 .idea/
 .vscode/
+.docker-cache/

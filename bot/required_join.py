@@ -174,7 +174,8 @@ async def is_user_channel_member(bot: Bot, user_id: int, bypass_cache: bool = Fa
     try:
         member = await bot.get_chat_member(channel_id, user_id)
         is_joined = member.status in _JOINED_STATUSES
-        ttl = 300.0 if is_joined else 20.0
+        # عضو: ۳۰ دقیقه — غیرعضو: ۶۰ ثانیه (کمتر API تلگرام روی هر پیام پیوی)
+        ttl = 1800.0 if is_joined else 60.0
         cache.FORCED_JOIN_MEMBER_CHECK[key] = (is_joined, now + ttl)
         return is_joined
     except Exception:

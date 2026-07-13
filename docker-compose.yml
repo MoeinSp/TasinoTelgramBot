@@ -1,3 +1,14 @@
+x-bot-image: &bot-image
+  image: tasino-bot:local
+  build:
+    context: .
+    dockerfile: Dockerfile
+    # کش لایه‌ها بین بیلدها روی دیسک (BuildKit) — بیلدهای بعدی خیلی سریع‌تر
+    cache_from:
+      - type=local,src=.docker-cache
+    cache_to:
+      - type=local,dest=.docker-cache,mode=max
+
 services:
 
   # ─── PostgreSQL ─────────────────────────────────────────────────────────────
@@ -57,9 +68,10 @@ services:
       retries: 10
       start_period: 5s
 
-  # ─── مایگریت قبل از استارت ربات (همیشه با up/build اجرا می‌شود) ───────────
+  # ─── مایگریت قبل از استارت ربات ─────────────────────────────────────────────
+  # همان image با bot → فقط یک‌بار بیلد می‌شود
   migrate:
-    build: .
+    <<: *bot-image
     container_name: tasino_migrate
     env_file: .env.prod
     environment:
@@ -77,7 +89,7 @@ services:
   # ادمین: 127.0.0.1:8001 → :8000
   # وب‌هوک: 127.0.0.1:8443 → :8443  (nginx دامین tasino.spayerx.ir)
   bot:
-    build: .
+    <<: *bot-image
     container_name: tasino_bot
     restart: unless-stopped
     depends_on:
@@ -89,7 +101,6 @@ services:
         condition: service_completed_successfully
     env_file: .env.prod
     environment:
-      # داخل شبکه compose همیشه به سرویس‌های همین stack وصل شو
       DATABASE_URL: postgresql://tasino:${DB_PASSWORD}@db:5432/tasino_db
       BOT_REDIS_URL: redis://redis:6379/2
       WEBHOOK_HOST: ${WEBHOOK_HOST:-https://tasino.spayerx.ir}

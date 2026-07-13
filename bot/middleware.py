@@ -1,6 +1,11 @@
 """
 Middleware — شمارش پیام گروه + جوین اجباری پیوی
 """
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
 from typing import Any, Awaitable, Callable, Dict, Union
 
 from aiogram import BaseMiddleware, Bot
@@ -13,25 +18,93 @@ from bot.required_join import (
     is_creator_setup_message, join_required_text, join_required_keyboard,
 )
 
+logger = logging.getLogger(__name__)
+
+# صف XP/شمارش پیام — بدون بلاک کردن هندلر
+_PENDING_TRACK: dict[tuple[int, int], dict] = {}
+_FLUSH_TASK: asyncio.Task | None = None
+_FLUSH_INTERVAL = 1.5
+_ALIAS_PLACEHOLDERS = frozenset({"کاربر", "user", "unknown", "کاربر ناشناس", ""})
+
 
 @sync_to_async
-def _track_message(chat_id: int, user_id: int, name: str = ""):
+def _flush_track_db(pending: dict[tuple[int, int], dict]) -> list[tuple]:
+    """اعمال دسته‌ای XP. برمی‌گرداند [(chat_id, user_id, level, bot, name), ...] برای level-up."""
     from account.models import TelegramGroup, TelegramGroupMember
-    grp, _ = TelegramGroup.objects.get_or_create(telegram_chat_id=chat_id, defaults={"name": ""})
-    m, _ = TelegramGroupMember.objects.get_or_create(
-        telegram_chat_id=chat_id, telegram_user_id=user_id,
-        defaults={"group": grp}
+
+    leveled: list[tuple] = []
+    for (chat_id, user_id), entry in pending.items():
+        count = int(entry.get("n") or 0)
+        if count <= 0:
+            continue
+        name = (entry.get("name") or "")[:255]
+        bot = entry.get("bot")
+        grp, _ = TelegramGroup.objects.get_or_create(
+            telegram_chat_id=chat_id, defaults={"name": ""}
+        )
+        m, _ = TelegramGroupMember.objects.get_or_create(
+            telegram_chat_id=chat_id, telegram_user_id=user_id,
+            defaults={"group": grp},
+        )
+        m.message_count = (m.message_count or 0) + count
+        xp_gain = 2 * count
+        did_level = False
+        m.xp_total = (m.xp_total or 0) + xp_gain
+        while m.xp_total >= m.level * 100:
+            m.xp_total -= m.level * 100
+            m.level += 1
+            did_level = True
+        if name:
+            a = (m.alias or "").strip().lower()
+            if a in _ALIAS_PLACEHOLDERS:
+                m.alias = name
+        m.save(update_fields=["xp_total", "level", "message_count", "alias"])
+        if did_level:
+            leveled.append((chat_id, user_id, m.level, bot, name))
+    return leveled
+
+
+async def _do_flush_tracks() -> None:
+    global _FLUSH_TASK
+    await asyncio.sleep(_FLUSH_INTERVAL)
+    snapshot = dict(_PENDING_TRACK)
+    _PENDING_TRACK.clear()
+    _FLUSH_TASK = None
+    if not snapshot:
+        return
+    try:
+        leveled = await _flush_track_db(snapshot)
+    except Exception:
+        logger.exception("flush message track failed")
+        return
+
+    for chat_id, user_id, level, bot, name in leveled:
+        if chat_id not in cache.SPEAKER_ON or not bot:
+            continue
+        first = (name or "").split()[0] if name else str(user_id)
+        try:
+            from bot.helpers import safe_send
+            await safe_send(bot, chat_id, f"🎉 تبریک! سطح {first} به {level} رسید.")
+        except Exception:
+            pass
+
+    if _PENDING_TRACK and (_FLUSH_TASK is None or _FLUSH_TASK.done()):
+        _FLUSH_TASK = asyncio.create_task(_do_flush_tracks())
+
+
+def _enqueue_track(chat_id: int, user_id: int, name: str, bot: Bot | None) -> None:
+    global _FLUSH_TASK
+    key = (chat_id, user_id)
+    entry = _PENDING_TRACK.setdefault(
+        key, {"n": 0, "name": "", "bot": bot, "chat_id": chat_id, "user_id": user_id}
     )
-    m.message_count += 1
-    leveled_up = m.add_xp(2)
-    if name and not m.alias:
-        m.alias = name[:255]
-    elif name:
-        a = (m.alias or "").strip().lower()
-        if a in ("کاربر", "user", "unknown", ""):
-            m.alias = name[:255]
-    m.save(update_fields=["xp_total", "level", "message_count", "alias"])
-    return leveled_up, m.level
+    entry["n"] += 1
+    if name:
+        entry["name"] = name
+    if bot is not None:
+        entry["bot"] = bot
+    if _FLUSH_TASK is None or _FLUSH_TASK.done():
+        _FLUSH_TASK = asyncio.create_task(_do_flush_tracks())
 
 
 class MessageTrackingMiddleware(BaseMiddleware):
@@ -41,7 +114,7 @@ class MessageTrackingMiddleware(BaseMiddleware):
         event: Message,
         data: Dict[str, Any],
     ) -> Any:
-        # فقط پیام‌های گروه از کاربران واقعی
+        # فقط پیام‌های گروه از کاربران واقعی — بدون await روی DB
         if (
             event.chat
             and event.chat.type in ("group", "supergroup")
@@ -50,18 +123,12 @@ class MessageTrackingMiddleware(BaseMiddleware):
             and event.chat.id not in cache.OFF_GROUP
         ):
             name = event.from_user.full_name or ""
-            leveled_up, level = await _track_message(event.chat.id, event.from_user.id, name)
-
-            if leveled_up and event.chat.id in cache.SPEAKER_ON:
-                first = event.from_user.first_name or str(event.from_user.id)
-                try:
-                    from aiogram import Bot
-                    bot: Bot = data.get("bot")
-                    if bot:
-                        from bot.helpers import safe_send
-                        await safe_send(bot, event.chat.id, f"🎉 تبریک! سطح {first} به {level} رسید.")
-                except Exception:
-                    pass
+            _enqueue_track(
+                event.chat.id,
+                event.from_user.id,
+                name,
+                data.get("bot"),
+            )
 
         return await handler(event, data)
 
@@ -185,7 +252,11 @@ class PrivateUserSyncMiddleware(BaseMiddleware):
             chat = event.message.chat
 
         if user and not user.is_bot and chat and chat.type == "private":
-            display = (user.full_name or user.first_name or "").strip()
-            await register_pv_user(user.id, chat.id, display)
+            now = time.monotonic()
+            exp = cache.PV_USER_SYNCED.get(user.id)
+            if not exp or exp <= now:
+                display = (user.full_name or user.first_name or "").strip()
+                await register_pv_user(user.id, chat.id, display)
+                cache.PV_USER_SYNCED[user.id] = now + cache.PV_USER_SYNC_TTL
 
         return await handler(event, data)

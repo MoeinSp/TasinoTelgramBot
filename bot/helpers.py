@@ -266,13 +266,25 @@ def db_get_or_create_group(chat_id: int, name: str = ""):
 def db_set_group_theme(chat_id: int, theme: int):
     from account.models import TelegramGroup
     TelegramGroup.objects.filter(telegram_chat_id=chat_id).update(theme=theme)
+    cache.GROUP_THEME[chat_id] = int(theme)
+
+
+def get_group_theme(chat_id: int) -> int:
+    """خواندن تم از کش حافظه (بدون DB)."""
+    if chat_id in cache.GROUP_THEME:
+        return cache.GROUP_THEME[chat_id]
+    return 1
 
 
 @sync_to_async
 def db_get_group_theme(chat_id: int) -> int:
+    if chat_id in cache.GROUP_THEME:
+        return cache.GROUP_THEME[chat_id]
     from account.models import TelegramGroup
     grp = TelegramGroup.objects.filter(telegram_chat_id=chat_id).first()
-    return grp.theme if grp else 1
+    theme = grp.theme if grp else 1
+    cache.GROUP_THEME[chat_id] = theme
+    return theme
 
 
 @sync_to_async
@@ -597,33 +609,53 @@ def db_get_warnings(chat_id: int, user_id: int) -> int:
     return m.warnings if m else 0
 
 
+def get_max_warnings(chat_id: int) -> int:
+    return cache.MAX_WARNINGS.get(chat_id, 3)
+
+
 @sync_to_async
 def db_get_max_warnings(chat_id: int) -> int:
+    if chat_id in cache.MAX_WARNINGS:
+        return cache.MAX_WARNINGS[chat_id]
     from account.models import TelegramGroup
     grp = TelegramGroup.objects.filter(telegram_chat_id=chat_id).first()
-    return grp.max_warnings if grp else 3
+    max_w = grp.max_warnings if grp else 3
+    cache.MAX_WARNINGS[chat_id] = max_w
+    return max_w
 
 
 @sync_to_async
 def db_set_max_warnings(chat_id: int, max_w: int):
     from account.models import TelegramGroup
     TelegramGroup.objects.filter(telegram_chat_id=chat_id).update(max_warnings=max_w)
+    cache.MAX_WARNINGS[chat_id] = int(max_w)
+
+
+def get_group_commands(chat_id: int) -> list:
+    """خواندن دستورات فعال از کش حافظه (بدون DB)."""
+    if chat_id in cache.ENABLED_COMMANDS:
+        return list(cache.ENABLED_COMMANDS[chat_id])
+    from account.models import default_commands
+    return list(default_commands())
 
 
 @sync_to_async
 def db_get_group_commands(chat_id: int) -> list:
-    from account.models import TelegramGroup
+    if chat_id in cache.ENABLED_COMMANDS:
+        return list(cache.ENABLED_COMMANDS[chat_id])
+    from account.models import TelegramGroup, default_commands
     grp = TelegramGroup.objects.filter(telegram_chat_id=chat_id).first()
-    if grp:
-        return grp.enabled_commands or []
-    from account.models import default_commands
-    return default_commands()
+    cmds = list(grp.enabled_commands or default_commands()) if grp else list(default_commands())
+    cache.ENABLED_COMMANDS[chat_id] = cmds
+    return cmds
 
 
 @sync_to_async
 def db_set_group_commands(chat_id: int, commands: list):
     from account.models import TelegramGroup
-    TelegramGroup.objects.filter(telegram_chat_id=chat_id).update(enabled_commands=commands)
+    cmds = list(commands)
+    TelegramGroup.objects.filter(telegram_chat_id=chat_id).update(enabled_commands=cmds)
+    cache.ENABLED_COMMANDS[chat_id] = cmds
 
 
 @sync_to_async
@@ -635,7 +667,11 @@ def db_toggle_group_command(chat_id: int, cmd: str) -> bool:
         TelegramGroup.objects.get_or_create(telegram_chat_id=chat_id, defaults={"name": ""})
         cmds = list(default_commands())
     else:
-        cmds = list(grp.enabled_commands or default_commands())
+        cmds = list(
+            cache.ENABLED_COMMANDS.get(chat_id)
+            or grp.enabled_commands
+            or default_commands()
+        )
     if cmd in cmds:
         cmds = [c for c in cmds if c != cmd]
         enabled = False
@@ -644,6 +680,7 @@ def db_toggle_group_command(chat_id: int, cmd: str) -> bool:
             cmds.append(cmd)
         enabled = True
     TelegramGroup.objects.filter(telegram_chat_id=chat_id).update(enabled_commands=cmds)
+    cache.ENABLED_COMMANDS[chat_id] = cmds
     return enabled
 
 
