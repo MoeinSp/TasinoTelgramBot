@@ -1,5 +1,22 @@
 # استقرار تاسینو روی tasino.spayerx.ir
 
+## پیش‌نیاز VPS
+
+ترجیحاً **Docker Compose v2** (`docker compose`)، نه `docker-compose` 1.29:
+
+```sh
+docker compose version
+# اگر نبود:
+apt update && apt install -y docker-compose-plugin
+```
+
+خطای `KeyError: ContainerConfig` = compose قدیمی است. موقت:
+
+```sh
+docker rm -f tasino_migrate tasino_bot
+docker compose up -d
+```
+
 ## سرعت آپدیت
 
 کد پروژه با **volume** داخل کانتینر است → تغییر پایتون = `restart`، نه بیلد.

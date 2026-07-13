@@ -1,12 +1,23 @@
 #!/bin/sh
-# آپدیت سریع روی سرور (سازگار با sh — بدون bash):
-#   sh scripts/deploy_spayerx.sh          → بدون بیلد (چند ثانیه)
-#   sh scripts/deploy_spayerx.sh --build  → فقط وقتی requirements/Dockerfile عوض شده
+# آپدیت سریع روی سرور (سازگار با sh):
+#   sh scripts/deploy_spayerx.sh
+#   sh scripts/deploy_spayerx.sh --build
 set -eu
 
 cd "$(dirname "$0")/.."
 
 chmod +x docker/entrypoint.sh 2>/dev/null || true
+
+# docker compose v2 ترجیح داده می‌شود (v1.29 با Docker جدید خطای ContainerConfig می‌دهد)
+if docker compose version >/dev/null 2>&1; then
+  DC="docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+  DC="docker-compose"
+  echo "⚠️  docker-compose v1 — اگر خطای ContainerConfig دیدی، compose v2 نصب کن"
+else
+  echo "❌ docker compose پیدا نشد"
+  exit 1
+fi
 
 if [ ! -f .env.prod ]; then
   echo "❌ فایل .env.prod پیدا نشد"
@@ -32,32 +43,28 @@ else
   fi
 fi
 
-# db/redis بالا باشند
-docker compose up -d --no-build db redis
+$DC up -d --no-build db redis
 
 if [ "$need_build" -eq 1 ]; then
-  echo "==> build image وابستگی‌ها (یک‌بار)"
-  docker compose build bot
+  echo "==> build image وابستگی‌ها"
+  $DC build bot
   cat Dockerfile requirements.txt | sha256sum | awk '{print $1}' > "$HASH_FILE"
 else
   echo "==> بدون بیلد (کد از volume است)"
 fi
 
+# جلوگیری از باگ recreate در docker-compose v1
+docker rm -f tasino_migrate 2>/dev/null || true
+
 echo "==> migrate"
-docker compose run --rm --no-deps migrate
+$DC run --rm --no-deps migrate
 
 echo "==> bot"
-docker compose up -d --no-build --force-recreate bot
+docker rm -f tasino_bot 2>/dev/null || true
+$DC up -d --no-build --force-recreate bot
 
-echo "==> وضعیت سرویس‌ها"
-docker compose ps
+echo "==> وضعیت"
+$DC ps
 
 echo ""
-echo "ادمین:   https://tasino.spayerx.ir/admin/"
-echo "وب‌هوک:  https://tasino.spayerx.ir/webhook"
-echo "لاگ:     docker compose logs -f bot"
-echo ""
-echo "تغییر کد بعدی فقط:"
-echo "  docker compose restart bot"
-echo "بیلد اجباری:"
-echo "  sh scripts/deploy_spayerx.sh --build"
+echo "لاگ: $DC logs -f bot"
