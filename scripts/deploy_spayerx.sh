@@ -1,19 +1,18 @@
 #!/bin/sh
-# آپدیت سریع روی سرور (سازگار با sh):
-#   sh scripts/deploy_spayerx.sh
-#   sh scripts/deploy_spayerx.sh --build
+# آپدیت سریع:
+#   sh scripts/deploy_spayerx.sh           → restart، بدون migrate
+#   sh scripts/deploy_spayerx.sh --build   → rebuild image
+#   sh scripts/deploy_spayerx.sh --migrate → migrate اجباری
 set -eu
 
 cd "$(dirname "$0")/.."
 
-chmod +x docker/entrypoint.sh 2>/dev/null || true
+chmod +x docker/entrypoint.sh scripts/migrate-if-needed.sh 2>/dev/null || true
 
-# docker compose v2 ترجیح داده می‌شود (v1.29 با Docker جدید خطای ContainerConfig می‌دهد)
 if docker compose version >/dev/null 2>&1; then
   DC="docker compose"
 elif command -v docker-compose >/dev/null 2>&1; then
   DC="docker-compose"
-  echo "⚠️  docker-compose v1 — اگر خطای ContainerConfig دیدی، compose v2 نصب کن"
 else
   echo "❌ docker compose پیدا نشد"
   exit 1
@@ -28,10 +27,18 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
-HASH_FILE=".deps-image.hash"
 need_build=0
-if [ "${1:-}" = "--build" ]; then
-  need_build=1
+force_migrate=0
+for arg in "$@"; do
+  case "$arg" in
+    --build) need_build=1 ;;
+    --migrate) force_migrate=1 ;;
+  esac
+done
+
+HASH_FILE=".deps-image.hash"
+if [ "$need_build" -eq 1 ]; then
+  :
 elif [ ! -f "$HASH_FILE" ]; then
   need_build=1
 else
@@ -50,21 +57,21 @@ if [ "$need_build" -eq 1 ]; then
   $DC build bot
   cat Dockerfile requirements.txt | sha256sum | awk '{print $1}' > "$HASH_FILE"
 else
-  echo "==> بدون بیلد (کد از volume است)"
+  echo "==> بدون بیلد"
 fi
 
-# جلوگیری از باگ recreate در docker-compose v1
-docker rm -f tasino_migrate 2>/dev/null || true
-
-echo "==> migrate"
-$DC run --rm --no-deps migrate
+if [ "$force_migrate" -eq 1 ]; then
+  sh scripts/migrate-if-needed.sh --force
+else
+  sh scripts/migrate-if-needed.sh
+fi
 
 echo "==> bot"
-docker rm -f tasino_bot 2>/dev/null || true
-$DC up -d --no-build --force-recreate bot
+$DC up -d --no-build bot
 
 echo "==> وضعیت"
 $DC ps
 
 echo ""
-echo "لاگ: $DC logs -f bot"
+echo "ری‌استارت سریع بعدی: docker-compose restart bot"
+echo "migrate اجباری: sh scripts/deploy_spayerx.sh --migrate"

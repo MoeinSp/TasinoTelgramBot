@@ -31,14 +31,18 @@ docker-compose up -d --no-recreate bot
 کد پروژه با **volume** داخل کانتینر است → تغییر پایتون = `restart`، نه بیلد.
 
 ```sh
-# آپدیت معمولی (چند ثانیه) — بدون بیلد
+# آپدیت معمولی (چند ثانیه) — بدون migrate
 sh scripts/deploy_spayerx.sh
 
 # فقط وقتی requirements.txt یا Dockerfile عوض شد:
 sh scripts/deploy_spayerx.sh --build
 
-# یا دستی بعد از git pull:
-docker compose restart bot
+# migrate اجباری (بعد از git pull با migration جدید):
+sh scripts/deploy_spayerx.sh --migrate
+
+# یا فقط restart:
+docker-compose up -d bot
+docker-compose restart bot
 ```
 
 Image فقط پکیج‌های پایتون را دارد (`tasino-bot:deps`). بیلد سنگین Alpine/`cache_to` حذف شده.

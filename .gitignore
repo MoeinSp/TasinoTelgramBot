@@ -13,3 +13,4 @@ docker/ssl/
 .vscode/
 .docker-cache/
 .deps-image.hash
+.migrations.hash

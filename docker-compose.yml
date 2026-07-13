@@ -3,7 +3,6 @@ x-bot-image: &bot-image
   build:
     context: .
     dockerfile: Dockerfile
-  # کد روی هاست mount می‌شود → تغییر پایتون = restart، نه rebuild
   volumes:
     - .:/app
 
@@ -64,8 +63,10 @@ services:
       retries: 10
       start_period: 5s
 
+  # فقط دستی: docker compose --profile tools run --rm migrate
   migrate:
     <<: *bot-image
+    profiles: ["tools"]
     container_name: tasino_migrate
     env_file: .env.prod
     environment:
@@ -73,8 +74,6 @@ services:
       BOT_REDIS_URL: redis://redis:6379/2
     depends_on:
       db:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     entrypoint: ["sh", "/entrypoint.sh", "migrate-only"]
     restart: "no"
@@ -88,13 +87,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
     env_file: .env.prod
     environment:
       DATABASE_URL: postgresql://tasino:${DB_PASSWORD}@db:5432/tasino_db
       BOT_REDIS_URL: redis://redis:6379/2
       SKIP_MIGRATE: "1"
+      SKIP_COLLECTSTATIC: "1"
     ports:
       - "127.0.0.1:${ADMIN_PORT:-8001}:8000"
       - "127.0.0.1:${WEBHOOK_HOST_PORT:-8443}:8443"

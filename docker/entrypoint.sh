@@ -4,7 +4,7 @@ set -e
 wait_for_db() {
   echo "==> waiting for database..."
   i=0
-  while [ "$i" -lt 60 ]; do
+  while [ "$i" -lt 30 ]; do
     if python - <<'PY'
 import os, sys
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "TasinoAiogram3.settings")
@@ -13,8 +13,7 @@ django.setup()
 from django.db import connection
 try:
     connection.ensure_connection()
-except Exception as e:
-    print(e)
+except Exception:
     sys.exit(1)
 sys.exit(0)
 PY
@@ -23,9 +22,9 @@ PY
       return 0
     fi
     i=$((i + 1))
-    sleep 2
+    sleep 1
   done
-  echo "==> database not ready after 120s" >&2
+  echo "==> database not ready after 30s" >&2
   exit 1
 }
 
