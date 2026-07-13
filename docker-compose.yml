@@ -6,7 +6,6 @@ x-bot-image: &bot-image
   # کد روی هاست mount می‌شود → تغییر پایتون = restart، نه rebuild
   volumes:
     - .:/app
-    - ./docker/entrypoint.sh:/entrypoint.sh:ro
 
 services:
 
@@ -77,7 +76,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    entrypoint: ["/entrypoint.sh", "migrate-only"]
+    entrypoint: ["sh", "/entrypoint.sh", "migrate-only"]
     restart: "no"
 
   bot:

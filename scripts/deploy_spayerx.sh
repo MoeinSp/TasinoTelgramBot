@@ -6,6 +6,8 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
+chmod +x docker/entrypoint.sh 2>/dev/null || true
+
 if [ ! -f .env.prod ]; then
   echo "❌ فایل .env.prod پیدا نشد"
   exit 1
