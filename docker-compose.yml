@@ -94,12 +94,6 @@ services:
     environment:
       DATABASE_URL: postgresql://tasino:${DB_PASSWORD}@db:5432/tasino_db
       BOT_REDIS_URL: redis://redis:6379/2
-      WEBHOOK_HOST: ${WEBHOOK_HOST:-https://tasino.spayerx.ir}
-      WEBHOOK_PATH: ${WEBHOOK_PATH:-/webhook}
-      WEBHOOK_PORT: ${WEBHOOK_PORT:-8443}
-      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-tasino.spayerx.ir,localhost,127.0.0.1}
-      USE_POLLING: ${USE_POLLING:-false}
-      DEBUG: ${DEBUG:-false}
       SKIP_MIGRATE: "1"
     ports:
       - "127.0.0.1:${ADMIN_PORT:-8001}:8000"

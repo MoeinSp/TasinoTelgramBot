@@ -29,7 +29,13 @@ ALLOWED_HOSTS = [h.strip() for h in _allowed.split(",") if h.strip()]
 if "*" not in ALLOWED_HOSTS and "tasino.spayerx.ir" not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append("tasino.spayerx.ir")
 
-
+# از WEBHOOK_HOST هم دامین را بگیر (مثلاً tasino2.spayerx.ir)
+_webhook_host = (os.getenv("WEBHOOK_HOST") or "").strip().rstrip("/")
+if _webhook_host:
+    from urllib.parse import urlparse
+    _wh = urlparse(_webhook_host if "://" in _webhook_host else f"https://{_webhook_host}")
+    if _wh.hostname and _wh.hostname not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(_wh.hostname)
 
 # Application definition
 
@@ -94,6 +100,17 @@ CSRF_TRUSTED_ORIGINS = [
 _csrf_extra = os.getenv("CSRF_TRUSTED_ORIGINS", "")
 if _csrf_extra:
     CSRF_TRUSTED_ORIGINS += [o.strip() for o in _csrf_extra.split(",") if o.strip()]
+
+# خودکار از ALLOWED_HOSTS و WEBHOOK_HOST
+for _host in ALLOWED_HOSTS:
+    if _host in ("localhost", "127.0.0.1") or "*" in _host:
+        continue
+    for _scheme in ("https", "http"):
+        _origin = f"{_scheme}://{_host}"
+        if _origin not in CSRF_TRUSTED_ORIGINS:
+            CSRF_TRUSTED_ORIGINS.append(_origin)
+if _webhook_host and _webhook_host not in CSRF_TRUSTED_ORIGINS:
+    CSRF_TRUSTED_ORIGINS.append(_webhook_host)
 
 # پشت nginx / reverse-proxy
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
