@@ -1,5 +1,4 @@
 # ─── Stage 1: build ──────────────────────────────────────────────────────────
-# gcc و libpq-dev فقط برای کامپایل psycopg2 لازمه، به runtime نمیره
 FROM python:3.12-alpine AS builder
 
 RUN apk add --no-cache gcc musl-dev libpq-dev
@@ -11,22 +10,21 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 # ─── Stage 2: runtime ────────────────────────────────────────────────────────
 FROM python:3.12-alpine
 
-# فقط کتابخونه runtime پستگرس (بدون gcc)
-RUN apk add --no-cache libpq
+# libpq + کلاینت دامپ/بازیابی + ابزار شبکه برای healthcheck
+RUN apk add --no-cache libpq postgresql-client curl
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PATH="/install/bin:${PATH}" \
     PYTHONPATH=/install/lib/python3.12/site-packages
 
 WORKDIR /app
 
-# کپی packages از stage قبل
 COPY --from=builder /install /install
-
-# کپی سورس (بدون .venv و cache — توسط .dockerignore فیلتر میشه)
 COPY . .
 
 COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN chmod +x /entrypoint.sh \
+ && mkdir -p /app/staticfiles
 
 ENTRYPOINT ["/entrypoint.sh"]

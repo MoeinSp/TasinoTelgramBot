@@ -26,6 +26,10 @@ def _track_message(chat_id: int, user_id: int, name: str = ""):
     leveled_up = m.add_xp(2)
     if name and not m.alias:
         m.alias = name[:255]
+    elif name:
+        a = (m.alias or "").strip().lower()
+        if a in ("کاربر", "user", "unknown", ""):
+            m.alias = name[:255]
     m.save(update_fields=["xp_total", "level", "message_count", "alias"])
     return leveled_up, m.level
 
@@ -117,3 +121,71 @@ class RequiredJoinMiddleware(BaseMiddleware):
 
         await event.answer(text, reply_markup=kb, parse_mode="HTML")
         return None
+
+
+class GlobalBotOffMiddleware(BaseMiddleware):
+    """اگر ربات سراسری خاموش باشد، فقط سازنده در پیوی می‌تواند کار کند."""
+
+    BOT_OFF_TEXT = (
+        "⚫ ربات موقتاً خاموش است.\n"
+        "لطفاً بعداً دوباره تلاش کنید."
+    )
+
+    async def __call__(
+        self,
+        handler: Callable[[Union[Message, CallbackQuery], Dict[str, Any]], Awaitable[Any]],
+        event: Union[Message, CallbackQuery],
+        data: Dict[str, Any],
+    ) -> Any:
+        from bot.site_config import is_bot_globally_enabled
+        from bot.constants import CREATOR_USER_ID
+
+        if is_bot_globally_enabled():
+            return await handler(event, data)
+
+        user = event.from_user
+        if user and user.id == CREATOR_USER_ID:
+            return await handler(event, data)
+
+        if isinstance(event, CallbackQuery):
+            try:
+                await event.answer(self.BOT_OFF_TEXT, show_alert=True)
+            except Exception:
+                pass
+            return None
+
+        if isinstance(event, Message):
+            try:
+                # فقط در پیوی جواب بده؛ در گروه بی‌صدا رد شو
+                if event.chat and event.chat.type == "private":
+                    await event.answer(self.BOT_OFF_TEXT)
+            except Exception:
+                pass
+            return None
+
+        return None
+
+
+class PrivateUserSyncMiddleware(BaseMiddleware):
+    """در پیوی: chat_id و در صورت نبود نام، alias گروه‌ها از پروفایل تلگرام."""
+
+    async def __call__(
+        self,
+        handler: Callable[[Union[Message, CallbackQuery], Dict[str, Any]], Awaitable[Any]],
+        event: Union[Message, CallbackQuery],
+        data: Dict[str, Any],
+    ) -> Any:
+        from bot.finance import register_pv_user
+
+        user = event.from_user
+        chat = None
+        if isinstance(event, Message):
+            chat = event.chat
+        elif isinstance(event, CallbackQuery) and event.message:
+            chat = event.message.chat
+
+        if user and not user.is_bot and chat and chat.type == "private":
+            display = (user.full_name or user.first_name or "").strip()
+            await register_pv_user(user.id, chat.id, display)
+
+        return await handler(event, data)

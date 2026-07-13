@@ -1,0 +1,105 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block content %}
+<div class="module" style="max-width:960px;margin:0 auto;line-height:1.7;">
+
+  <h1 style="margin-bottom:1rem;">💾 بکاپ و بازیابی دیتابیس</h1>
+
+  <div style="padding:1rem 1.25rem;border-radius:10px;margin-bottom:1.25rem;
+              background:{% if bot_enabled %}#ecfdf5{% else %}#fef2f2{% endif %};
+              border:1px solid {% if bot_enabled %}#86efac{% else %}#fecaca{% endif %};">
+    <div style="font-size:1.1rem;font-weight:700;">
+      {% if bot_enabled %}🟢 ربات سراسری روشن است{% else %}⚫ ربات سراسری خاموش است{% endif %}
+    </div>
+    <div style="font-size:.9rem;opacity:.8;margin-top:.35rem;">
+      آخرین تغییر تنظیمات: {{ bot_updated_at|default:"—" }}
+    </div>
+    <form method="post" action="{% url 'admin:bot_setting_databasebackuptool_toggle_bot' %}" style="margin-top:.75rem;">
+      {% csrf_token %}
+      {% if bot_enabled %}
+        <button type="submit" class="button" style="background:#b91c1c;color:#fff;">⚫ خاموش کردن ربات (سراسری)</button>
+      {% else %}
+        <button type="submit" class="button default">🟢 روشن کردن ربات (سراسری)</button>
+      {% endif %}
+    </form>
+    <p style="margin:.75rem 0 0;font-size:.9rem;">
+      قبل از بکاپ و مخصوصاً قبل از بازیابی، ربات را خاموش کنید تا در حین کار دیتا تغییر نکند.
+    </p>
+  </div>
+
+  <fieldset class="module aligned" style="padding:1rem;margin-bottom:1.25rem;">
+    <h2>📥 ساخت دامپ جدید</h2>
+    <p>دامپ فشرده PostgreSQL با فرمت <code>.dump</code> ساخته می‌شود.</p>
+    <form method="post" action="{% url 'admin:bot_setting_databasebackuptool_create_dump' %}">
+      {% csrf_token %}
+      <button type="submit" class="button default">ساخت دامپ الان</button>
+    </form>
+  </fieldset>
+
+  <fieldset class="module aligned" style="padding:1rem;margin-bottom:1.25rem;">
+    <h2>📤 بازیابی از فایل آپلود</h2>
+    <p>فرمت‌های مجاز: <code>.dump</code> / <code>.backup</code> / <code>.sql</code> / <code>.sql.gz</code></p>
+    <form method="post" enctype="multipart/form-data"
+          action="{% url 'admin:bot_setting_databasebackuptool_upload_restore' %}">
+      {% csrf_token %}
+      <input type="file" name="dump_file" required accept=".dump,.backup,.sql,.gz,.sql.gz">
+      <button type="submit" class="button" style="margin-top:.5rem;">آپلود و آماده‌سازی بازیابی</button>
+    </form>
+  </fieldset>
+
+  {% if pending_restore %}
+  <fieldset class="module aligned" style="padding:1rem;margin-bottom:1.25rem;border:2px solid #f59e0b;">
+    <h2>⚠️ تأیید نهایی بازیابی</h2>
+    <p>فایل انتخاب‌شده: <b><code>{{ pending_restore }}</code></b></p>
+    <p style="color:#b45309;">این کار دیتابیس فعلی را با دامپ جایگزین می‌کند. برگشت‌پذیر نیست مگر دامپ دیگری داشته باشید.</p>
+    <form method="post" action="{% url 'admin:bot_setting_databasebackuptool_confirm_restore' %}" style="display:inline-block;margin-left:.5rem;">
+      {% csrf_token %}
+      <button type="submit" class="button" style="background:#b91c1c;color:#fff;"
+              onclick="return confirm('مطمئنید؟ دیتابیس بازیابی می‌شود.');">
+        ✅ تأیید بازیابی کامل
+      </button>
+    </form>
+    <form method="post" action="{% url 'admin:bot_setting_databasebackuptool_cancel_restore' %}" style="display:inline-block;">
+      {% csrf_token %}
+      <button type="submit" class="button">لغو</button>
+    </form>
+  </fieldset>
+  {% endif %}
+
+  <fieldset class="module aligned" style="padding:1rem;">
+    <h2>🗂 دامپ‌های محلی</h2>
+    {% if dumps %}
+    <table style="width:100%;border-collapse:collapse;">
+      <thead>
+        <tr>
+          <th align="right">نام</th>
+          <th align="right">حجم</th>
+          <th align="right">زمان</th>
+          <th align="right">عملیات</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in dumps %}
+        <tr>
+          <td><code>{{ d.name }}</code></td>
+          <td>{{ d.size }}</td>
+          <td>{{ d.mtime }}</td>
+          <td>
+            <a class="button" href="{% url 'admin:bot_setting_databasebackuptool_download' d.name %}">دانلود</a>
+            <form method="post" action="{% url 'admin:bot_setting_databasebackuptool_restore_local' d.name %}" style="display:inline;">
+              {% csrf_token %}
+              <button type="submit" class="button">انتخاب برای بازیابی</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p>هنوز دامپی ذخیره نشده.</p>
+    {% endif %}
+  </fieldset>
+
+</div>
+{% endblock %}

@@ -37,7 +37,11 @@ def record_fee_income(
     chat_id: int, user_id: int, amount: int,
     admin_id: int | None = None, description: str | None = None,
 ) -> int:
-    """ثبت درآمد حق واسطه بدون تغییر موجودی کیف پول."""
+    """
+    فقط لاگ آماری حق واسطه — موجودی کیف پول ادمین/واسطه تغییر نمی‌کند.
+    برای گزارش‌های «حق واسطه امروز / ادمین / …» استفاده می‌شود.
+    در لیست تراکنش کاربر نمایش داده نمی‌شود.
+    """
     m = _get_or_create_member(chat_id, user_id)
     bal = m.point or 0
     _log_tx(chat_id, user_id, "fee", amount, bal, admin_id, description)
@@ -121,7 +125,91 @@ def get_active_accounts(chat_id: int) -> list[dict]:
         .exclude(point__isnull=True)
         .order_by("-point")
     )
-    return list(qs.values("telegram_user_id", "alias", "point"))
+    return list(qs.values("telegram_user_id", "alias", "point", "balance_hidden"))
+
+
+@sync_to_async
+def is_balance_hidden(chat_id: int, user_id: int) -> bool:
+    from account.models import TelegramGroupMember
+    m = TelegramGroupMember.objects.filter(
+        telegram_chat_id=chat_id, telegram_user_id=user_id,
+    ).first()
+    return bool(m and m.balance_hidden)
+
+
+@sync_to_async
+def set_balance_hidden(chat_id: int, user_id: int, hidden: bool) -> bool:
+    m = _get_or_create_member(chat_id, user_id)
+    m.balance_hidden = bool(hidden)
+    m.save(update_fields=["balance_hidden"])
+    return m.balance_hidden
+
+
+@sync_to_async
+def is_accounts_hidden(chat_id: int, user_id: int) -> bool:
+    from account.models import TelegramGroupMember
+    m = TelegramGroupMember.objects.filter(
+        telegram_chat_id=chat_id, telegram_user_id=user_id,
+    ).first()
+    return bool(m and getattr(m, "accounts_hidden", False))
+
+
+@sync_to_async
+def set_accounts_hidden(chat_id: int, user_id: int, hidden: bool) -> bool:
+    m = _get_or_create_member(chat_id, user_id)
+    m.accounts_hidden = bool(hidden)
+    m.save(update_fields=["accounts_hidden"])
+    return m.accounts_hidden
+
+
+@sync_to_async
+def save_telegram_user(user_id: int, chat_id: int) -> None:
+    from account.models import TelegramUser
+    obj, created = TelegramUser.objects.get_or_create(
+        telegram_chat_id=chat_id,
+        defaults={"telegram_user_id": user_id},
+    )
+    if not created and obj.telegram_user_id != user_id:
+        obj.telegram_user_id = user_id
+        obj.save(update_fields=["telegram_user_id"])
+
+
+_ALIAS_PLACEHOLDERS = frozenset({"کاربر", "user", "unknown", "کاربر ناشناس"})
+
+
+def _alias_needs_name(alias: str | None) -> bool:
+    a = (alias or "").strip()
+    return not a or a.lower() in _ALIAS_PLACEHOLDERS
+
+
+@sync_to_async
+def sync_member_aliases_from_name(user_id: int, name: str) -> int:
+    """اگر عضو در گروه‌ها alias ندارد، نام پروفایل را ثبت می‌کند."""
+    from account.models import TelegramGroupMember
+
+    clean = (name or "").strip()[:255]
+    if not clean or clean.lower() in _ALIAS_PLACEHOLDERS:
+        return 0
+    updated = 0
+    for m in TelegramGroupMember.objects.filter(telegram_user_id=user_id):
+        if _alias_needs_name(m.alias):
+            m.alias = clean
+            m.save(update_fields=["alias"])
+            updated += 1
+    return updated
+
+
+async def register_pv_user(user_id: int, chat_id: int, display_name: str = "") -> None:
+    await save_telegram_user(user_id, chat_id)
+    name = (display_name or "").strip()
+    if name:
+        await sync_member_aliases_from_name(user_id, name)
+
+
+@sync_to_async
+def has_started_bot(user_id: int) -> bool:
+    from account.models import TelegramUser
+    return TelegramUser.objects.filter(telegram_user_id=user_id).exists()
 
 
 @sync_to_async
@@ -130,7 +218,7 @@ def get_transactions(chat_id: int, user_id: int, limit: int = 5, offset: int = 0
     return list(
         WalletTransaction.objects.filter(
             telegram_chat_id=chat_id, telegram_user_id=user_id,
-        ).order_by("-id")[offset:offset + limit]
+        ).exclude(type="fee").order_by("-id")[offset:offset + limit]
     )
 
 
@@ -139,7 +227,7 @@ def get_transactions_count(chat_id: int, user_id: int) -> int:
     from account.models import WalletTransaction
     return WalletTransaction.objects.filter(
         telegram_chat_id=chat_id, telegram_user_id=user_id,
-    ).count()
+    ).exclude(type="fee").count()
 
 
 @sync_to_async
@@ -167,6 +255,7 @@ def get_fee_report(
     days: int = 7,
     target_user_id: int | None = None,
     day_offset: int | None = None,
+    this_week: bool = False,
 ) -> dict:
     from datetime import timedelta
     from account.models import WalletTransaction
@@ -180,10 +269,21 @@ def get_fee_report(
         target_date = today - timedelta(days=day_offset)
         qs = qs.filter(created_at__date=target_date)
         start_date = end_date = target_date
+    elif this_week:
+        days_since_saturday = (today.weekday() - 5) % 7
+        start_date = today - timedelta(days=days_since_saturday)
+        end_date = today
+        qs = qs.filter(
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date,
+        )
     else:
         start_date = today - timedelta(days=max(0, days - 1))
         end_date = today
-        qs = qs.filter(created_at__date__gte=start_date)
+        qs = qs.filter(
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date,
+        )
     if target_user_id:
         qs = qs.filter(telegram_user_id=target_user_id)
 

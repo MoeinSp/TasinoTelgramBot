@@ -24,8 +24,10 @@ SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-eea9&dhlv8e8_rdf-av$kps$js
 
 DEBUG = os.getenv("DEBUG", "true").lower() in ("1", "true", "yes")
 
-_allowed = os.getenv("ALLOWED_HOSTS", "*")
+_allowed = os.getenv("ALLOWED_HOSTS", "tasino.spayerx.ir,localhost,127.0.0.1")
 ALLOWED_HOSTS = [h.strip() for h in _allowed.split(",") if h.strip()]
+if "*" not in ALLOWED_HOSTS and "tasino.spayerx.ir" not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append("tasino.spayerx.ir")
 
 
 
@@ -64,6 +66,8 @@ CACHES = {
 
 CSRF_COOKIE_PATH = '/'
 CSRF_TRUSTED_ORIGINS = [
+    "https://tasino.spayerx.ir",
+    "http://tasino.spayerx.ir",
     "http://46.34.163.31:8001",
     "http://46.34.163.31:8002",
     "http://46.34.163.31:8003",
@@ -71,6 +75,7 @@ CSRF_TRUSTED_ORIGINS = [
     "http://46.34.163.31:8005",
     "http://46.34.163.31:8006",
     "http://46.34.163.31:8101",
+    "http://79.133.42.190:8001",
     "https://tasino.liara.run",
     "https://tasino2.liara.run",
     "https://tasino.runflare.run",
@@ -83,12 +88,20 @@ CSRF_TRUSTED_ORIGINS = [
     "https://tasino8.runflare.run",
     "https://tasino9.runflare.run",
     "https://tasino10.runflare.run",
-    "https://vira-webhoo23k.runflare.run"
-    # ... بقیه پورت‌ها
+    "https://vira-webhoo23k.runflare.run",
 ]
+# اضافه‌ها از env: CSRF_TRUSTED_ORIGINS=https://example.com
+_csrf_extra = os.getenv("CSRF_TRUSTED_ORIGINS", "")
+if _csrf_extra:
+    CSRF_TRUSTED_ORIGINS += [o.strip() for o in _csrf_extra.split(",") if o.strip()]
+
+# پشت nginx / reverse-proxy
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+USE_X_FORWARDED_HOST = True
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -218,6 +231,19 @@ STATICFILES_DIRS = [
 
 STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = '/media/'
+
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedStaticFilesStorage",
+    },
+}
+
+# آپلود دامپ بکاپ (تا ۵۱۲ مگ)
+DATA_UPLOAD_MAX_MEMORY_SIZE = 512 * 1024 * 1024
+FILE_UPLOAD_MAX_MEMORY_SIZE = 64 * 1024 * 1024
 # ─── Unfold Admin ────────────────────────────────────────────────────────────
 from django.urls import reverse_lazy
 
@@ -261,6 +287,7 @@ UNFOLD = {
                 "separator": True,
                 "items": [
                     {"title": "لینکدونی و پشتیبانی", "icon": "link", "link": reverse_lazy("admin:bot_setting_botsiteconfig_change", args=[1])},
+                    {"title": "بکاپ و بازیابی", "icon": "backup", "link": reverse_lazy("admin:bot_setting_databasebackuptool_changelist")},
                     {"title": "جوین اجباری", "icon": "lock", "link": reverse_lazy("admin:bot_setting_forcedjoinconfig_change", args=[1])},
                     {"title": "پیام‌های عضویت", "icon": "campaign", "link": reverse_lazy("admin:bot_setting_joinmessage_changelist")},
                 ],

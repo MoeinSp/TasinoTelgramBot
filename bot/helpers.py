@@ -66,6 +66,118 @@ async def safe_send(bot: Bot, chat_id: int, text: str,
         print(f"safe_send error: {e}")
 
 
+async def send_private(
+    bot: Bot,
+    user_id: int,
+    text: str,
+    reply_markup=None,
+) -> bool:
+    """ارسال به پیوی کاربر. True اگر موفق باشد."""
+    try:
+        await bot.send_message(
+            user_id, text,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+            disable_web_page_preview=True,
+        )
+        return True
+    except Exception as e:
+        print(f"send_private error ({user_id}): {e}")
+        return False
+
+
+_BALANCE_PM_SUFFIXES = frozenset({"پیوی", "پیو", "در پیوی"})
+_BALANCE_GROUP_SUFFIXES = frozenset({
+    "گروه", "همون گروه", "همین گروه", "در گروه",
+})
+
+
+def parse_balance_command(text: str) -> tuple[str, bool] | None:
+    """('pm'|'group', is_my_balance) | None — موجودی → گروه؛ موجودی پیوی → پیوی."""
+    if not text:
+        return None
+    t = text.strip()
+    if "مخفی" in t:
+        return None
+    parts = t.split()
+    if not parts or parts[0] != "موجودی":
+        return None
+    suffix_parts = parts[1:]
+    is_my = False
+    if suffix_parts and suffix_parts[0] == "من":
+        is_my = True
+        suffix_parts = suffix_parts[1:]
+    if not suffix_parts:
+        return ("group", is_my)
+    if len(suffix_parts) == 1:
+        s = suffix_parts[0]
+        if s in _BALANCE_PM_SUFFIXES:
+            return ("pm", is_my)
+        if s in _BALANCE_GROUP_SUFFIXES:
+            return ("group", is_my)
+    return None
+
+
+async def deliver_private_or_warn(
+    bot: Bot,
+    group_chat_id: int,
+    user_id: int,
+    group_msg_id: int,
+    text: str,
+    reply_markup=None,
+) -> bool:
+    """گزارش شخصی را به پیوی می‌فرستد."""
+    try:
+        await bot.send_message(
+            user_id, text,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+            disable_web_page_preview=True,
+        )
+        await safe_send(
+            bot, group_chat_id,
+            "📲 گزارش در پیوی ربات ارسال شد.",
+            reply_to=group_msg_id,
+        )
+        return True
+    except Exception as e:
+        print(f"deliver_private_or_warn error ({user_id}): {e}")
+        await safe_send(
+            bot, group_chat_id,
+            "⚠️ برای دریافت گزارش ابتدا ربات را در پیوی /start کنید.\n"
+            "اگر قبلاً استارت کرده‌اید، ربات را از بلاک خارج کنید و دوباره امتحان کنید.",
+            reply_to=group_msg_id,
+        )
+        return False
+
+
+async def deliver_balance_sensitive(
+    bot: Bot,
+    group_chat_id: int,
+    viewer_id: int,
+    group_msg_id: int,
+    text: str,
+    *,
+    private: bool,
+    reply_markup=None,
+) -> bool:
+    """
+    private=True → پیوی؛ private=False → گروه.
+    فقط خود شخص و ادمین مجازند (مجوز در caller چک می‌شود).
+    """
+    if private:
+        return await deliver_private_or_warn(
+            bot, group_chat_id, viewer_id, group_msg_id, text,
+            reply_markup=reply_markup,
+        )
+    await safe_send(
+        bot, group_chat_id, text,
+        reply_to=group_msg_id,
+        reply_markup=reply_markup,
+    )
+    return True
+
+
 # ─── get_target_from_reply ────────────────────────────────────────────────────
 
 async def get_target_from_reply(message: Message, bot: Bot) -> Optional[int]:

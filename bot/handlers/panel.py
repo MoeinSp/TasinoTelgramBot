@@ -599,7 +599,12 @@ async def _execute(action: str, chat_id: int, user_id: int, bot: Bot) -> str:
 
     if action == "dice_theme":
         theme = await db_get_group_theme(chat_id)
-        return f"🎨 تم تاس: {theme}\n\nتغییر: <code>تاس تم 4</code>"
+        from bot.dice_themes import max_theme_id
+        return (
+            f"🎨 تم تاس: {theme}\n\n"
+            f"تغییر: <code>تاس تم 4</code>\n"
+            f"تم‌های موجود تا شماره {max_theme_id()}"
+        )
 
     if action == "filter_list":
         filters = cache.WORD_FILTERS.get(chat_id) or await db_get_word_filters(chat_id)

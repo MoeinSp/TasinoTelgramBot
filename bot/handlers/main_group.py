@@ -51,12 +51,27 @@ from bot.helpers import (
     db_save_note, db_get_note, db_delete_note, db_list_notes,
     db_set_rules, db_get_rules, db_set_night_mode, is_night_time,
     db_set_telegram_emoji, telegram_emoji_on,
+    deliver_private_or_warn, send_private, deliver_balance_sensitive,
+    parse_balance_command,
 )
 from bot.utils import normalize_numbers, safe_calc as utils_safe_calc
 from bot.finance import (
     get_balance, increase_wallet, decrease_wallet, clear_wallet,
     get_active_accounts, get_transactions, get_transactions_count,
-    clear_all_wallets, get_fee_report,
+    clear_all_wallets,
+    is_balance_hidden,
+)
+from bot.fee_reports import (
+    fee_report_kb, send_fee_report, build_fee_text_by_mode,
+    build_fee_admin_text, ADMIN_DENY_TEXT, parse_fee_report_command,
+)
+from bot.hidden_increase import (
+    parse_increase_command, start_increase_pv_flow, TIP_DIRECT,
+)
+from bot.tx_reports import tx_report_kb, build_tx_report_text
+from bot.accounts_panel import (
+    build_accounts_pm_payload, handle_accounts_callback, parse_accounts_command,
+    deliver_accounts_pm,
 )
 from bot.group_help import get_page, PAGE_MAIN
 from bot.panel_keyboards import get_panel, panel_main, locks_panel_text, locks_panel_kb, ALL_TOGGLEABLE_CMDS
@@ -64,7 +79,7 @@ from bot.constants import (
     DEFAULT_WELCOME_TEXT, DEFAULT_WELCOME_GIF_FILE_ID, DEFAULT_WELCOME_PHOTO_PATH,
 )
 from bot.dice_game import (
-    THEMES, has_active_game, get_game, create_game, delete_game, finish_game_cleanup,
+    has_active_game, get_game, create_game, delete_game, finish_game_cleanup,
     handle_dice, handle_round_selection, WAITING_ROUNDS, ACTIVE_GAMES as DICE_ACTIVE_GAMES,
     is_user_in_game, can_player_roll, save_roll_result, register_and_save_dice,
     should_continue, LAST_DICE, calc_bet_costs,
@@ -104,25 +119,7 @@ async def _mention(user_id: int, bot: Bot, chat_id: int) -> str:
     return await user_mention_id(user_id, bot, chat_id)
 
 
-_FEE_REPORT_HELP = (
-    "\n\n💡 دستورات:\n"
-    "• حق واسطه امروز\n"
-    "• حق واسطه دیروز\n"
-    "• حق واسطه پریروز\n"
-    "• حق واسطه هفته\n"
-    "• حق واسطه ادمین\n"
-    "• حق واسطه 10 — تنظیم نرخ"
-)
-
-
-async def _fee_admin_lines(per_admin: dict, bot: Bot, chat_id: int) -> list[str]:
-    if not per_admin:
-        return ["• موردی ثبت نشده."]
-    lines = []
-    for aid, amt in sorted(per_admin.items(), key=lambda x: x[1], reverse=True):
-        tag = await _mention(int(aid), bot, chat_id)
-        lines.append(f"• {tag}: {amt:,} واحد")
-    return lines
+# fee report helpers → bot.fee_reports
 
 
 # ─── نصب و فعال‌سازی ─────────────────────────────────────────────────────────
@@ -197,6 +194,7 @@ async def cmd_bot_toggle(message: Message):
 
 @router.message(F.text.regexp(r"^(تاس\s+)?تم\s+(\d+)$"))
 async def cmd_dice_theme(message: Message):
+    from bot.dice_themes import theme_exists, max_theme_id
     chat_id = message.chat.id
     user_id = message.from_user.id
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
@@ -205,8 +203,11 @@ async def cmd_dice_theme(message: Message):
     if not m:
         return
     theme = int(m.group())
-    if not 1 <= theme <= 15:
-        return await _reply(message, "❌ تم باید بین ۱ تا ۱۵ باشد.")
+    if not theme_exists(theme):
+        return await _reply(
+            message,
+            f"❌ تم {theme} وجود ندارد. تم‌های موجود تا شماره {max_theme_id()}",
+        )
     await db_set_group_theme(chat_id, theme)
     return await _reply(message, f"✅ تم تاس به {theme} تغییر یافت.")
 
@@ -854,10 +855,11 @@ async def cmd_set_profile(message: Message, bot: Bot):
             target_id = message.reply_to_message.from_user.id
         if len(value) > 30:
             return await _reply(message, f"❗ کاربر عزیز، طول {key} نمی‌تواند بیش از 30 حرف باشد.")
-        if key == "لقب":
+        if key in ("لقب", "نام"):
             await db_set_alias(chat_id, target_id, value)
             name = await _mention(target_id, bot, chat_id)
-            return await _reply(message, f"• لقب {name}\n\n» به [ {value} ] تنظیم شد !")
+            label = "نام" if key == "نام" else "لقب"
+            return await _reply(message, f"• {label} {name}\n\n» به [ {value} ] تنظیم شد !")
         return await _reply(message, "✔️ تنظیم شد.")
 
 
@@ -1386,9 +1388,9 @@ async def cmd_dice_option_off(message: Message):
     return await _reply(message, "• تاس متوالی با موفقیت خاموش شد.\n• دیگه دو عدد پشت هم نمیاد!")
 
 
-@router.message(F.text.regexp(r"^محدودیت تعداد تاس(\s+\d+)?$"))
+@router.message(F.text.regexp(r"^محدودیت تعداد تاس(\s+(\d+|خاموش|غیرفعال))?$"))
 async def cmd_dice_turn_limit(message: Message):
-    """محدودیت تعداد تاس 2 → همه تاس‌ها باید در دقیقاً ۲ نوبت ریخته شوند."""
+    """محدودیت تعداد تاس 2 / محدودیت تعداد تاس خاموش"""
     chat_id = message.chat.id
     user_id = message.from_user.id
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
@@ -1402,28 +1404,47 @@ async def cmd_dice_turn_limit(message: Message):
                 "📌 محدودیت تعداد تاس: خاموش\n\n"
                 "برای فعال‌سازی مثلاً بگو:\n"
                 "• محدودیت تعداد تاس 2\n"
-                "برای خاموش کردن: محدودیت تعداد تاس 0",
+                "برای خاموش کردن:\n"
+                "• محدودیت تعداد تاس خاموش\n"
+                "• محدودیت تعداد تاس 0",
             )
         return await _reply(
             message,
             f"📌 محدودیت تعداد تاس این گپ: {current}\n\n"
-            f"هر بازیکن باید همهٔ تاس‌هایش را در دقیقاً {current} نوبت بریزد.\n"
-            f"خاموش کردن: محدودیت تعداد تاس 0",
+            f"هر بازیکن باید همهٔ تاس‌هایش را حداکثر در {current} نوبت بریزد.\n"
+            f"نوبت آخر باید دقیقاً همه تاس‌های باقی‌مانده باشد.\n"
+            f"خاموش کردن: محدودیت تعداد تاس خاموش",
         )
-    try:
-        limit = int(parts[-1])
-    except ValueError:
-        return
+
+    arg = parts[-1]
+    if arg in ("خاموش", "غیرفعال"):
+        limit = 0
+    else:
+        try:
+            limit = int(arg)
+        except ValueError:
+            return
     if limit < 0:
         return await _reply(message, "❌ عدد باید ۰ یا بیشتر باشد.")
     await db_set_dice_turn_limit(chat_id, limit)
     if limit == 0:
         return await _reply(message, "✅ محدودیت تعداد تاس خاموش شد.")
+    if limit == 1:
+        example = "مثال: راند ۲۵ و محدودیت ۱ → باید یکجا بگوید: تاس ۲۵"
+    else:
+        last_need = 25 - (limit - 1)
+        example = (
+            f"مثال: راند ۲۵ و محدودیت {limit}\n"
+            f"اگر در {limit - 1} نوبت اول هر بار «تاس ۱» بزند،\n"
+            f"نوبت آخر حتماً باید «تاس {last_need}» بزند."
+        )
     return await _reply(
         message,
-        f"✅ محدودیت تعداد تاس روی {limit} تنظیم شد.\n\n"
-        f"در مسابقه، هر بازیکن باید همهٔ تاس‌هایش را در دقیقاً {limit} نوبت بریزد.\n"
-        f"مثال: راند ۲۵ و محدودیت ۲ → اگر اول «تاس ۱» بزند، نوبت بعد حتماً «تاس ۲۴».",
+        f"✅ محدودیت تعداد تاس روی {limit} نوبت تنظیم شد.\n\n"
+        f"هر بازیکن باید همه تاس‌ها را حداکثر در {limit} نوبت بریزد.\n"
+        f"نوبت آخر باید دقیقاً همه تاس‌های باقی‌مانده باشد.\n\n"
+        f"{example}\n"
+        f"خاموش کردن: محدودیت تعداد تاس خاموش",
     )
 
 
@@ -1779,6 +1800,28 @@ def _set_fee(chat_id, fee):
     g.save(update_fields=["fee_percent"])
 
 
+@sync_to_async
+def _get_bet_mode(chat_id):
+    from account.models import TelegramGroup
+    try:
+        g = TelegramGroup.objects.get(telegram_chat_id=chat_id)
+        mode = getattr(g, "bet_mode", None)
+        return mode if mode in (BET_MODE_FIXED, BET_MODE_EXTRA) else BET_MODE_FIXED
+    except TelegramGroup.DoesNotExist:
+        return BET_MODE_FIXED
+    except Exception:
+        return BET_MODE_FIXED
+
+
+@sync_to_async
+def _set_bet_mode(chat_id, mode: str):
+    from account.models import TelegramGroup
+    g, _ = TelegramGroup.objects.get_or_create(telegram_chat_id=chat_id, defaults={"name": ""})
+    g.bet_mode = mode
+    g.save(update_fields=["bet_mode"])
+    return g.bet_mode
+
+
 def _tx_label(tx_type: str) -> tuple[str, str]:
     labels = {
         "admin_increase": ("➕ افزایش", "➕"),
@@ -1790,22 +1833,33 @@ def _tx_label(tx_type: str) -> tuple[str, str]:
     return labels.get(tx_type, ("🔹 تراکنش", "🔹"))
 
 
-@router.message(F.text.regexp(r"^(افزایش موجودی|افزایش)\s+\d+"))
+@router.message(F.text.regexp(r"^افزایش(\s|$)"))
 async def cmd_increase_wallet(message: Message, bot: Bot):
     chat_id = message.chat.id
     user_id = message.from_user.id
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
-        return
+        return await _reply(message, ADMIN_DENY_TEXT)
+
+    mode, amount = parse_increase_command(normalize_numbers(message.text))
+    if mode == "invalid":
+        return await _reply(
+            message,
+            "❗ فرمت دستور صحیح نیست.\n"
+            "• <code>افزایش موجودی 5000</code> یا <code>افزایش 5000</code>\n"
+            "• <code>افزایش موجودی</code> یا <code>افزایش موجودی پیوی</code> (با ریپلای) → مبلغ در پیوی",
+        )
+
     if not message.reply_to_message:
         return await _reply(message, "⚠️ لطفاً روی پیام کاربر مورد نظر ریپلای کنید.")
     target_id = await get_target_from_reply(message, bot)
     if not target_id:
         return
-    parts = message.text.split()
-    try:
-        amount = int(parts[-1])
-    except ValueError:
-        return await _reply(message, "❗ مقدار افزایش عدد معتبر نیست.")
+
+    if mode == "pv":
+        return await start_increase_pv_flow(
+            bot, chat_id, user_id, target_id, message.message_id,
+        )
+
     new_balance = await increase_wallet(chat_id, target_id, amount, admin_id=user_id)
     user_tag = await _mention(target_id, bot, chat_id)
     admin_tag = await _mention(user_id, bot, chat_id)
@@ -1815,6 +1869,7 @@ async def cmd_increase_wallet(message: Message, bot: Bot):
         f"🛡 مدیر اجراکننده: {admin_tag}\n\n"
         f"💰 مبلغ افزایش: {amount:,} واحد اعتباری\n"
         f"📊 موجودی فعلی: {new_balance:,} واحد اعتباری"
+        f"{TIP_DIRECT}"
     )
     return await _reply(message, text)
 
@@ -1824,7 +1879,7 @@ async def cmd_decrease_wallet(message: Message, bot: Bot):
     chat_id = message.chat.id
     user_id = message.from_user.id
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
-        return
+        return await _reply(message, ADMIN_DENY_TEXT)
     if not message.reply_to_message:
         return await _reply(message, "⚠️ لطفاً روی پیام کاربر مورد نظر ریپلای کنید.")
     target_id = await get_target_from_reply(message, bot)
@@ -1848,33 +1903,54 @@ async def cmd_decrease_wallet(message: Message, bot: Bot):
     return await _reply(message, text)
 
 
-@router.message(F.text.regexp(r"^موجودی(\s|$)"))
+@router.message(F.text.func(lambda t: parse_balance_command(t) is not None))
 async def cmd_balance(message: Message, bot: Bot):
     chat_id = message.chat.id
     user_id = message.from_user.id
-    parts = message.text.split()
-    if len(parts) > 2:
-        return await _reply(message, "❌ دستور نامعتبر است.")
-    if message.reply_to_message and message.reply_to_message.from_user:
+    mode, is_my = parse_balance_command(message.text)
+
+    if is_my:
+        target_id = user_id
+    elif message.reply_to_message and message.reply_to_message.from_user:
         target_id = message.reply_to_message.from_user.id
     else:
         target_id = user_id
+
+    viewing_other = target_id != user_id
+    if viewing_other:
+        if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+            return await _reply(message, ADMIN_DENY_TEXT)
+
     balance = await get_balance(chat_id, target_id)
-    user_tag = await _mention(target_id, bot, chat_id)
+    try:
+        member = await bot.get_chat_member(chat_id, target_id)
+        plain_name = (member.user.full_name or member.user.first_name or "کاربر")
+    except Exception:
+        plain_name = "کاربر"
     j_time_str = jdatetime.datetime.now().strftime("%Y/%m/%d - %H:%M")
     if balance < 0:
-        balance_text = f"🔻 {abs(balance):,} واحد بدهکار"
+        bal_s = f"🔻 {abs(balance):,} بدهکار"
     else:
-        balance_text = f"{balance:,} واحد اعتباری"
-    text = (
-        "💳 وضعیت موجودی حساب\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        f"👤 کاربر: {user_tag}\n"
-        f"📊 موجودی فعلی: {balance_text}\n"
-        f"🕒 زمان استعلام: {j_time_str}\n"
-        "━━━━━━━━━━━━━━━━━━"
+        bal_s = f"{balance:,} واحد"
+
+    viewing_self = target_id == user_id
+    if viewing_self:
+        text = f"💳 موجودی شما: {bal_s}\n🕒 {j_time_str}"
+    else:
+        text = (
+            f"💳 موجودی\n"
+            f"👤 {html.escape(plain_name)}\n"
+            f"📊 {bal_s}\n"
+            f"🕒 {j_time_str}"
+        )
+
+    private = mode == "pm"
+    kb = tx_report_kb(chat_id, target_id) if private else None
+    return await deliver_balance_sensitive(
+        bot, chat_id, user_id, message.message_id, text,
+        private=private,
+        reply_markup=kb,
     )
-    return await _reply(message, text)
 
 
 @router.message(F.text.startswith("تسویه"))
@@ -1885,7 +1961,7 @@ async def cmd_settle(message: Message, bot: Bot):
 
     if text in ("تسویه همه حساب ها", "تسویه تمام حساب ها", "تسویه حساب ها"):
         if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
-            return
+            return await _reply(message, ADMIN_DENY_TEXT)
         results = await clear_all_wallets(chat_id, admin_id=user_id)
         if not results:
             return await _reply(message, "✅ همه حساب‌ها از قبل صفر بودند.")
@@ -1910,7 +1986,7 @@ async def cmd_settle(message: Message, bot: Bot):
         return await _reply(message, result_text)
 
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
-        return
+        return await _reply(message, ADMIN_DENY_TEXT)
 
     parts = text.split()
 
@@ -2005,12 +2081,26 @@ async def cmd_settle(message: Message, bot: Bot):
     )
 
 
-@router.message(F.text.func(lambda t: bool(t and (t.startswith("حساب ها") or t.startswith("حساب‌ها")))))
+@router.message(F.text.func(lambda t: parse_accounts_command(t) is not None))
 async def cmd_accounts(message: Message, bot: Bot):
     chat_id = message.chat.id
     user_id = message.from_user.id
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
-        return
+        return await _reply(message, ADMIN_DENY_TEXT)
+
+    mode = parse_accounts_command(message.text)
+    group_name = None
+    try:
+        chat = await bot.get_chat(chat_id)
+        group_name = chat.title
+    except Exception:
+        pass
+
+    if mode == "pm":
+        return await deliver_accounts_pm(
+            bot, chat_id, user_id, message.message_id, group_name=group_name,
+        )
+
     accounts = await get_active_accounts(chat_id)
     if not accounts:
         return await _reply(message, "✅ همه حساب‌ها صاف شده!")
@@ -2026,6 +2116,8 @@ async def cmd_accounts(message: Message, bot: Bot):
             lines.append(f"{idx}. {tag} — 🔻 {abs(balance):,} واحد بدهکار")
         else:
             lines.append(f"{idx}. {tag} — {balance:,} واحد")
+        if acc.get("balance_hidden"):
+            lines[-1] += " 🔒"
     if len(accounts) > limit:
         lines.append(f"… و {len(accounts) - limit} حساب دیگر")
     text = (
@@ -2037,6 +2129,11 @@ async def cmd_accounts(message: Message, bot: Bot):
         f"🔢 تعداد حساب‌های تسویه نشده: {len(accounts)}"
     )
     return await _reply(message, text)
+
+
+@router.callback_query(F.data.startswith("acc:"))
+async def cb_accounts_panel(call: CallbackQuery, bot: Bot):
+    return await handle_accounts_callback(call, bot)
 
 
 @router.message(F.text.regexp(r"^گزارش(\s+\d+)?$"))
@@ -2056,6 +2153,13 @@ async def cmd_report(message: Message, bot: Bot):
         target_id = message.reply_to_message.from_user.id
     else:
         target_id = user_id
+
+    viewing_other = target_id != user_id
+    if viewing_other:
+        if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+            return await _reply(message, ADMIN_DENY_TEXT)
+
+    private = await is_balance_hidden(chat_id, target_id)
     total_transactions = await get_transactions_count(chat_id, target_id)
     total_pages = (total_transactions + limit - 1) // limit if total_transactions > 0 else 1
     if page > total_pages and total_pages > 0:
@@ -2101,29 +2205,39 @@ async def cmd_report(message: Message, bot: Bot):
         text += f"   🕒 {j_time_str}\n\n"
     if total_pages > 1:
         text += f"💡 صفحه بعد: `گزارش {page + 1}`" if page < total_pages else ""
-    return await _reply(message, text)
+
+    kb = tx_report_kb(chat_id, target_id, page, total_pages) if private else None
+    return await deliver_balance_sensitive(
+        bot, chat_id, user_id, message.message_id, text,
+        private=private,
+        reply_markup=kb,
+    )
 
 
-@router.message(F.text == "حق واسطه")
-async def cmd_fee_report_today_default(message: Message, bot: Bot):
-    chat_id = message.chat.id
-    report = await get_fee_report(chat_id, day_offset=0)
-    lines = [
-        "💹 گزارش حق واسطه (امروز)",
-        "━━━━━━━━━━━━━━━━━━━━",
-        f"💰 مجموع امروز: {report['total_fee']:,} واحد",
-        "",
-        "👮 سهم ادمین‌ها:",
-    ]
-    lines.extend(await _fee_admin_lines(report["per_admin"], bot, chat_id))
-    lines.append(_FEE_REPORT_HELP)
-    return await _reply(message, "\n".join(lines))
+@router.message(F.text.func(lambda t: parse_fee_report_command(t) is not None))
+async def cmd_fee_report(message: Message, bot: Bot):
+    delivery, mode, admin_target = parse_fee_report_command(message.text)
+    if (
+        mode == "a"
+        and admin_target is None
+        and message.reply_to_message
+        and message.reply_to_message.from_user
+    ):
+        admin_target = message.reply_to_message.from_user.id
+    return await send_fee_report(
+        bot, message.chat.id, message.from_user.id, message.message_id, mode,
+        delivery=delivery, admin_target=admin_target,
+    )
 
 
 @router.message(F.text.regexp(r"^(کارمزد|حق واسطه|نرخ کارمزد)(\s+\d+)?$"))
 async def cmd_fee(message: Message, bot: Bot):
+    if parse_fee_report_command(message.text) is not None:
+        return
     chat_id = message.chat.id
     user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return await _reply(message, ADMIN_DENY_TEXT)
     fee = await _get_fee(chat_id)
     parts = message.text.split()
     if len(parts) == 1:
@@ -2137,8 +2251,6 @@ async def cmd_fee(message: Message, bot: Bot):
             f"ℹ️ پیش‌فرض گروه‌های جدید: ۱۰٪"
         )
         return await _reply(message, text)
-    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
-        return await _reply(message, "❌ شما دسترسی ادمین برای این دستور را ندارید.")
     try:
         new_fee = int(parts[-1])
     except ValueError:
@@ -2165,106 +2277,106 @@ async def cmd_fee(message: Message, bot: Bot):
     return await _reply(message, text)
 
 
-@router.message(F.text.regexp(r"^حق واسطه (امروز|دیروز|پریروز|هفته)$"))
-async def cmd_fee_report_period(message: Message, bot: Bot):
+@router.message(F.text.regexp(r"^حالت بازی(\s+\S+)?$"))
+async def cmd_bet_mode(message: Message, bot: Bot):
     chat_id = message.chat.id
-    period = message.text.split()[-1]
-    day_offsets = {"امروز": 0, "دیروز": 1, "پریروز": 2}
-    if period == "هفته":
-        report = await get_fee_report(chat_id, days=7)
-        lines = [
-            "📊 گزارش حق واسطه ۷ روز اخیر",
-            "━━━━━━━━━━━━━━━━━━━━",
-            f"💰 مجموع هفتگی: {report['total_fee']:,} واحد",
-            "",
-            "📅 تفکیک تاریخ:",
-        ]
-        if report["per_day"]:
-            for d, amt in sorted(report["per_day"].items()):
-                lines.append(f"• {d}: {amt:,} واحد")
-        else:
-            lines.append("• داده‌ای ثبت نشده")
-        lines.extend(["", "👮 سهم ادمین‌ها:"])
-        lines.extend(await _fee_admin_lines(report["per_admin"], bot, chat_id))
-        return await _reply(message, "\n".join(lines))
-
-    report = await get_fee_report(chat_id, day_offset=day_offsets[period])
-    lines = [
-        f"💹 گزارش حق واسطه ({period})",
-        "━━━━━━━━━━━━━━━━━━━━",
-        f"💰 مجموع {period}: {report['total_fee']:,} واحد",
-        "",
-        "👮 سهم ادمین‌ها:",
-    ]
-    lines.extend(await _fee_admin_lines(report["per_admin"], bot, chat_id))
-    return await _reply(message, "\n".join(lines))
-
-
-@router.message(F.text == "حق واسطه هفت روز")
-async def cmd_fee_report_week_days(message: Message, bot: Bot):
-    chat_id = message.chat.id
-    report = await get_fee_report(chat_id, days=7)
-    lines = [
-        "📊 گزارش حق واسطه ۷ روز اخیر",
-        "━━━━━━━━━━━━━━━━━━━━",
-        f"💰 مجموع هفتگی: {report['total_fee']:,} واحد",
-        "",
-        "📅 روز به روز:",
-    ]
-    if report["per_day"]:
-        for d, amt in sorted(report["per_day"].items()):
-            lines.append(f"• {d}: {amt:,} واحد")
-    else:
-        lines.append("• داده‌ای ثبت نشده")
-    lines.extend(["", "👮 سهم ادمین‌ها:"])
-    lines.extend(await _fee_admin_lines(report["per_admin"], bot, chat_id))
-    return await _reply(message, "\n".join(lines))
+    user_id = message.from_user.id
+    arg = message.text[len("حالت بازی"):].strip().lower()
+    if not arg:
+        current = await _get_bet_mode(chat_id)
+        label = _START_MODE_LABELS.get(current, current)
+        return await _reply(message, (
+            f"🎲 حالت بازی الان: {label}\n\n"
+            f"تغییر:\n"
+            f"• <code>حالت بازی فیکس</code>\n"
+            f"• <code>حالت بازی اضافه</code>"
+        ))
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return await _reply(message, ADMIN_DENY_TEXT)
+    if arg not in _START_MODE_WORDS:
+        return await _reply(message, (
+            "❌ مقدار نامعتبر است.\n"
+            "مثال: حالت بازی فیکس  |  حالت بازی اضافه"
+        ))
+    mode = _START_MODE_WORDS[arg]
+    await _set_bet_mode(chat_id, mode)
+    label = _START_MODE_LABELS[mode]
+    detail = (
+        "ورودی ثابت؛ حق واسطه از جایزه کم می‌شود."
+        if mode == BET_MODE_FIXED
+        else "ورودی = شرط + حق واسطه؛ برنده کل شرط را می‌گیرد."
+    )
+    return await _reply(message, (
+        f"✅ حالت بازی گروه روی {label} تنظیم شد.\n\n"
+        f"📌 {detail}\n\n"
+        f"از این به بعد <code>شروع 2 50</code> با حالت {label} اجرا می‌شود.\n"
+        f"همچنان می‌توانید صریح بزنید:\n"
+        f"• <code>شروع 2 50 فیکس</code>\n"
+        f"• <code>شروع 2 50 اضافه</code>"
+    ))
 
 
-@router.message(F.text.regexp(r"^حق واسطه (ادمین|ادمين|admin)(\s+\d+)?$"))
-async def cmd_fee_report_admin(message: Message, bot: Bot):
-    chat_id = message.chat.id
-    target_id = None
-    parts = message.text.split()
-    if len(parts) >= 3 and parts[-1].isdigit():
-        target_id = int(parts[-1])
-    elif message.reply_to_message and message.reply_to_message.from_user:
-        target_id = message.reply_to_message.from_user.id
+@router.callback_query(F.data.startswith("txr:"))
+async def cb_tx_report(call: CallbackQuery, bot: Bot):
+    """دکمه‌های اینلاین گزارش تراکنش‌ها در پیوی."""
+    parts = (call.data or "").split(":")
+    if len(parts) != 4:
+        return await call.answer("داده نامعتبر", show_alert=True)
+    try:
+        chat_id = int(parts[1])
+        target_id = int(parts[2])
+        page = max(1, int(parts[3]))
+    except ValueError:
+        return await call.answer("داده نامعتبر", show_alert=True)
 
-    if target_id:
-        report = await get_fee_report(chat_id, days=7, target_user_id=target_id)
-        tag = await _mention(target_id, bot, chat_id)
-        lines = [
-            "👮 گزارش حق واسطه ادمین",
-            "━━━━━━━━━━━━━━━━━━━━",
-            f"🧑‍💼 ادمین: {tag}",
-            f"💰 مجموع ۷ روز اخیر: {report['total_fee']:,} واحد",
-            "",
-            "📅 تفکیک تاریخ:",
-        ]
-        if report["per_day"]:
-            for d, amt in sorted(report["per_day"].items()):
-                lines.append(f"• {d}: {amt:,} واحد")
-        else:
-            lines.append("• برای این ادمین موردی ثبت نشده")
-    else:
-        report = await get_fee_report(chat_id, days=7)
-        lines = [
-            "👮 گزارش حق واسطه ادمین‌ها",
-            "━━━━━━━━━━━━━━━━━━━━",
-            f"💰 مجموع ۷ روز اخیر: {report['total_fee']:,} واحد",
-            "",
-            "👮 سهم ادمین‌ها:",
-        ]
-        lines.extend(await _fee_admin_lines(report["per_admin"], bot, chat_id))
-        lines.extend(["", "📅 تفکیک تاریخ:"])
-        if report["per_day"]:
-            for d, amt in sorted(report["per_day"].items()):
-                lines.append(f"• {d}: {amt:,} واحد")
-        else:
-            lines.append("• داده‌ای ثبت نشده")
-    lines.append(_FEE_REPORT_HELP)
-    return await _reply(message, "\n".join(lines))
+    viewer_id = call.from_user.id
+    if target_id != viewer_id and not is_admin(chat_id, viewer_id) and not is_owner(chat_id, viewer_id):
+        return await call.answer(ADMIN_DENY_TEXT, show_alert=True)
+
+    group_name = None
+    try:
+        chat = await bot.get_chat(chat_id)
+        group_name = chat.title
+    except Exception:
+        pass
+
+    text, total_pages = await build_tx_report_text(
+        chat_id, bot, target_id, page, group_name=group_name,
+    )
+    kb = tx_report_kb(chat_id, target_id, page, total_pages)
+    try:
+        await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        await send_private(bot, call.from_user.id, text, reply_markup=kb)
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("feer:"))
+async def cb_fee_report(call: CallbackQuery, bot: Bot):
+    """دکمه‌های اینلاین گزارش حق واسطه در پیوی."""
+    parts = (call.data or "").split(":")
+    if len(parts) != 3:
+        return await call.answer("داده نامعتبر", show_alert=True)
+    try:
+        chat_id = int(parts[1])
+    except ValueError:
+        return await call.answer("گروه نامعتبر", show_alert=True)
+    mode = parts[2]
+    user_id = call.from_user.id
+
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return await call.answer(ADMIN_DENY_TEXT, show_alert=True)
+
+    text = await build_fee_text_by_mode(chat_id, bot, mode)
+    if not text:
+        return await call.answer("نامعتبر", show_alert=True)
+
+    kb = fee_report_kb(chat_id)
+    try:
+        await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        await send_private(bot, user_id, text, reply_markup=kb)
+    await call.answer()
 
 
 # ─── شماره کارت ──────────────────────────────────────────────────────────────
@@ -2368,20 +2480,22 @@ async def cmd_start_game(message: Message, bot: Bot):
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
         return await _reply(message, "شما دسترسی مجاز را ندارید")
     parts = normalize_numbers(message.text).split()
-    bet_mode = BET_MODE_FIXED
+    explicit_mode = None
     if parts and parts[-1].lower() in _START_MODE_WORDS:
-        bet_mode = _START_MODE_WORDS[parts[-1].lower()]
+        explicit_mode = _START_MODE_WORDS[parts[-1].lower()]
         parts = parts[:-1]
     if len(parts) < 2:
         return await _reply(message, (
             "❌ فرمت صحیح:\n"
             "• شروع [تعداد] → بازی رایگان\n"
-            "• شروع [تعداد] [مبلغ] → ورودی ثابت (فیکس)\n"
+            "• شروع [تعداد] [مبلغ] → طبق حالت بازی گروه\n"
+            "• شروع [تعداد] [مبلغ] فیکس → ورودی ثابت\n"
             "• شروع [تعداد] [مبلغ] اضافه → ورودی = شرط + حق واسطه\n\n"
             "مثال‌ها:\n"
             "  شروع 2\n"
-            "  شروع 2 50        → ورودی 50، برد = جمع − حق واسطه\n"
-            "  شروع 2 50 اضافه  → ورودی 55، برد = 2×50"
+            "  شروع 2 50\n"
+            "  شروع 2 50 فیکس\n"
+            "  شروع 2 50 اضافه"
         ))
     try:
         total_players = int(parts[1])
@@ -2398,7 +2512,7 @@ async def cmd_start_game(message: Message, bot: Bot):
         except ValueError:
             return await _reply(message, (
                 "❌ مبلغ بازی باید عدد باشد!\n"
-                "مثال: شروع 2 50  |  شروع 2 50 اضافه"
+                "مثال: شروع 2 50  |  شروع 2 50 فیکس  |  شروع 2 50 اضافه"
             ))
     if total_players < 2:
         return await _reply(message, "❌ حداقل تعداد بازیکن‌ها 2 نفر است!")
@@ -2412,6 +2526,10 @@ async def cmd_start_game(message: Message, bot: Bot):
             "❌ یا برای توقف، دستور «لغو» را بزنید."
         ))
     fee_percent = await _get_fee(chat_id) if has_bet else 0
+    if has_bet:
+        bet_mode = explicit_mode if explicit_mode else await _get_bet_mode(chat_id)
+    else:
+        bet_mode = BET_MODE_FIXED
     create_game(
         chat_id, total_players,
         bet_amount=bet_amount, fee_percent=fee_percent,
@@ -2423,7 +2541,6 @@ async def cmd_start_game(message: Message, bot: Bot):
         costs = calc_bet_costs(bet_amount, fee_percent, bet_mode, total_players)
         _entry = costs["entry"]
         _fee_per = costs["fee_per"]
-        _gross = costs["gross_prize"]
         _total_fee = costs["total_fee"]
         _prize = costs["winner_total"]
         msg = (
@@ -2436,21 +2553,23 @@ async def cmd_start_game(message: Message, bot: Bot):
         if bet_mode == BET_MODE_FIXED:
             if fee_percent > 0:
                 msg += (
-                    f"\n💰 جمع ورودی‌ها: {_gross:,} واحد"
+                    f"\n🏆 مبلغ برد: {_prize:,} واحد"
                     f"\n💸 حق واسطه ({fee_percent}٪): {_total_fee:,} واحد (از جایزه)"
-                    f"\n\n🏆 برد برنده: {_prize:,} واحد  ({_gross:,} − {_total_fee:,})"
                 )
             else:
-                msg += f"\n\n🏆 برد برنده: {_prize:,} واحد"
+                msg += f"\n🏆 مبلغ برد: {_prize:,} واحد"
         else:
+            msg += f"\n   ├ شرط: {bet_amount:,} واحد"
             if fee_percent > 0:
                 msg += (
-                    f"\n   ├ شرط: {bet_amount:,} واحد"
                     f"\n   └ حق واسطه ({fee_percent}٪): {_fee_per:,} واحد"
                 )
-            msg += f"\n\n🏆 برد برنده: {_prize:,} واحد  ({total_players} × {bet_amount:,})"
+            msg += (
+                f"\n\n🏆 مبلغ برد: {_prize:,} واحد"
+                + (f"\n💸 جمع حق واسطه: {_total_fee:,} واحد" if fee_percent > 0 else "")
+            )
         msg += (
-            f"\n✅ برای شرکت «تاس» بفرست\n\n"
+            f"\n\n✅ برای شرکت «تاس» بفرست\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"⏱️ مهلت ثبت‌نام: ۱۰ دقیقه\n"
             f"📌 جایگاه‌های خالی: {total_players}\n\n"

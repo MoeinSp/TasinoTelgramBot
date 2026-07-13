@@ -40,6 +40,7 @@ def dashboard_callback(request, context):
             "support": site.support_url,
             "forced_join": "فعال" if fj.enabled else "خاموش",
             "forced_channel": fj.channel_title or fj.channel_username or "—",
+            "bot_enabled": bool(getattr(site, "bot_enabled", True)),
         },
     })
     return context

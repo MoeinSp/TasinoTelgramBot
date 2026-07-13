@@ -10,6 +10,9 @@ from unfold.decorators import display
 
 from .models import JoinMessage, ForcedJoinConfig, BotSiteConfig
 
+# ثبت پنل بکاپ/بازیابی
+from . import admin_backup  # noqa: F401, E402
+
 
 class SingletonAdmin(ModelAdmin):
     """ادمین تک‌رکوردی — همیشه همان pk=1 را ویرایش می‌کند."""
@@ -30,6 +33,10 @@ class SingletonAdmin(ModelAdmin):
 @admin.register(BotSiteConfig)
 class BotSiteConfigAdmin(SingletonAdmin):
     fieldsets = (
+        ("⚡ وضعیت سراسری ربات", {
+            "fields": ("bot_enabled",),
+            "description": "قبل از بکاپ/بازیابی خاموش کنید. پیش‌فرض: روشن.",
+        }),
         ("🔥 لینکدونی", {
             "fields": ("link_directory_url", "link_directory_title"),
             "description": "دکمه لینکدونی در پیوی ربات برای کاربران عادی",
@@ -50,14 +57,8 @@ class BotSiteConfigAdmin(SingletonAdmin):
     def save_model(self, request, obj, form, change):
         super().save_model(request, obj, form, change)
         try:
-            from bot.site_config import apply_site_config_cache
-            apply_site_config_cache({
-                "link_directory_url": obj.link_directory_url,
-                "link_directory_title": obj.link_directory_title,
-                "support_url": obj.support_url,
-                "support_title": obj.support_title,
-                "channel_url": obj.channel_url or "",
-            })
+            from bot.site_config import apply_site_config_cache, _site_snapshot
+            apply_site_config_cache(_site_snapshot(obj))
             messages.success(request, "کش ربات هم به‌روز شد.")
         except Exception:
             messages.warning(request, "ذخیره شد؛ برای اعمال در ربات کش را ریلود کنید.")

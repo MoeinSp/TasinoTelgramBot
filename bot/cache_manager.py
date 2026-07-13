@@ -105,11 +105,14 @@ def _load_from_db():
     })
     sc = BotSiteConfig.get_singleton()
     apply_site_config_cache({
+        "bot_enabled": bool(getattr(sc, "bot_enabled", True)),
         "link_directory_url": sc.link_directory_url,
         "link_directory_title": sc.link_directory_title,
         "support_url": sc.support_url,
         "support_title": sc.support_title,
         "channel_url": sc.channel_url or "",
+        "premium_emoji_ids": getattr(sc, "premium_emoji_ids", None) or {},
+        "dice_themes": getattr(sc, "dice_themes", None) or {},
     })
 
 

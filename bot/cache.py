@@ -57,11 +57,14 @@ FORCED_JOIN_MEMBER_CHECK: dict[tuple[int, int], tuple[bool, float]] = {}
 
 # ─── تنظیمات سراسری سایت/ربات ─────────────────────────────────────────────
 SITE_CONFIG: dict = {
+    "bot_enabled": True,
     "link_directory_url": "https://t.me/TasinoBot",
     "link_directory_title": "🔥 بزرگترین لینکدونی",
     "support_url": "https://t.me/Spayers",
     "support_title": "گروه پشتیبانی",
     "channel_url": "https://t.me/TasinoBot",
+    "premium_emoji_ids": {},
+    "dice_themes": {},
 }
 
 # ─── پنل پیوی (گروه انتخاب‌شده برای تنظیمات) ───────────────────────────────

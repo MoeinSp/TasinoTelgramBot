@@ -16,6 +16,8 @@ dj-database-url==3.1.2
 Django==6.0.5
 django-jalali==7.4.0
 django-unfold==0.100.0
+gunicorn==23.0.0
+whitenoise==6.11.0
 frozenlist==1.8.0
 h11==0.16.0
 httpcore==1.0.9

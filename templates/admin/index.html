@@ -37,9 +37,12 @@
           </a>
         </div>
         <div>📌 جوین اجباری: <b>{{ tasino_links.forced_join }}</b> — {{ tasino_links.forced_channel }}</div>
+        <div>⚡ ربات سراسری:
+          {% if tasino_links.bot_enabled %}<b style="color:#16a34a;">🟢 روشن</b>{% else %}<b style="color:#dc2626;">⚫ خاموش</b>{% endif %}
+        </div>
       </div>
       <p class="mt-4 text-xs text-font-subtle-light dark:text-font-subtle-dark">
-        ویرایش سریع از منوی «تنظیمات سراسری» در سایدبار.
+        ویرایش سریع از منوی «تنظیمات سراسری» و «بکاپ و بازیابی دیتابیس» در سایدبار.
       </p>
     </div>
     {% endif %}

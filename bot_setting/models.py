@@ -96,6 +96,11 @@ class ForcedJoinConfig(models.Model):
 
 class BotSiteConfig(models.Model):
     """تنظیمات سراسری ربات — یک رکورد (pk=1)."""
+    bot_enabled = models.BooleanField(
+        default=True,
+        verbose_name="ربات روشن (سراسری)",
+        help_text="اگر خاموش باشد، ربات در همه گروه‌ها و پیوی (به‌جز سازنده) پاسخ نمی‌دهد. قبل از بکاپ/بازیابی خاموش کنید.",
+    )
     link_directory_url = models.URLField(
         max_length=512,
         default="https://t.me/TasinoBot",
@@ -123,6 +128,18 @@ class BotSiteConfig(models.Model):
         default="https://t.me/TasinoBot",
         verbose_name="لینک کانال رسمی",
     )
+    premium_emoji_ids = models.JSONField(
+        default=dict,
+        blank=True,
+        verbose_name="شناسه ایموجی‌های پرمیوم",
+        help_text='مثل {"rose":"5287...","dice":"123..."}',
+    )
+    dice_themes = models.JSONField(
+        default=dict,
+        blank=True,
+        verbose_name="تم‌های سفارشی تاس",
+        help_text='مثل {"1":{"single_header":"..."},"16":{...}} — روی ۱۵ تم پیش‌فرض می‌نشیند',
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -136,3 +153,12 @@ class BotSiteConfig(models.Model):
     def get_singleton(cls):
         obj, _ = cls.objects.get_or_create(pk=1)
         return obj
+
+
+class DatabaseBackupTool(BotSiteConfig):
+    """پروکسی منوی ادمین — بکاپ/بازیابی (جدول جدا ندارد)."""
+
+    class Meta:
+        proxy = True
+        verbose_name = "بکاپ و بازیابی دیتابیس"
+        verbose_name_plural = "بکاپ و بازیابی دیتابیس"

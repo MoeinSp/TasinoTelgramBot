@@ -1,7 +1,6 @@
 services:
 
   # ─── PostgreSQL ─────────────────────────────────────────────────────────────
-  # shared_buffers و work_mem خیلی کم تنظیم شده برای VPS یک گیگ
   db:
     image: postgres:15-alpine
     container_name: tasino_postgres
@@ -28,9 +27,10 @@ services:
           memory: 80m
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tasino -d tasino_db"]
-      interval: 15s
+      interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 10s
 
   # ─── Redis ──────────────────────────────────────────────────────────────────
   redis:
@@ -52,11 +52,30 @@ services:
           memory: 40m
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 15s
+      interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 5s
 
-  # ─── Bot ────────────────────────────────────────────────────────────────────
+  # ─── مایگریت قبل از استارت ربات (همیشه با up/build اجرا می‌شود) ───────────
+  migrate:
+    build: .
+    container_name: tasino_migrate
+    env_file: .env.prod
+    environment:
+      DATABASE_URL: postgresql://tasino:${DB_PASSWORD}@db:5432/tasino_db
+      BOT_REDIS_URL: redis://redis:6379/2
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    entrypoint: ["/entrypoint.sh", "migrate-only"]
+    restart: "no"
+
+  # ─── Bot + Django admin ─────────────────────────────────────────────────────
+  # ادمین: 127.0.0.1:8001 → :8000
+  # وب‌هوک: 127.0.0.1:8443 → :8443  (nginx دامین tasino.spayerx.ir)
   bot:
     build: .
     container_name: tasino_bot
@@ -66,11 +85,26 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     env_file: .env.prod
+    environment:
+      # داخل شبکه compose همیشه به سرویس‌های همین stack وصل شو
+      DATABASE_URL: postgresql://tasino:${DB_PASSWORD}@db:5432/tasino_db
+      BOT_REDIS_URL: redis://redis:6379/2
+      WEBHOOK_HOST: ${WEBHOOK_HOST:-https://tasino.spayerx.ir}
+      WEBHOOK_PATH: ${WEBHOOK_PATH:-/webhook}
+      WEBHOOK_PORT: ${WEBHOOK_PORT:-8443}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-tasino.spayerx.ir,localhost,127.0.0.1}
+      USE_POLLING: ${USE_POLLING:-false}
+      DEBUG: ${DEBUG:-false}
+    ports:
+      - "127.0.0.1:${ADMIN_PORT:-8001}:8000"
+      - "127.0.0.1:${WEBHOOK_HOST_PORT:-8443}:8443"
     deploy:
       resources:
         limits:
-          memory: 220m
+          memory: 320m
         reservations:
           memory: 80m
     logging:

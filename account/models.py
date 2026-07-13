@@ -148,6 +148,23 @@ class TelegramGroup(models.Model):
         verbose_name="درصد کارمزد"
     )
 
+    bet_mode = models.CharField(
+        max_length=10,
+        default="fixed",
+        choices=(
+            ("fixed", "فیکس"),
+            ("extra", "اضافه"),
+        ),
+        verbose_name="حالت بازی (پیش‌فرض)",
+        help_text="برای «شروع ۲ ۵۰» بدون ذکر حالت. پیش‌فرض: فیکس",
+    )
+
+    increase_hidden = models.BooleanField(
+        default=False,
+        verbose_name="افزایش موجودی مخفی",
+        help_text="اگر روشن باشد، ادمین فقط «افزایش موجودی» می‌زند و مبلغ را در پیوی وارد می‌کند.",
+    )
+
     welcome_enabled = models.BooleanField(
         default=True,
         verbose_name="خوشامدگویی فعال"
@@ -343,6 +360,16 @@ class TelegramGroupMember(models.Model):
         default=0,
         null=True,
         blank=True
+    )
+
+    balance_hidden = models.BooleanField(
+        default=False,
+        verbose_name="موجودی مخفی",
+    )
+
+    accounts_hidden = models.BooleanField(
+        default=False,
+        verbose_name="لیست حساب‌ها مخفی (پیوی)",
     )
 
     message_count = models.IntegerField(

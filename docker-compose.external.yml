@@ -1,6 +1,6 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # وقتی پروژه دیگه‌ات از همین VPS postgres و redis داره
-# اجرا: docker compose -f docker-compose.yml -f docker-compose.external.yml up -d
+# اجرا: docker compose -f docker-compose.yml -f docker-compose.external.yml up -d --build
 #
 # قبلش در .env.prod:
 #   DATABASE_URL=postgresql://tasino:PASS@host-gateway:5432/tasino_db
@@ -10,13 +10,26 @@ services:
 
   db:
     deploy:
-      replicas: 0     # اجرا نشه
+      replicas: 0
 
   redis:
     deploy:
-      replicas: 0     # اجرا نشه
+      replicas: 0
+
+  migrate:
+    depends_on: {}
+    extra_hosts:
+      - "host-gateway:host-gateway"
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      BOT_REDIS_URL: ${BOT_REDIS_URL}
 
   bot:
-    depends_on: {}    # وابستگی به db/redis حذف میشه
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     extra_hosts:
-      - "host-gateway:host-gateway"   # دسترسی به سرویس‌های host
+      - "host-gateway:host-gateway"
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      BOT_REDIS_URL: ${BOT_REDIS_URL}

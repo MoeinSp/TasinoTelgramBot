@@ -18,6 +18,7 @@ django.setup()
 from bot.routers import setup_routers
 from bot.cache_manager import load_all_caches
 from bot.scheduler import send_scheduled_logic
+from bot.backup import send_auto_backup
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,7 +31,7 @@ PROXY       = os.getenv("PROXY", "")
 USE_POLLING = os.getenv("USE_POLLING", "false").lower() in ("1", "true", "yes")
 
 # وبهوک
-WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "")          # مثال: https://example.com
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "https://tasino.spayerx.ir")
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")  # مسیر endpoint
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8443"))
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
@@ -62,8 +63,18 @@ async def _build_bot_dp():
         args=[bot],
         id="scheduled_messages",
     )
+    scheduler.add_job(
+        send_auto_backup,
+        "interval",
+        hours=3,
+        max_instances=1,
+        args=[bot],
+        id="db_backup_3h",
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
     scheduler.start()
-    logger.info("Scheduler فعال شد (هر ۱ دقیقه)")
+    logger.info("Scheduler فعال شد (پیام زمان‌بندی‌شده هر ۱ دقیقه · بکاپ هر ۳ ساعت)")
     # ────────────────────────────────────────────────────────────────────────
 
     return bot, dp

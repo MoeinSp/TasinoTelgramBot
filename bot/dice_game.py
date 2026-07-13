@@ -1,4 +1,4 @@
-﻿"""
+"""
 سیستم بازی تاس — پورت کامل از rubpy/bot/dice.py و rubpy/bot/func.py
 """
 import asyncio
@@ -9,130 +9,12 @@ from typing import Optional
 
 import jdatetime
 
-# ─── تم‌های تاس (15 تم) ─────────────────────────────────────────────────────
-
-THEMES = {
-    1: {
-        "name": "classic",
-        "single_header": "<blockquote>تـاس انداخته شـد عدد ↻  : {value} 🎲</blockquote>",
-        "multi_header": "<blockquote>🎲 تاس × {count}</blockquote>",
-        "separator": "•─────✧─────•",
-        "footer": "\n<blockquote>محاسبـه کـل ↻ : {total} 🎲</blockquote>",
-        "faces": {1: "⬤", 2: "⬤ ⬤", 3: "⬤ ⬤\n  ⬤", 4: "⬤ ⬤\n⬤ ⬤", 5: "⬤ ⬤\n  ⬤\n⬤ ⬤", 6: "⬤ ⬤\n⬤ ⬤\n⬤ ⬤"}
-    },
-    2: {
-        "name": "cinema",
-        "single_header": "🎬 عدد شانس: {value}",
-        "multi_header": "🎬 DICE × {count}",
-        "separator": "🎞️━━━━━━━━━━━━━━🎞️",
-        "footer": "\n🎬 TOTAL = {total}",
-        "faces": {1: "■", 2: "■     ■", 3: "■     ■\n    ■", 4: "■     ■\n■     ■", 5: "■     ■\n    ■\n■     ■", 6: "■     ■\n■     ■\n■     ■"}
-    },
-    3: {
-        "name": "kingdom",
-        "single_header": "<blockquote>𒆙 ↻  عدد : {value} 🎲</blockquote>",
-        "multi_header": "<blockquote>🎲 𒆜 DICES × {count}</blockquote>",
-        "separator": "⌬⌬⌬⌬⌬⌬⌬⌬",
-        "footer": "\n<blockquote>⌬ ﹝{total}﹞;</blockquote>",
-        "faces": {1: "𒊹", 2: "𒊹 𒊹", 3: "𒊹 𒊹\n  𒊹", 4: "𒊹 𒊹\n𒊹 𒊹", 5: "𒊹 𒊹\n  𒊹\n𒊹 𒊹", 6: "𒊹 𒊹\n𒊹 𒊹\n𒊹 𒊹"}
-    },
-    4: {
-        "name": "soft_emoji",
-        "single_header": "🌈 نتیجه: {value}",
-        "multi_header": "🌈 {count} تاس رنگی",
-        "separator": "🌸🌸🌸🌸🌸",
-        "footer": "\n🌈 مجموع: {total}",
-        "faces": {1: "✨", 2: "✨ ✨", 3: "✨ ✨\n   ✨", 4: "✨ ✨\n✨ ✨", 5: "✨ ✨\n   ✨\n✨ ✨", 6: "✨ ✨\n✨ ✨\n✨ ✨"}
-    },
-    5: {
-        "name": "minimal_dot",
-        "single_header": "⌬ تـاس انداخته شـد عدد ↻  : {value} ",
-        "multi_header": "⌬ تاس × {count}",
-        "separator": "⌬⌬⌬⌬⌬⌬⌬⌬",
-        "footer": "⌬\nمحاسبـه کـل ↻ : {total} ",
-        "faces": {1: "▰", 2: "▰   ▰", 3: "▰   ▰\n  ▰", 4: "▰   ▰\n▰   ▰", 5: "▰   ▰\n  ▰\n▰   ▰", 6: "▰   ▰\n▰   ▰\n▰   ▰"}
-    },
-    6: {
-        "name": "crystal",
-        "single_header": "💎 کریستال ↻ {value}",
-        "multi_header": "💎 CRYSTAL × {count}",
-        "separator": "◆◇◆◇◆◇◆◇◆",
-        "footer": "\n💎 مجموع: {total}",
-        "faces": {1: "◆", 2: "◆     ◆", 3: "◆     ◆\n    ◆", 4: "◆     ◆\n◆     ◆", 5: "◆     ◆\n    ◆\n◆     ◆", 6: "◆     ◆\n◆     ◆\n◆     ◆"}
-    },
-    7: {
-        "name": "samurai",
-        "single_header": "⚔️ ضربه: {value}",
-        "multi_header": "⚔️ ضربه‌ها × {count}",
-        "separator": "⛩️⛩️⛩️⛩️⛩️",
-        "footer": "\n⛩️ مجموع: {total}",
-        "faces": {1: "卍", 2: "卍 卍", 3: "卍 卍\n  卍", 4: "卍 卍\n卍 卍", 5: "卍 卍\n  卍\n卍 卍", 6: "卍 卍\n卍 卍\n卍 卍"}
-    },
-    8: {
-        "name": "grid",
-        "single_header": "□ تاس: {value}",
-        "multi_header": "□ × {count}",
-        "separator": "□□□□□□□□□□",
-        "footer": "\n□ مجموع: {total}",
-        "faces": {1: "●", 2: "●   ●", 3: "●   ●\n   ●", 4: "●   ●\n●   ●", 5: "●   ●\n   ●\n●   ●", 6: "●   ●\n●   ●\n●   ●"}
-    },
-    9: {
-        "name": "thunder",
-        "single_header": "⚡ رعد ↻ {value}",
-        "multi_header": "⚡ THUNDER × {count}",
-        "separator": "•─────⚡─────•",
-        "footer": "\n⚡ قدرت: {total}",
-        "faces": {1: "⚡", 2: "⚡     ⚡", 3: "⚡     ⚡\n    ⚡", 4: "⚡     ⚡\n⚡     ⚡", 5: "⚡     ⚡\n    ⚡\n⚡     ⚡", 6: "⚡     ⚡\n⚡     ⚡\n⚡     ⚡"}
-    },
-    10: {
-        "name": "alchemy",
-        "single_header": "⚗️ کیمیا ↻ {value}",
-        "multi_header": "⚗️ ALCHEMY × {count}",
-        "separator": "•─────✧─────•",
-        "footer": "\n⚗️ نتیجه نهایی: {total}",
-        "faces": {1: "⟠", 2: "⟠     ⟠", 3: "⟠     ⟠\n    ⟠", 4: "⟠     ⟠\n⟠     ⟠", 5: "⟠     ⟠\n    ⟠\n⟠     ⟠", 6: "⟠     ⟠\n⟠     ⟠\n⟠     ⟠"}
-    },
-    11: {
-        "name": "rose",
-        "single_header": "🌹 رز ↻ {value} 🎲",
-        "multi_header": "🌹 ROSE × {count}",
-        "separator": "•─────🌹─────•",
-        "footer": "\n🌹 مجموع: {total}",
-        "faces": {1: "   ✿", 2: "✿   ✿", 3: "✿   ✿\n   ✿", 4: "✿   ✿\n✿   ✿", 5: "✿   ✿\n   ✿\n✿   ✿", 6: "✿   ✿\n✿   ✿\n✿   ✿"}
-    },
-    12: {
-        "name": "forest",
-        "single_header": "🌿 جنگل ↻ {value}",
-        "multi_header": "🌿 FOREST × {count}",
-        "separator": "•─────🌿─────•",
-        "footer": "\n🌿 مجموع: {total}",
-        "faces": {1: "❇", 2: "❇   ❇", 3: "❇   ❇\n    ❇", 4: "❇   ❇\n❇   ❇", 5: "❇   ❇\n    ❇\n❇   ❇", 6: "❇   ❇\n❇   ❇\n❇   ❇"}
-    },
-    13: {
-        "name": "gold",
-        "single_header": "👑 طلایی ↻ {value}",
-        "multi_header": "👑 GOLD × {count}",
-        "separator": "•─────👑─────•",
-        "footer": "\n👑 مجموع: {total}",
-        "faces": {1: "✦", 2: "✦   ✦", 3: "✦   ✦\n    ✦", 4: "✦   ✦\n✦   ✦", 5: "✦   ✦\n    ✦\n✦   ✦", 6: "✦   ✦\n✦   ✦\n✦   ✦"}
-    },
-    14: {
-        "name": "skull",
-        "single_header": "☠️ جمجمه ↻ {value}",
-        "multi_header": "☠️ SKULL × {count}",
-        "separator": "•─────🏴‍☠️─────•",
-        "footer": "\n☠️ کــــیــــل ⟪{total}⟫",
-        "faces": {1: "☠️", 2: "☠️   ☠️", 3: "☠️   ☠️\n    ☠️", 4: "☠️   ☠️\n☠️   ☠️", 5: "☠️   ☠️\n    ☠️\n☠️   ☠️", 6: "☠️   ☠️\n☠️   ☠️\n☠️   ☠️"}
-    },
-    15: {
-        "name": "dragon_gate",
-        "single_header": "<blockquote>🐉 دروازه اژدها: {value}</blockquote>",
-        "multi_header": "<blockquote>🐉 عبور از دروازه × {count}</blockquote>",
-        "separator": "•─────✧─────•",
-        "footer": "\n<blockquote>🐲 نیروی کل: {total}</blockquote>",
-        "faces": {1: "龙", 2: "龙  龙", 3: "龙  龙\n   龙", 4: "龙  龙\n龙  龙", 5: "龙  龙\n   龙\n龙  龙", 6: "龙  龙\n龙  龙\n龙  龙"}
-    },
-}
+from bot.dice_themes import (
+    THEMES,
+    get_theme,
+    build_single_dice_message,
+    build_multi_dice_message,
+)
 
 # ─── حافظه بازی‌ها (in-memory) ───────────────────────────────────────────────
 
@@ -319,42 +201,17 @@ def roll_dice(chat_id, dice_option_off: bool) -> int:
     return r
 
 
-def build_single_dice_message(r: int, theme: dict) -> str:
-    return theme["single_header"].format(value=r) + "\n" + theme["faces"][r]
-
-
-def build_multi_dice_message(results: list, total: int, count: int, theme: dict) -> str:
-    separator = theme["separator"]
-    lines = [theme["multi_header"].format(count=count), ""]
-    for i, r in enumerate(results):
-        lines.append(theme["faces"][r])
-        if i != count - 1:
-            lines.append(separator)
-    lines.append(theme["footer"].format(total=total))
-    return "\n".join(lines)
-
-
 # ─── مدیریت راند و امتیاز ────────────────────────────────────────────────────
 
-def format_turn_limit_error(limit: int, actions_left: int, remaining: int, dice_count: int) -> str:
-    """پیام واضح وقتی محدودیت نوبت تاس رعایت نشده."""
-    if actions_left <= 1:
-        need = remaining
-        return (
-            f"⚠️ محدودیت تعداد تاس در این گپ: {limit}\n\n"
-            f"باید همهٔ تاس‌هایت را در دقیقاً {limit} نوبت بریزی.\n"
-            f"این آخرین نوبت توست؛ باید دقیقاً {need} تاس بریزی.\n\n"
-            f"👉 بگو: تاس {need}"
-        )
-    max_now = remaining - (actions_left - 1)
+def format_turn_limit_error(limit: int, remaining: int, dice_count: int) -> str:
+    """فقط نوبت آخر: باید دقیقاً همه تاس‌های باقی‌مانده ریخته شود."""
     return (
-        f"⚠️ محدودیت تعداد تاس در این گپ: {limit}\n\n"
-        f"باید همهٔ تاس‌هایت را در دقیقاً {limit} نوبت بریزی.\n"
-        f"الان {actions_left} نوبت و {remaining} تاس برایت مانده.\n"
-        f"در این نوبت حداکثر {max_now} تاس می‌توانی بریزی "
-        f"(تا برای نوبت‌های بعد هم تاس بماند).\n\n"
+        f"⚠️ محدودیت تعداد تاس این گپ: {limit} نوبت\n\n"
+        f"باید همه تاس‌هایت را در دقیقاً {limit} نوبت بریزی.\n\n"
+        f"الان: آخرین نوبت · {remaining} تاس باقی\n"
+        f"باید همه {remaining} تاس را در این نوبت بریزی.\n\n"
         f"تو خواستی {dice_count} تاس بریزی.\n"
-        f"👉 مثلاً بگو: تاس {max_now}"
+        f"👉 بگو: تاس {remaining}"
     )
 
 
@@ -377,25 +234,20 @@ def can_player_roll(chat_id, user_id, dice_count=1):
     if dice_count > remaining:
         return False, remaining, f"❌ شما فقط {remaining} راند باقی دارید!"
 
+    # محدودیت نوبت: در نوبت‌های غیرآخر آزاد است (حتی همه یکجا).
+    # فقط نوبت آخر باید دقیقاً برابر تاس‌های باقی‌مانده باشد.
     limit = int(game.get("dice_turn_limit") or 0)
     actions_left = progress[user_id].get("actions_left")
     if limit > 0 and actions_left is not None:
         if actions_left <= 0:
             return False, remaining, (
-                f"⚠️ محدودیت تعداد تاس این گپ: {limit} نوبت\n"
+                f"⚠️ محدودیت تعداد تاس این گپ: {limit} نوبت\n\n"
                 f"نوبت‌های مجازت تمام شده است."
             )
-        if actions_left == 1:
-            if dice_count != remaining:
-                return False, remaining, format_turn_limit_error(
-                    limit, actions_left, remaining, dice_count
-                )
-        else:
-            max_now = remaining - (actions_left - 1)
-            if dice_count > max_now:
-                return False, remaining, format_turn_limit_error(
-                    limit, actions_left, remaining, dice_count
-                )
+        if actions_left == 1 and dice_count != remaining:
+            return False, remaining, format_turn_limit_error(
+                limit, remaining, dice_count
+            )
 
     return True, remaining, f"🎯 {remaining} راند باقی مانده"
 
@@ -627,8 +479,8 @@ async def handle_round_selection(chat_id, user_id, text, bot, message_id):
     limit_line = ""
     if turn_limit > 0:
         limit_line = (
-            f"\n📌 محدودیت نوبت تاس: {turn_limit}\n"
-            f"   همهٔ {rounds_count} تاس را باید در دقیقاً {turn_limit} نوبت بریزی.\n"
+            f"\n📌 محدودیت نوبت تاس: حداکثر {turn_limit}\n"
+            f"   می‌توانی زودتر تمام کنی؛ نوبت آخر باید همه باقی‌مانده را بریزی.\n"
         )
 
     if is_two_player:
@@ -858,7 +710,7 @@ def _multinomial_fair(count_):
 async def handle_dice(text, chat_id, message_id, bot, user_id, dice_option_off, theme_id=1,
                       telegram_emoji_on=False):
     text = (text or "").strip()
-    theme = THEMES.get(theme_id, THEMES[1])
+    theme = get_theme(theme_id)
     separator = theme["separator"]
 
     # تعیین تعداد تاس
@@ -921,13 +773,14 @@ async def handle_dice(text, chat_id, message_id, bot, user_id, dice_option_off, 
 
     # ─── تاس تکی ─────────────────────────────────────────────────────────────
     if dice_count == 1:
-        from bot.helpers import db_record_dice_roll
+        from bot.helpers import db_record_dice_roll, safe_send
         if telegram_emoji_on:
             sent = await bot.send_dice(chat_id, emoji="🎲", reply_to_message_id=message_id)
             r = sent.dice.value
         else:
-            from bot.game_text import send_single_dice
-            r = await send_single_dice(bot, chat_id, message_id)
+            r = roll_dice(chat_id, dice_option_off)
+            msg = build_single_dice_message(r, theme)
+            await safe_send(bot, chat_id, msg, reply_to=message_id)
         LAST_DICE[chat_id] = r
         await db_record_dice_roll(chat_id, user_id, r)
 
