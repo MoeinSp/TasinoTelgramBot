@@ -1,21 +1,30 @@
 # استقرار تاسینو روی tasino.spayerx.ir
 
-## پیش‌نیاز VPS
+## پیش‌نیاز VPS — Docker Compose v2
 
-ترجیحاً **Docker Compose v2** (`docker compose`)، نه `docker-compose` 1.29:
+`docker-compose` 1.29 با Docker جدید خطای **`ContainerConfig`** می‌دهد.
 
-```sh
-docker compose version
-# اگر نبود:
-apt update && apt install -y docker-compose-plugin
-```
-
-خطای `KeyError: ContainerConfig` = compose قدیمی است. موقت:
+اگر `apt install docker-compose-plugin` جواب نداد:
 
 ```sh
-docker rm -f tasino_migrate tasino_bot
-docker compose up -d
+cd /opt/TasinoTelgramBot
+sh scripts/install-compose-v2.sh
+docker-compose version   # باید v2.x باشد
 ```
+
+### اگر فعلاً نمی‌خواهی نصب کنی — دور زدن موقت (v1)
+
+```sh
+cd /opt/TasinoTelgramBot
+docker-compose down --remove-orphans
+docker rm -f tasino_migrate tasino_bot 2>/dev/null || true
+
+docker-compose up -d db redis
+docker-compose run --rm --no-deps migrate
+docker-compose up -d --no-recreate bot
+```
+
+**هرگز** با v1 قدیمی `up --build --force-recreate` نزن.
 
 ## سرعت آپدیت
 
