@@ -59,9 +59,30 @@ sh scripts/deploy_spayerx.sh --build
 
 ترتیب: `db/redis healthy` → **`migrate`** → **`bot`**
 
-## nginx (یک‌بار)
+## nginx
 
-```bash
+### tasino2.spayerx.ir (ربات فعلی)
+
+```sh
+cd /opt/TasinoTelgramBot
+git pull
+sh scripts/setup-nginx-tasino2.sh
+```
+
+یا دستی:
+
+```sh
+apt install -y nginx certbot python3-certbot-nginx
+mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+cp docker/nginx-tasino2.spayerx.ir.conf /etc/nginx/sites-available/tasino2.spayerx.ir
+ln -sf /etc/nginx/sites-available/tasino2.spayerx.ir /etc/nginx/sites-enabled/
+certbot --nginx -d tasino2.spayerx.ir
+nginx -t && systemctl reload nginx
+```
+
+### tasino.spayerx.ir
+
+```sh
 sudo cp docker/nginx-tasino.spayerx.ir.conf /etc/nginx/sites-available/tasino.spayerx.ir
 sudo ln -sf /etc/nginx/sites-available/tasino.spayerx.ir /etc/nginx/sites-enabled/
 sudo certbot --nginx -d tasino.spayerx.ir
