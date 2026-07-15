@@ -96,6 +96,7 @@ def panel_main(pv: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [_go("🛡 امنیت و قفل", "locks"), _go("👥 مدیریت اعضا", "manage")],
         [_go("🎲 بازی و سرگرمی", "game"), _go("⚙️ تنظیمات گروه", "settings")],
+        [_go("🔗 جوین اجباری گروه", "group_join")],
         [_go("💰 مالی", "finance")],
     ]
     if pv:

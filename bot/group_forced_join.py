@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 
 from aiogram import Bot
@@ -15,6 +16,7 @@ JOINED = {
     ChatMemberStatus.CREATOR, ChatMemberStatus.RESTRICTED,
 }
 _LAST_MISSING: dict[tuple[int, int], set[int]] = {}
+_LAST_PROMPT: dict[tuple[int, int], float] = {}
 
 
 @dataclass
@@ -86,15 +88,29 @@ async def resolve_target(bot: Bot, raw: str) -> JoinTarget:
 
 async def missing_targets(bot: Bot, group_id: int, user_id: int) -> tuple[list[JoinTarget], list[JoinTarget]]:
     targets = await load_targets(group_id)
+    from bot.cache_manager import is_owner, is_admin, is_vip
+    exempt_from_group_link = is_owner(group_id, user_id) or is_admin(group_id, user_id) or is_vip(group_id, user_id)
+    try:
+        group_member = await bot.get_chat_member(group_id, user_id)
+        exempt_from_group_link = exempt_from_group_link or group_member.status in (
+            ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR,
+        )
+    except Exception:
+        pass
+    applicable = []
     missing = []
     for target in targets:
+        # لینک مالک فقط برای اعضای عادی است؛ لینک سازنده برای مدیران هم اجباری است.
+        if target.source == "group" and exempt_from_group_link:
+            continue
+        applicable.append(target)
         try:
             member = await bot.get_chat_member(target.channel_id, user_id)
             if member.status not in JOINED:
                 missing.append(target)
         except Exception:
             missing.append(target)
-    return targets, missing
+    return applicable, missing
 
 
 def keyboard(group_id: int, missing: list[JoinTarget]) -> InlineKeyboardMarkup:
@@ -126,12 +142,6 @@ async def enforce_group_join(message: Message, bot: Bot) -> bool:
     user = message.from_user
     if not user or user.is_bot or user.id == CREATOR_USER_ID:
         return True
-    try:
-        own = await bot.get_chat_member(message.chat.id, user.id)
-        if own.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
-            return True
-    except Exception:
-        pass
     targets, missing = await missing_targets(bot, message.chat.id, user.id)
     if not targets:
         return True
@@ -146,6 +156,18 @@ async def enforce_group_join(message: Message, bot: Bot) -> bool:
         await send_temporary(message, f"✅ {user.full_name} در {', '.join(joined_names)} عضو شد؛{suffix}")
     _LAST_MISSING[key] = current
     if not missing:
+        _LAST_PROMPT.pop(key, None)
         return True
-    await send_temporary(message, required_text(user.full_name, missing), keyboard(message.chat.id, missing))
+    # پیام کاربر تا زمان تکمیل عضویت نباید در گروه باقی بماند.
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    # هشدار برای هر کاربر در هر گروه حداکثر هر ۱۰ ثانیه یک‌بار ارسال می‌شود.
+    now = time.monotonic()
+    last_prompt = _LAST_PROMPT.get(key, 0.0)
+    if now - last_prompt >= 10.0:
+        _LAST_PROMPT[key] = now
+        await send_temporary(message, required_text(user.full_name, missing), keyboard(message.chat.id, missing))
     return False
