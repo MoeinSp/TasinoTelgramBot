@@ -63,7 +63,7 @@ async def _build_bot_dp():
     logger.info("بات آماده است: @%s", me.username)
 
     # ─── Scheduler ──────────────────────────────────────────────────────────
-    scheduler = AsyncIOScheduler()
+    scheduler = AsyncIOScheduler(timezone="Asia/Tehran")
     scheduler.add_job(
         send_scheduled_logic,
         "interval",
@@ -82,8 +82,84 @@ async def _build_bot_dp():
         coalesce=True,
         misfire_grace_time=3600,
     )
+
+    async def _settle_challenges_job():
+        from bot.challenges import settle_due_challenges
+        try:
+            await settle_due_challenges(bot)
+        except Exception as exc:
+            logger.exception("challenge settle job: %s", exc)
+
+    async def _challenge_start_job():
+        from bot.challenges import notify_due_challenge_starts
+        try:
+            await notify_due_challenge_starts(bot)
+        except Exception as exc:
+            logger.exception("challenge start job: %s", exc)
+
+    async def _challenge_end_warning_job():
+        from bot.challenges import notify_challenge_end_warnings
+        try:
+            await notify_challenge_end_warnings(bot)
+        except Exception as exc:
+            logger.exception("challenge end warning job: %s", exc)
+
+    scheduler.add_job(
+        _settle_challenges_job,
+        "interval",
+        minutes=1,
+        max_instances=1,
+        id="challenge_settle",
+    )
+    scheduler.add_job(
+        _challenge_start_job,
+        "interval",
+        seconds=15,
+        max_instances=1,
+        id="challenge_start_announce",
+    )
+    scheduler.add_job(
+        _challenge_end_warning_job,
+        "interval",
+        seconds=5,
+        max_instances=1,
+        id="challenge_end_warning",
+    )
+
+    from bot.midnight_stats import broadcast_midnight_stats, midnight_warn_then_stats
+
+    scheduler.add_job(
+        midnight_warn_then_stats,
+        "cron",
+        hour=23,
+        minute=59,
+        second=0,
+        args=[bot],
+        id="midnight_warn_then_stats",
+        misfire_grace_time=30,
+    )
+    scheduler.add_job(
+        broadcast_midnight_stats,
+        "cron",
+        hour=0,
+        minute=0,
+        second=5,
+        args=[bot],
+        id="midnight_stats_fallback",
+        misfire_grace_time=120,
+    )
     scheduler.start()
-    logger.info("Scheduler فعال شد (پیام زمان‌بندی‌شده هر ۱ دقیقه · بکاپ هر ۳ ساعت)")
+    from bot.backup_schedule import set_scheduler
+    set_scheduler(scheduler)
+    try:
+        from bot.challenges import resume_precise_challenge_settles
+        await resume_precise_challenge_settles(bot)
+    except Exception:
+        logger.exception("resume precise challenge settles failed")
+    logger.info(
+        "Scheduler فعال شد (پیام زمان‌بندی‌شده هر ۱ دقیقه · بکاپ هر ۳ ساعت · "
+        "هشدار پایان چالش · آمار نیمه‌شب)"
+    )
     # ────────────────────────────────────────────────────────────────────────
 
     return bot, dp

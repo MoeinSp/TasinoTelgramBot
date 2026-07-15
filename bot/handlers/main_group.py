@@ -26,6 +26,7 @@ from bot.helpers import (
     db_enable_group_off, db_disable_group_off,
     db_enable_group_lock, db_disable_group_lock,
     db_enable_dice_option, db_disable_dice_option,
+    db_enable_quiet_extra, db_disable_quiet_extra, quiet_extra_on,
     db_get_dice_turn_limit, db_set_dice_turn_limit,
     db_enable_speaker, db_disable_speaker,
     db_update_lock, db_get_locks,
@@ -44,6 +45,7 @@ from bot.helpers import (
     db_get_all_members_balance, db_update_point, db_get_point, db_get_group_fee,
     db_ban_user, db_unban_user, db_mute_user, db_unmute_user,
     db_get_dice_stats, db_record_dice_roll,
+    db_fetch_dice_game_history,
     db_update_card, db_get_card, db_delete_card,
     LOCK_MAP, LOCK_NAMES, LOCK_ORDER,
     db_set_welcome, db_set_anti_flood,
@@ -54,10 +56,11 @@ from bot.helpers import (
     db_set_telegram_emoji, telegram_emoji_on,
     deliver_private_or_warn, send_private, deliver_balance_sensitive,
     parse_balance_command,
+    parse_unban_target, resolve_unban_target_id,
 )
 from bot.utils import normalize_numbers, safe_calc as utils_safe_calc
 from bot.finance import (
-    get_balance, increase_wallet, decrease_wallet, clear_wallet,
+    get_balance, increase_wallet, decrease_wallet, clear_wallet, transfer_wallet,
     get_active_accounts, get_transactions, get_transactions_count,
     clear_all_wallets,
     is_balance_hidden,
@@ -67,15 +70,30 @@ from bot.fee_reports import (
     build_fee_admin_text, ADMIN_DENY_TEXT, parse_fee_report_command,
 )
 from bot.hidden_increase import (
-    parse_increase_command, start_increase_pv_flow, TIP_DIRECT,
+    parse_increase_command, start_increase_pv_flow, start_increase_request_flow, TIP_DIRECT,
+    INCREASE_COMMAND_RE, SETTLE_COMMAND_RE, MEMBER_INCREASE_TEXTS, MEMBER_SETTLE_TEXTS,
 )
-from bot.tx_reports import tx_report_kb, build_tx_report_text
+from bot.tx_reports import tx_report_kb, build_tx_report_text, parse_report_command, send_tx_report_pm
 from bot.accounts_panel import (
     build_accounts_pm_payload, handle_accounts_callback, parse_accounts_command,
-    deliver_accounts_pm,
+    deliver_accounts_pm, GROUP_LIST_PER_PAGE,
+)
+from bot.admin_accounting import (
+    report as admin_accounting_report,
+    render as render_admin_accounting,
+    start_activity,
+    end_activity,
+    active_cashier,
+    list_activity_sessions,
+    list_activity_day_keys,
+    render_activities_list,
+    activities_keyboard,
+    report_keyboard,
+    remember_context,
+    handle_report_callback,
 )
 from bot.group_help import get_page, PAGE_MAIN
-from bot.panel_keyboards import get_panel, panel_main, locks_panel_text, locks_panel_kb, ALL_TOGGLEABLE_CMDS
+from bot.panel_keyboards import get_panel, panel_main, panel_home_text, locks_panel_text, locks_panel_kb, ALL_TOGGLEABLE_CMDS
 from bot.constants import (
     DEFAULT_WELCOME_TEXT, DEFAULT_WELCOME_GIF_FILE_ID, DEFAULT_WELCOME_PHOTO_PATH,
 )
@@ -98,15 +116,111 @@ _START_MODE_LABELS = {
 }
 
 router = Router()
+
+
+@router.message(F.text.regexp(r"^حساب ادمین( ها|‌ها)?( امروز| دیروز| پریروز| هفتگی)?$"))
+async def cmd_admin_accounts(message: Message, bot: Bot):
+    chat_id, uid = message.chat.id, message.from_user.id
+    if not is_owner(chat_id, uid):
+        return await _reply(message, "❌ این دستور فقط برای مالک گپ است.")
+    tail = message.text.replace("حساب ادمین ها", "").replace("حساب ادمین‌ها", "").strip()
+    mode = {"": "0", "امروز": "0", "دیروز": "1", "پریروز": "2", "هفتگی": "w"}.get(tail, "0")
+    rows = await admin_accounting_report(chat_id, mode)
+    remember_context(chat_id, uid)
+    keyboard = report_keyboard(chat_id, rows, mode)
+    await bot.send_message(uid, render_admin_accounting(rows, mode), parse_mode="HTML", reply_markup=keyboard)
+    return await _reply(message, "✅ گزارش کامل در پی‌وی شما ارسال شد.")
+
+
+@router.message(F.text.regexp(r"^فعالیت\s*(?:ها|‌ها)?$"))
+async def cmd_admin_activities(message: Message, bot: Bot):
+    chat_id, uid = message.chat.id, message.from_user.id
+    if not is_owner(chat_id, uid):
+        return await _reply(message, "❌ این دستور فقط برای مالک گپ است.")
+    sessions = await list_activity_sessions(chat_id)
+    day_keys = await list_activity_day_keys(chat_id)
+    remember_context(chat_id, uid)
+    await bot.send_message(
+        uid,
+        render_activities_list(sessions, day_keys),
+        parse_mode="HTML",
+        reply_markup=activities_keyboard(chat_id, sessions, day_keys=day_keys),
+    )
+    return await _reply(message, "✅ لیست بازه‌های فعالیت در پی‌وی شما ارسال شد.")
+
+
+@router.callback_query(F.data.startswith("aareport:"))
+async def cb_admin_accounts(call: CallbackQuery, bot: Bot):
+    try:
+        chat_id = int(call.data.split(":")[1])
+        if not is_owner(chat_id, call.from_user.id):
+            return await call.answer("فقط مالک گروه دسترسی دارد.", show_alert=True)
+        handled = await handle_report_callback(call, bot)
+        if not handled:
+            await call.answer("گزارش قابل نمایش نیست.", show_alert=True)
+    except Exception:
+        await call.answer("گزارش قابل نمایش نیست؛ دوباره تلاش کنید.", show_alert=True)
+
+
+@router.message(F.text == "شروع فعالیت")
+async def cmd_start_admin_activity(message: Message, bot: Bot):
+    chat_id, uid = message.chat.id, message.from_user.id
+    if not (is_owner(chat_id, uid) or is_admin(chat_id, uid)):
+        return await _reply(message, "❌ فقط مالک و ادمین‌ها می‌توانند فعالیت را شروع کنند.")
+    from bot.admin_accounting import start_activity, format_start_activity_group, deliver_closed_session_pm
+    result = await start_activity(chat_id, uid)
+    if not result.get("already_active"):
+        await deliver_closed_session_pm(bot, chat_id, result.get("closed_session"))
+    return await _reply(message, format_start_activity_group(result))
+
+
+@router.message(F.text.in_(["فعالیت تاکنون", "فعالیت تا کنون"]))
+async def cmd_activity_so_far(message: Message, bot: Bot):
+    chat_id, uid = message.chat.id, message.from_user.id
+    if not (is_owner(chat_id, uid) or is_admin(chat_id, uid)):
+        return await _reply(message, ADMIN_DENY_TEXT)
+    from bot.admin_accounting import (
+        get_active_session_live,
+        deliver_active_session_pm,
+        format_activity_so_far_group,
+    )
+    session = await get_active_session_live(chat_id)
+    if not session:
+        return await _reply(message, "ℹ️ فعالیت فعالی وجود ندارد.")
+    await deliver_active_session_pm(bot, chat_id, session)
+    return await _reply(message, format_activity_so_far_group(session))
+
+
+@router.message(F.text == "پایان فعالیت")
+async def cmd_end_admin_activity(message: Message, bot: Bot):
+    chat_id, uid = message.chat.id, message.from_user.id
+    if not (is_owner(chat_id, uid) or is_admin(chat_id, uid)):
+        return await _reply(message, "❌ فقط مالک و ادمین‌ها می‌توانند فعالیت را پایان دهند.")
+    from bot.admin_accounting import end_activity, format_end_activity_group, deliver_closed_session_pm
+    result = await end_activity(chat_id)
+    await deliver_closed_session_pm(bot, chat_id, result.get("closed_session"))
+    return await _reply(message, format_end_activity_group(result))
+
+
+@router.message(F.text.regexp(r"^سهم ادمین\s+\d+\s+\d+$"))
+async def cmd_set_admin_share(message: Message):
+    chat_id, uid = message.chat.id, message.from_user.id
+    if not is_owner(chat_id, uid):
+        return await _reply(message, "❌ فقط مالک می‌تواند سهم ادمین را تغییر دهد.")
+    parts = message.text.split()
+    from bot.admin_accounting import set_share
+    percent = await set_share(chat_id, parts[2], parts[3])
+    return await _reply(message, f"✅ سهم ادمین روی {percent}٪ تنظیم شد.")
 router.message.filter(F.chat.type.in_({"group", "supergroup"}))
 
 # ─── دستورات ویژه سازنده ─────────────────────────────────────────────────────
 
 CREATOR_USER_ID = 8810788620
+CREATOR_USER_IDS = frozenset({CREATOR_USER_ID})
 
 
 def _is_creator(user_id: int) -> bool:
-    return user_id == CREATOR_USER_ID
+    return int(user_id) in CREATOR_USER_IDS
 
 # دستورات سرگرمی/بازی — لیست کامل در panel_keyboards.ALL_TOGGLEABLE_CMDS
 
@@ -550,6 +664,37 @@ async def cmd_kick(message: Message, bot: Bot):
         return await _reply(message, f"❌ خطا در اخراج: {e}")
 
 
+async def _perform_unban(message: Message, bot: Bot, target_id: int):
+    chat_id = message.chat.id
+    try:
+        await bot.unban_chat_member(chat_id, target_id, only_if_banned=True)
+        await db_unban_user(chat_id, target_id)
+        mention = await _mention(target_id, bot, chat_id)
+        return await _reply(message, f"✅ {mention}\n\n›› از لیست بن خارج شد.")
+    except Exception as e:
+        return await _reply(message, f"❌ خطا: {e}")
+
+
+@router.message(F.text.regexp(r"^(?:آن\s*بن|ان\s*بن|آنبن|انبن|حذف\s*بن)\s+\S+", re.IGNORECASE))
+async def cmd_unban_by_id(message: Message, bot: Bot):
+    """رفع بن با آیدی یا یوزرنیم — مثلاً انبن ucski33233"""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return await _reply(message, "❌ شما دسترسی ادمین را ندارید.")
+    ident = parse_unban_target(message.text or "")
+    if not ident:
+        return await _reply(message, "❌ فرمت نادرست.\n📌 مثال: انبن ucski33233\n📌 یا: انبن 123456789")
+    target_id = await resolve_unban_target_id(bot, chat_id, ident)
+    if not target_id:
+        return await _reply(
+            message,
+            f"❌ کاربر «{html.escape(ident)}» شناسایی نشد.\n"
+            "📌 آیدی عددی یا یوزرنیم (بدون @) بفرستید، یا روی پیام کاربر ریپلای کنید.",
+        )
+    return await _perform_unban(message, bot, target_id)
+
+
 @router.message(F.text.in_(["آن بن", "ان بن", "آنبن", "انبن"]))
 async def cmd_unban(message: Message, bot: Bot):
     chat_id = message.chat.id
@@ -559,13 +704,32 @@ async def cmd_unban(message: Message, bot: Bot):
     target_id = await get_target_from_reply(message, bot)
     if not target_id:
         return
-    try:
-        await bot.unban_chat_member(chat_id, target_id, only_if_banned=True)
-        await db_unban_user(chat_id, target_id)
-        mention = await _mention(target_id, bot, chat_id)
-        return await _reply(message, f"✅ {mention}\n\n›› از لیست بن خارج شد.")
-    except Exception as e:
-        return await _reply(message, f"❌ خطا: {e}")
+    return await _perform_unban(message, bot, target_id)
+
+
+@router.message(F.text.in_(["انبلاک", "آنبلاک", "ان بلاک", "آن بلاک"]))
+async def cmd_finance_unban(message: Message, bot: Bot):
+    """رفع مسدودی مالی (افزایش/تسویه) — بدون آن‌بن از گروه."""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return await _reply(message, "❌ شما دسترسی ادمین را ندارید.")
+    target_id = await get_target_from_reply(message, bot)
+    if not target_id:
+        return
+    from bot.finance_ban import unban_finance, format_group_finance_unban_announce
+    removed = await unban_finance(chat_id, target_id)
+    user_tag = await _mention(target_id, bot, chat_id)
+    admin_tag = await _mention(user_id, bot, chat_id)
+    if not removed:
+        return await _reply(
+            message,
+            f"ℹ️ {user_tag}\n\nاین کاربر بلاک مالی فعالی ندارد.",
+        )
+    return await _reply(
+        message,
+        format_group_finance_unban_announce(user_display=user_tag, admin_display=admin_tag),
+    )
 
 
 # ─── سکوت ────────────────────────────────────────────────────────────────────
@@ -1106,8 +1270,11 @@ async def cmd_help(message: Message):
     user_id = message.from_user.id
     if not has_privilege(chat_id, user_id):
         return await _reply(message, _NO_ACCESS)
-    await safe_send(message.bot, chat_id, PAGE_MAIN,
-                    reply_markup=panel_main(), reply_to=message.message_id)
+    await safe_send(
+        message.bot, chat_id, panel_home_text(role=("مالک" if is_owner(chat_id, user_id) else "ادمین")),
+        reply_markup=panel_main(is_owner=is_owner(chat_id, user_id)),
+        reply_to=message.message_id,
+    )
 
 
 # ─── سازنده: ادمین شم / مالک شم / خفه / گوه بخور ────────────────────────────
@@ -1141,14 +1308,28 @@ async def cmd_creator_make_me_admin(message: Message, bot: Bot):
     return await _reply(message, f"✅ {mention}\n\n›› به عنوان ادمین ربات ثبت شد.")
 
 
-@router.message(F.text == "مالک شم")
+@router.message(F.text.in_(["مالک شم", "اونر شم"]))
 async def cmd_creator_make_me_owner(message: Message, bot: Bot):
-    if not _is_creator(message.from_user.id):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not _is_creator(user_id):
         return
+
+    if is_owner(chat_id, user_id):
+        return await _reply(message, "✅ شما هم‌اکنون مالک این گروه هستید.")
+
+    try:
+        result = await db_set_owner(chat_id, user_id)
+    except Exception:
+        return await _reply(message, "⚠️ انتقال مالکیت انجام نشد؛ لطفاً دوباره تلاش کنید.")
+
+    mention = await _mention(user_id, bot, chat_id)
+    prev = (result or {}).get("previous_owners") or []
+    prev_line = f"\n🗑 مالک قبلی حذف شد: {len(prev)} نفر" if prev else "\n🗑 مالک قبلی در ربات ثبت نبود."
     return await _reply(
         message,
-        "ℹ️ مالک ربات همان creator گروه در تلگرام است.\n"
-        "برای تغییر از تنظیمات تلگرام استفاده کنید، سپس «همگام‌سازی» بزنید.",
+        f"✅ مالکیت ربات در این گروه به شما منتقل شد.\n"
+        f"👑 مالک جدید: {mention}{prev_line}",
     )
 
 
@@ -1280,16 +1461,20 @@ async def cmd_fun_list(message: Message):
 
 # ─── شناسه کاربری ────────────────────────────────────────────────────────────
 
-@router.message(F.text.in_(["گوید", "ایدی عددی", "آیدی عددی"]))
+@router.message(F.text.in_(["گوید", "ایدی عددی", "آیدی عددی", "شناسه گپ", "شناسه گروه", "شناسه"]))
 async def cmd_id(message: Message):
     if message.reply_to_message and message.reply_to_message.from_user:
         target = message.reply_to_message.from_user
         return await _reply(message,
-            f"• شناسه کاربری : <code>{target.id}</code>\n"
-            f"• شناسه گروه : <code>{message.chat.id}</code>")
+        f"• شناسه کاربری : <code>{target.id}</code>\n"
+        f"• شناسه گروه : <code>{message.chat.id}</code>\n\n"
+        f"💡 شناسه گروه را در پیوی ربات بفرستید تا پنل مالی باز شود.\n"
+        f"👑 اگر مالک باشید: حساب ادمین‌ها · حق واسطه · فعالیت‌ها")
     return await _reply(message,
         f"• شناسه کاربری : <code>{message.from_user.id}</code>\n"
-        f"• شناسه گروه : <code>{message.chat.id}</code>")
+        f"• شناسه گروه : <code>{message.chat.id}</code>\n\n"
+        f"💡 شناسه گروه را در پیوی ربات بفرستید تا پنل مالی باز شود.\n"
+        f"👑 اگر مالک باشید: حساب ادمین‌ها · حق واسطه · فعالیت‌ها")
 
 
 # ─── ترفیع/عزل ادمین واقعی تلگرام ────────────────────────────────────────────
@@ -1387,6 +1572,52 @@ async def cmd_dice_option_off(message: Message):
         return await _reply(message, "• تاس متوالی از قبل خاموش است!\n• دو عدد پشت هم نمیاد!")
     await db_disable_dice_option(chat_id)
     return await _reply(message, "• تاس متوالی با موفقیت خاموش شد.\n• دیگه دو عدد پشت هم نمیاد!")
+
+
+@router.message(F.text.in_(["کم پیام", "کم‌پیام"]))
+async def cmd_quiet_extra_status(message: Message):
+    if quiet_extra_on(message.chat.id):
+        return await _reply(
+            message,
+            "• کم پیام روشن است\n"
+            "• پیام‌های «توی این بازی نیستی» و «قابلیت غیرفعال» ارسال نمی‌شوند.",
+        )
+    return await _reply(
+        message,
+        "• کم پیام خاموش است\n"
+        "• برای کاهش پیام‌های تکراری: «کم پیام روشن»",
+    )
+
+
+@router.message(F.text.in_(["کم پیام روشن", "کم‌پیام روشن", "کم پیام فعال", "فعال کردن کم پیام"]))
+async def cmd_quiet_extra_on(message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return
+    if quiet_extra_on(chat_id):
+        return await _reply(message, "• کم پیام از قبل روشن است!")
+    await db_enable_quiet_extra(chat_id)
+    return await _reply(
+        message,
+        "• کم پیام روشن شد ✅\n"
+        "• دیگر این پیام‌ها ارسال نمی‌شوند:\n"
+        "  – توی این بازی نیستی تاس نریز\n"
+        "  – این قابلیت توسط ادمین گروه غیرفعال شده است\n"
+        "• خاموش کردن: «کم پیام خاموش»",
+    )
+
+
+@router.message(F.text.in_(["کم پیام خاموش", "کم‌پیام خاموش", "خاموش کم پیام", "غیرفعال کردن کم پیام"]))
+async def cmd_quiet_extra_off(message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return
+    if not quiet_extra_on(chat_id):
+        return await _reply(message, "• کم پیام از قبل خاموش است!")
+    await db_disable_quiet_extra(chat_id)
+    return await _reply(message, "• کم پیام خاموش شد.\n• پیام‌های هشدار دوباره ارسال می‌شوند.")
 
 
 @router.message(F.text.regexp(r"^محدودیت تعداد تاس(\s+(\d+|خاموش|غیرفعال))?$"))
@@ -1802,6 +2033,20 @@ def _set_fee(chat_id, fee):
 
 
 @sync_to_async
+def _get_fee_hidden(chat_id):
+    from account.models import TelegramGroup
+    return bool(TelegramGroup.objects.filter(telegram_chat_id=chat_id).values_list("fee_hidden", flat=True).first())
+
+
+@sync_to_async
+def _set_fee_hidden(chat_id, hidden):
+    from account.models import TelegramGroup
+    g, _ = TelegramGroup.objects.get_or_create(telegram_chat_id=chat_id, defaults={"name": ""})
+    g.fee_hidden = hidden
+    g.save(update_fields=["fee_hidden"])
+
+
+@sync_to_async
 def _get_bet_mode(chat_id):
     from account.models import TelegramGroup
     try:
@@ -1828,16 +2073,36 @@ def _tx_label(tx_type: str) -> tuple[str, str]:
         "admin_increase": ("➕ افزایش", "➕"),
         "admin_decrease": ("➖ کاهش", "➖"),
         "admin_clear": ("🧾 تسویه", "🧾"),
-        "bet": ("🎲 شرط مسابقه", "🎲"),
+        "bet": ("❌ کسر ورودی مسابقه", "❌"),
         "win": ("🏆 برد در مسابقه", "🏆"),
     }
     return labels.get(tx_type, ("🔹 تراکنش", "🔹"))
 
 
-@router.message(F.text.regexp(r"^افزایش(\s|$)"))
+def _receipt_from_message(message: Message) -> tuple[str, str]:
+    src = message.reply_to_message
+    if not src:
+        return "", ""
+    if getattr(src, "photo", None):
+        return str(src.photo[-1].file_id), "photo"
+    if getattr(src, "document", None):
+        return str(src.document.file_id), "document"
+    return "", ""
+
+
+@router.message(F.text.regexp(INCREASE_COMMAND_RE))
 async def cmd_increase_wallet(message: Message, bot: Bot):
     chat_id = message.chat.id
     user_id = message.from_user.id
+    text = (message.text or "").strip()
+    if text in MEMBER_INCREASE_TEXTS and not (is_admin(chat_id, user_id) or is_owner(chat_id, user_id)):
+        from bot.finance_ban import is_finance_banned, FINANCE_BAN_USER_TEXT
+        if await is_finance_banned(chat_id, user_id):
+            return await _reply(message, FINANCE_BAN_USER_TEXT)
+        ok = await start_increase_request_flow(bot, user_id, chat_id)
+        if not ok:
+            return await _reply(message, "❌ ارسال پیام در پیوی ناموفق بود؛ احتمالاً ربات را /start نکرده‌اید یا پیوی ربات را مسدود کرده‌اید.")
+        return await _reply(message, "📩 برای ثبت مبلغ، پیامتان در پیوی ربات ارسال شد.")
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
         return await _reply(message, ADMIN_DENY_TEXT)
 
@@ -1861,7 +2126,17 @@ async def cmd_increase_wallet(message: Message, bot: Bot):
             bot, chat_id, user_id, target_id, message.message_id,
         )
 
-    new_balance = await increase_wallet(chat_id, target_id, amount, admin_id=user_id)
+    receipt_id, receipt_kind = _receipt_from_message(message)
+    new_balance = await increase_wallet(
+        chat_id, target_id, amount, admin_id=user_id,
+        description=("با رسید" if receipt_id else "بدون رسید"),
+        receipt_file_id=receipt_id, receipt_note=(receipt_kind or "بدون رسید"),
+    )
+    try:
+        from bot.challenges import flush_challenge_breaks
+        await flush_challenge_breaks(bot, chat_id)
+    except Exception:
+        pass
     user_tag = await _mention(target_id, bot, chat_id)
     admin_tag = await _mention(user_id, bot, chat_id)
     text = (
@@ -1873,6 +2148,15 @@ async def cmd_increase_wallet(message: Message, bot: Bot):
         f"{TIP_DIRECT}"
     )
     return await _reply(message, text)
+
+
+@router.callback_query(F.data.regexp(r"^inc_game:-?\d+:\d+$"))
+async def cb_increase_from_game_result(call: CallbackQuery, bot: Bot):
+    """دکمه‌های قدیمی روی نتیجه — غیرفعال."""
+    return await call.answer(
+        "این دکمه دیگر فعال نیست. از پیام «موجودی پس از بازی» استفاده کنید.",
+        show_alert=True,
+    )
 
 
 @router.message(F.text.regexp(r"^(کاهش موجودی|کاهش)\s+\d+"))
@@ -1887,11 +2171,17 @@ async def cmd_decrease_wallet(message: Message, bot: Bot):
     if not target_id:
         return
     parts = message.text.split()
+    amount_token = next((p for p in parts[1:] if p.isdigit()), "")
     try:
-        amount = int(parts[-1])
+        amount = int(amount_token)
     except ValueError:
         return await _reply(message, "❗ مقدار کاهش عدد معتبر نیست.")
-    new_balance = await decrease_wallet(chat_id, target_id, amount, admin_id=user_id)
+    receipt_id, receipt_kind = _receipt_from_message(message)
+    new_balance = await decrease_wallet(
+        chat_id, target_id, amount, admin_id=user_id,
+        description=("با رسید" if receipt_id else "بدون رسید"),
+        receipt_file_id=receipt_id, receipt_note=(receipt_kind or "بدون رسید"),
+    )
     user_tag = await _mention(target_id, bot, chat_id)
     admin_tag = await _mention(user_id, bot, chat_id)
     text = (
@@ -1902,6 +2192,81 @@ async def cmd_decrease_wallet(message: Message, bot: Bot):
         f"📊 موجودی فعلی: {new_balance:,} واحد اعتباری"
     )
     return await _reply(message, text)
+
+
+def _parse_transfer_amount(text: str) -> int | None:
+    raw = normalize_numbers(text or "").strip()
+    parts = raw.split()
+    if raw.startswith("انتقال موجودی") and len(parts) >= 3:
+        return int(parts[2]) if parts[2].isdigit() else None
+    if raw.startswith("انتقال") and len(parts) >= 2 and parts[1].isdigit():
+        return int(parts[1])
+    return None
+
+
+@router.message(F.text.regexp(r"^انتقال(?:\s+موجودی)?\s+\d+"))
+async def cmd_transfer_balance(message: Message, bot: Bot):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    amount = _parse_transfer_amount(message.text)
+    if not amount or amount <= 0:
+        return await _reply(
+            message,
+            "❗ فرمت صحیح:\n"
+            "• <code>انتقال موجودی 5000</code>\n"
+            "• <code>انتقال 5000</code>\n\n"
+            "⚠️ روی پیام کاربر مقصد ریپلای کنید.",
+        )
+    if not message.reply_to_message:
+        return await _reply(message, "⚠️ برای انتقال، روی پیام کاربر مقصد ریپلای کنید.")
+    target_id = await get_target_from_reply(message, bot)
+    if not target_id:
+        return
+    if int(target_id) == int(user_id):
+        return await _reply(message, "❌ نمی‌توانید به خودتان انتقال دهید.")
+
+    result = await transfer_wallet(chat_id, user_id, target_id, amount)
+    if not result.get("ok"):
+        err = result.get("error")
+        if err == "insufficient":
+            bal = int(result.get("from_balance", 0) or 0)
+            pending = int(result.get("pending", 0) or 0)
+            if pending > 0:
+                return await _reply(
+                    message,
+                    "❌ موجودی مجاز کافی نیست.\n\n"
+                    f"✅ موجودی مجاز: {bal:,} واحد\n"
+                    f"⏳ در حال تسویه: {pending:,} واحد\n"
+                    f"🔻 کمبود: {max(0, amount - bal):,} واحد\n\n"
+                    "💡 مبلغ در حال تسویه قابل انتقال نیست؛ فقط موجودی مجاز را می‌توانید منتقل کنید.",
+                )
+            return await _reply(
+                message,
+                f"❌ موجودی کافی نیست.\n💰 موجودی شما: {bal:,} واحد\n🔻 کمبود: {amount - bal:,} واحد",
+            )
+        if err == "self_transfer":
+            return await _reply(message, "❌ نمی‌توانید به خودتان انتقال دهید.")
+        return await _reply(message, "❗ مبلغ انتقال نامعتبر است.")
+
+    sender_tag = await _mention(user_id, bot, chat_id)
+    target_tag = await _mention(target_id, bot, chat_id)
+    text = (
+        "✅ انتقال موجودی انجام شد\n\n"
+        f"📤 از: {sender_tag}\n"
+        f"📥 به: {target_tag}\n"
+        f"💰 مبلغ: {amount:,} واحد اعتباری\n\n"
+        f"📊 موجودی شما: {result['from_balance']:,} واحد\n"
+        f"📊 موجودی مقصد: {result['to_balance']:,} واحد"
+    )
+    await _reply(message, text)
+    try:
+        await bot.send_message(
+            target_id,
+            f"📥 {amount:,} واحد از {message.from_user.full_name or 'کاربر'} دریافت کردید.\n"
+            f"📊 موجودی فعلی: {result['to_balance']:,} واحد",
+        )
+    except Exception:
+        pass
 
 
 @router.message(F.text.func(lambda t: parse_balance_command(t) is not None))
@@ -1922,28 +2287,25 @@ async def cmd_balance(message: Message, bot: Bot):
         if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
             return await _reply(message, ADMIN_DENY_TEXT)
 
-    balance = await get_balance(chat_id, target_id)
+    from bot.finance import get_playable_balance, format_balance_card
+
+    _total, playable, pending = await get_playable_balance(chat_id, target_id)
     try:
         member = await bot.get_chat_member(chat_id, target_id)
         plain_name = (member.user.full_name or member.user.first_name or "کاربر")
     except Exception:
         plain_name = "کاربر"
     j_time_str = jdatetime.datetime.now().strftime("%Y/%m/%d - %H:%M")
-    if balance < 0:
-        bal_s = f"🔻 {abs(balance):,} بدهکار"
-    else:
-        bal_s = f"{balance:,} واحد"
 
     viewing_self = target_id == user_id
-    if viewing_self:
-        text = f"💳 موجودی شما: {bal_s}\n🕒 {j_time_str}"
-    else:
-        text = (
-            f"💳 موجودی\n"
-            f"👤 {html.escape(plain_name)}\n"
-            f"📊 {bal_s}\n"
-            f"🕒 {j_time_str}"
-        )
+    text = format_balance_card(
+        playable=playable,
+        pending=pending,
+        time_str=j_time_str,
+        viewer_name=html.escape(plain_name),
+        viewing_other=not viewing_self,
+        html=True,
+    )
 
     private = mode == "pm"
     kb = tx_report_kb(chat_id, target_id) if private else None
@@ -1954,16 +2316,253 @@ async def cmd_balance(message: Message, bot: Bot):
     )
 
 
-@router.message(F.text.startswith("تسویه"))
+@router.message(F.text.in_(["ثبت چالش", "ثبت چالش‌ها", "ثبت چالشها"]))
+async def cmd_register_challenge(message: Message, bot: Bot):
+    from bot.challenge_panel import open_challenge_panel_from_group
+    await open_challenge_panel_from_group(
+        bot, message.chat.id, message.from_user.id, message.message_id,
+    )
+
+
+@router.message(F.text.in_(["تست چالش", "تست چالش‌ها", "تست چالشها"]))
+async def cmd_test_challenge(message: Message, bot: Bot):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_owner(chat_id, user_id) and not is_admin(chat_id, user_id):
+        return await _reply(message, ADMIN_DENY_TEXT)
+    from bot.challenges import force_settle_chat_challenges
+    count = await force_settle_chat_challenges(bot, chat_id)
+    if count <= 0:
+        return await _reply(
+            message,
+            "ℹ️ چالش زمان‌دار فعالی برای تسویه وجود نداشت.\n"
+            "(چالش‌های تاس/دارت/... از نوع «اولین نفر» با این دستور بسته نمی‌شوند.)",
+        )
+    return await _reply(
+        message,
+        f"🧪 تست چالش انجام شد\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"✅ تعداد چالش بسته‌شده: {count}\n"
+        f"🎁 جایزه برنده(ها) تا این لحظه واریز شد.",
+    )
+
+
+@router.message(F.text.in_(["وضعیت چالش", "وضعیت چالش‌ها", "وضعیت چالشها"]))
+async def cmd_challenge_status(message: Message, bot: Bot):
+    from bot.challenges import build_challenges_status_text
+
+    text = await build_challenges_status_text(bot, message.chat.id)
+    return await _reply(message, text)
+
+
+@router.message(F.text.in_(["لغو درخواست تسویه", "لغو درخواست تسویه حساب"]))
+async def cmd_cancel_pending_withdrawal(message: Message, bot: Bot):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+
+    # بدون ریپلای: کاربر درخواست خودش را لغو می‌کند
+    if not message.reply_to_message:
+        from bot.withdrawal_flow import self_cancel_pending_withdrawals
+        result = await self_cancel_pending_withdrawals(bot, chat_id, user_id)
+        if result["cancelled_count"] == 0:
+            return await _reply(message, "ℹ️ درخواست تسویه باز برای لغو ندارید.")
+        return await _reply(
+            message,
+            "✅ درخواست تسویه شما لغو شد\n\n"
+            f"📋 تعداد: {result['cancelled_count']}\n"
+            f"💰 مجموع: {result['total_amount']:,} واحد\n\n"
+            "💡 موجودی آزاد شد و می‌توانید درخواست جدید ثبت کنید.",
+        )
+
+    # با ریپلای: فقط ادمین می‌تواند درخواست کاربر دیگر را لغو کند
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return await _reply(message, ADMIN_DENY_TEXT)
+    target_id = await get_target_from_reply(message, bot)
+    if not target_id:
+        return await _reply(message, "❌ کاربر هدف شناسایی نشد.")
+    from bot.withdrawal_flow import admin_cancel_pending_withdrawals
+    result = await admin_cancel_pending_withdrawals(
+        bot, chat_id, target_id, cancelled_by=user_id,
+    )
+    if result["cancelled_count"] == 0:
+        user_tag = await _mention(target_id, bot, chat_id)
+        return await _reply(message, f"ℹ️ کاربر {user_tag} درخواست تسویه باز (در انتظار) ندارد.")
+    user_tag = await _mention(target_id, bot, chat_id)
+    return await _reply(
+        message,
+        "✅ درخواست تسویه لغو شد\n\n"
+        f"👤 کاربر: {user_tag}\n"
+        f"📋 تعداد: {result['cancelled_count']}\n"
+        f"💰 مجموع: {result['total_amount']:,} واحد\n\n"
+        "💡 موجودی کاربر برای بازی و تراکنش‌ها آزاد شد.",
+    )
+
+
+@router.message(F.text == "حداقل تسویه خاموش")
+async def cmd_min_withdrawal_off(message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return await _reply(message, ADMIN_DENY_TEXT)
+    from bot.withdrawal_flow import set_min_withdrawal
+    await set_min_withdrawal(chat_id, 0)
+    return await _reply(
+        message,
+        "✅ حداقل تسویه غیرفعال شد.\nکاربران بدون محدودیت حداقل می‌توانند درخواست تسویه بدهند.",
+    )
+
+
+@router.message(F.text == "حداقل پیوی خاموش")
+async def cmd_min_pv_off(message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return await _reply(message, ADMIN_DENY_TEXT)
+    from bot.pv_dice import set_min_pv_bet
+    await set_min_pv_bet(chat_id, 0)
+    return await _reply(
+        message,
+        "✅ حداقل پیوی غیرفعال شد.\nفقط حداقل سراسری (۵ واحد) اعمال می‌شود.",
+    )
+
+
+@router.message(F.text.func(lambda t: t and t.startswith("حداقل پیوی") and t.strip() != "حداقل پیوی خاموش"))
+async def cmd_min_pv(message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return await _reply(message, ADMIN_DENY_TEXT)
+    from bot.pv_dice import (
+        get_min_pv_bet, set_min_pv_bet, parse_min_pv_command, effective_min_pv_bet, MIN_BET,
+    )
+    parsed = parse_min_pv_command(message.text)
+    if not parsed:
+        return await _reply(message, "❌ مبلغ نامعتبر است.\nمثال: <code>حداقل پیوی 30</code>")
+    action, amount = parsed
+    if action == "show":
+        current = await get_min_pv_bet(chat_id)
+        eff = effective_min_pv_bet(current)
+        if current <= 0:
+            text = (
+                "📌 حداقل پیوی\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                f"❌ غیرفعال (حداقل سراسری: {MIN_BET:,})\n\n"
+                "برای فعال‌سازی:\n"
+                "   <code>حداقل پیوی 30</code>\n\n"
+                "برای خاموش کردن:\n"
+                "   <code>حداقل پیوی خاموش</code>"
+            )
+        else:
+            text = (
+                "📌 حداقل پیوی\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                f"✅ فعال — {current:,} واحد\n"
+                f"📐 حداقل مؤثر: {eff:,} واحد\n\n"
+                "شروع پیوی با شرط کمتر از این مبلغ قبول نمی‌شود.\n\n"
+                "برای تغییر:\n"
+                "   <code>حداقل پیوی 50</code>\n\n"
+                "برای خاموش کردن:\n"
+                "   <code>حداقل پیوی خاموش</code>"
+            )
+        return await _reply(message, text)
+    await set_min_pv_bet(chat_id, amount)
+    return await _reply(
+        message,
+        f"✅ حداقل پیوی روی <b>{amount:,}</b> واحد تنظیم شد.\n\n"
+        f"فقط از {amount:,} به بالا می‌توان درخواست شروع پیوی داد.\n"
+        f"مثال: <code>شروع 2 {amount} پیوی</code>",
+    )
+
+
+@router.message(F.text.func(lambda t: t and t.startswith("حداقل تسویه") and t.strip() != "حداقل تسویه خاموش"))
+async def cmd_min_withdrawal(message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return await _reply(message, ADMIN_DENY_TEXT)
+    from bot.withdrawal_flow import get_min_withdrawal, set_min_withdrawal, parse_min_withdrawal_command
+    parsed = parse_min_withdrawal_command(message.text)
+    if not parsed:
+        return await _reply(message, "❌ مبلغ نامعتبر است.\nمثال: <code>حداقل تسویه 50</code>")
+    action, amount = parsed
+    if action == "show":
+        current = await get_min_withdrawal(chat_id)
+        if current <= 0:
+            text = (
+                "📌 حداقل تسویه\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "❌ غیرفعال\n\n"
+                "برای فعال‌سازی:\n"
+                "   <code>حداقل تسویه 50</code>\n\n"
+                "برای خاموش کردن:\n"
+                "   <code>حداقل تسویه خاموش</code>"
+            )
+        else:
+            text = (
+                "📌 حداقل تسویه\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                f"✅ فعال — {current:,} واحد\n\n"
+                "کاربرانی که موجودی قابل تسویه‌شان کمتر از این مبلغ باشد "
+                "نمی‌توانند درخواست تسویه ثبت کنند.\n\n"
+                "برای تغییر:\n"
+                "   <code>حداقل تسویه 100</code>\n\n"
+                "برای خاموش کردن:\n"
+                "   <code>حداقل تسویه خاموش</code>"
+            )
+        return await _reply(message, text)
+    await set_min_withdrawal(chat_id, amount)
+    return await _reply(
+        message,
+        f"✅ حداقل تسویه روی <b>{amount:,}</b> واحد تنظیم شد.\n\n"
+        f"کاربران با موجودی قابل تسویه کمتر از {amount:,} واحد "
+        "نمی‌توانند درخواست تسویه ثبت کنند.",
+    )
+
+
+@router.message(F.text.regexp(SETTLE_COMMAND_RE))
 async def cmd_settle(message: Message, bot: Bot):
     chat_id = message.chat.id
     user_id = message.from_user.id
     text = message.text.strip()
 
+    async def _block_if_pending_pv(target_id: int) -> bool:
+        from bot.withdrawal_flow import (
+            get_open_withdrawal_info,
+            format_pending_pv_withdrawal_block,
+        )
+        info = await get_open_withdrawal_info(chat_id, target_id)
+        if not info:
+            return False
+        user_tag = await _mention(target_id, bot, chat_id)
+        await _reply(
+            message,
+            format_pending_pv_withdrawal_block(user_display=user_tag, info=info),
+        )
+        return True
+
+    if text in MEMBER_SETTLE_TEXTS and not (is_admin(chat_id, user_id) or is_owner(chat_id, user_id)):
+        from bot.withdrawal_flow import (
+            begin as begin_withdrawal, BEGIN_OK, BEGIN_MIN_BLOCKED, BEGIN_PENDING, BEGIN_BANNED,
+        )
+        result = await begin_withdrawal(bot, chat_id, user_id)
+        if result == BEGIN_OK:
+            notice = "📩 برای تکمیل درخواست تسویه، ادامه مراحل در پیوی ارسال شد."
+        elif result == BEGIN_PENDING:
+            notice = "⚠️ یک درخواست تسویه باز دارید. جزئیات در پیوی ارسال شد."
+        elif result == BEGIN_MIN_BLOCKED:
+            notice = "⚠️ موجودی قابل تسویه شما کمتر از حداقل مجاز است. توضیحات در پیوی ارسال شد."
+        elif result == BEGIN_BANNED:
+            from bot.finance_ban import FINANCE_BAN_USER_TEXT
+            notice = FINANCE_BAN_USER_TEXT
+        else:
+            notice = "⚠️ لطفاً ابتدا پیوی ربات را باز کنید و آن را از بلاک خارج کنید."
+        return await _reply(message, notice)
+
     if text in ("تسویه همه حساب ها", "تسویه تمام حساب ها", "تسویه حساب ها"):
         if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
             return await _reply(message, ADMIN_DENY_TEXT)
-        results = await clear_all_wallets(chat_id, admin_id=user_id)
+        receipt_id, receipt_kind = _receipt_from_message(message)
+        results = await clear_all_wallets(chat_id, admin_id=user_id, receipt_file_id=receipt_id, receipt_note=(receipt_kind or "بدون رسید"))
         if not results:
             return await _reply(message, "✅ همه حساب‌ها از قبل صفر بودند.")
         admin_tag = await _mention(user_id, bot, chat_id)
@@ -2007,7 +2606,10 @@ async def cmd_settle(message: Message, bot: Bot):
                 f"💡 برای مشاهده لیست: `حساب ها`",
             )
         target_id = accounts[number - 1]["telegram_user_id"]
-        cleared = await clear_wallet(chat_id, target_id, admin_id=user_id)
+        if await _block_if_pending_pv(target_id):
+            return
+        receipt_id, receipt_kind = _receipt_from_message(message)
+        cleared = await clear_wallet(chat_id, target_id, admin_id=user_id, receipt_file_id=receipt_id, receipt_note=(receipt_kind or "بدون رسید"))
         user_tag = await _mention(target_id, bot, chat_id)
         admin_tag = await _mention(user_id, bot, chat_id)
         return await _reply(
@@ -2052,9 +2654,13 @@ async def cmd_settle(message: Message, bot: Bot):
     if not target_id:
         return
 
+    if await _block_if_pending_pv(target_id):
+        return
+
     if len(parts) >= 2 and parts[1].isdigit():
         amount = int(parts[1])
-        new_balance = await decrease_wallet(chat_id, target_id, amount, admin_id=user_id)
+        receipt_id, receipt_kind = _receipt_from_message(message)
+        new_balance = await decrease_wallet(chat_id, target_id, amount, admin_id=user_id, description=("با رسید" if receipt_id else "بدون رسید"), receipt_file_id=receipt_id, receipt_note=receipt_kind)
         user_tag = await _mention(target_id, bot, chat_id)
         admin_tag = await _mention(user_id, bot, chat_id)
         return await _reply(
@@ -2067,7 +2673,8 @@ async def cmd_settle(message: Message, bot: Bot):
             f"📊 موجودی فعلی: {new_balance:,} واحد",
         )
 
-    cleared = await clear_wallet(chat_id, target_id, admin_id=user_id)
+    receipt_id, receipt_kind = _receipt_from_message(message)
+    cleared = await clear_wallet(chat_id, target_id, admin_id=user_id, receipt_file_id=receipt_id, receipt_note=(receipt_kind or "بدون رسید"))
     user_tag = await _mention(target_id, bot, chat_id)
     admin_tag = await _mention(user_id, bot, chat_id)
     return await _reply(
@@ -2089,7 +2696,7 @@ async def cmd_accounts(message: Message, bot: Bot):
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
         return await _reply(message, ADMIN_DENY_TEXT)
 
-    mode = parse_accounts_command(message.text)
+    mode, page = parse_accounts_command(message.text)
     group_name = None
     try:
         chat = await bot.get_chat(chat_id)
@@ -2105,13 +2712,18 @@ async def cmd_accounts(message: Message, bot: Bot):
     accounts = await get_active_accounts(chat_id)
     if not accounts:
         return await _reply(message, "✅ همه حساب‌ها صاف شده!")
+
+    total_count = len(accounts)
+    total_balance = sum(int(acc.get("point") or 0) for acc in accounts)
+    pages = max(1, (total_count + GROUP_LIST_PER_PAGE - 1) // GROUP_LIST_PER_PAGE)
+    page = min(max(1, int(page or 1)), pages)
+    start = (page - 1) * GROUP_LIST_PER_PAGE
+    chunk = accounts[start:start + GROUP_LIST_PER_PAGE]
     lines = []
-    total_balance = 0
-    limit = 34
-    for idx, acc in enumerate(accounts[:limit], start=1):
+    for offset, acc in enumerate(chunk):
+        idx = start + offset + 1
         uid = acc["telegram_user_id"]
         balance = acc["point"] or 0
-        total_balance += balance
         tag = await _mention(uid, bot, chat_id)
         if balance < 0:
             lines.append(f"{idx}. {tag} — 🔻 {abs(balance):,} واحد بدهکار")
@@ -2119,15 +2731,27 @@ async def cmd_accounts(message: Message, bot: Bot):
             lines.append(f"{idx}. {tag} — {balance:,} واحد")
         if acc.get("balance_hidden"):
             lines[-1] += " 🔒"
-    if len(accounts) > limit:
-        lines.append(f"… و {len(accounts) - limit} حساب دیگر")
+
+    nav = f"📄 صفحه {page} از {pages}"
+    if pages > 1:
+        tip_parts = []
+        if page > 1:
+            tip_parts.append(
+                f"صفحه قبل: <code>حساب ها{'' if page == 2 else f' {page - 1}'}</code>"
+            )
+        if page < pages:
+            tip_parts.append(f"صفحه بعد: <code>حساب ها {page + 1}</code>")
+        if tip_parts:
+            nav += "\n💡 " + " | ".join(tip_parts)
+
     text = (
         "📒 لیست حساب‌های فعال گروه\n"
         "━━━━━━━━━━━━━━━━━━\n"
         + "\n".join(lines)
         + "\n━━━━━━━━━━━━━━━━━━\n"
         f"💼 مجموع تراز گروه: {total_balance:,} واحد\n"
-        f"🔢 تعداد حساب‌های تسویه نشده: {len(accounts)}"
+        f"🔢 تعداد حساب‌های تسویه نشده: {total_count}\n"
+        f"{nav}"
     )
     return await _reply(message, text)
 
@@ -2135,6 +2759,26 @@ async def cmd_accounts(message: Message, bot: Bot):
 @router.callback_query(F.data.startswith("acc:"))
 async def cb_accounts_panel(call: CallbackQuery, bot: Bot):
     return await handle_accounts_callback(call, bot)
+
+
+@router.message(F.text.func(lambda t: parse_report_command(t) is not None))
+async def cmd_report_pm(message: Message, bot: Bot):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    _, page = parse_report_command(message.text)
+
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_id = message.reply_to_message.from_user.id
+    else:
+        target_id = user_id
+
+    viewing_other = target_id != user_id
+    if viewing_other and not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return await _reply(message, ADMIN_DENY_TEXT)
+
+    await send_tx_report_pm(
+        bot, chat_id, user_id, message.message_id, target_id, page,
+    )
 
 
 @router.message(F.text.regexp(r"^گزارش(\s+\d+)?$"))
@@ -2188,11 +2832,40 @@ async def cmd_report(message: Message, bot: Bot):
         f"💰 موجودی فعلی: {current_balance:,} واحد\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
     )
+    from bot.tx_reports import _game_report_context, _parse_game_id
+    game_ids = [
+        g for g in (_parse_game_id(getattr(t, "description", "") or "") for t in transactions) if g
+    ]
+    ctx = await _game_report_context(chat_id, target_id, game_ids) if game_ids else {
+        "won": set(), "peers": {},
+    }
+    won_games = ctx.get("won") or set()
+    peers_by_game = ctx.get("peers") or {}
+    name_map: dict[int, str] = {}
+    peer_uids = {pid for peers in peers_by_game.values() for pid in peers}
+    for pid in peer_uids:
+        try:
+            member = await bot.get_chat_member(chat_id, pid)
+            name_map[pid] = (member.user.full_name or member.user.first_name or str(pid)).strip()
+        except Exception:
+            name_map[pid] = str(pid)
+
     for t in transactions:
-        action, emoji = _tx_label(t.type)
         j_time_str = jdatetime.datetime.fromgregorian(datetime=t.created_at).strftime("%Y/%m/%d - %H:%M")
-        text += f"{emoji} {action}\n"
-        text += f"   💰 مبلغ: {t.amount:,} واحد\n"
+        if t.type in ("bet", "win"):
+            from bot.tx_reports import _format_match_tx_lines
+            for line in _format_match_tx_lines(
+                t,
+                won_games=won_games,
+                peers_by_game=peers_by_game,
+                name_map=name_map,
+                escape_html=True,
+            ):
+                text += f"{line}\n"
+        else:
+            action, emoji = _tx_label(t.type)
+            text += f"{emoji} {action}\n"
+            text += f"   💰 مبلغ: {t.amount:,} واحد\n"
         text += f"   📊 موجودی پس از تراکنش: {t.balance_after:,} واحد\n"
         if t.type in ("bet", "win"):
             text += "   🤖 عامل: ربات (سیستم خودکار)\n"
@@ -2202,7 +2875,9 @@ async def cmd_report(message: Message, bot: Bot):
         else:
             text += "   🤖 عامل: ربات (سیستم خودکار)\n"
         if t.description:
-            text += f"   📝 توضیح: {t.description}\n"
+            from bot.tx_reports import _format_tx_description
+            for line in _format_tx_description(t.description, escape_html=True):
+                text += f"{line}\n"
         text += f"   🕒 {j_time_str}\n\n"
     if total_pages > 1:
         text += f"💡 صفحه بعد: `گزارش {page + 1}`" if page < total_pages else ""
@@ -2215,8 +2890,32 @@ async def cmd_report(message: Message, bot: Bot):
     )
 
 
+@router.message(F.text.in_({
+    "حق واسطه مخفی", "حق واسطه آشکار",
+    "حق واسطه مخفی روشن", "حق واسطه مخفی خاموش",
+}))
+async def cmd_fee_visibility(message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_owner(chat_id, user_id):
+        return await _reply(message, "❌ فقط مالک گروه می‌تواند نمایش حق واسطه را تغییر دهد.")
+    hidden = message.text in {"حق واسطه مخفی", "حق واسطه مخفی روشن"}
+    await _set_fee_hidden(chat_id, hidden)
+    if hidden:
+        return await _reply(message, "✅ حق واسطه مخفی شد؛ از این پس فقط مالک گروه به آن دسترسی دارد.")
+    return await _reply(message, "✅ حق واسطه برای مدیران گروه دوباره قابل مشاهده شد.")
+
+
 @router.message(F.text.func(lambda t: parse_fee_report_command(t) is not None))
 async def cmd_fee_report(message: Message, bot: Bot):
+    from bot.panel_ui import can_see_fee
+    if not can_see_fee(
+        message.from_user.id,
+        message.chat.id,
+        fee_hidden=await _get_fee_hidden(message.chat.id),
+    ):
+        return await _reply(message, "❌ حق واسطه این گروه مخفی است و فقط مالک به آن دسترسی دارد.")
+
     delivery, mode, admin_target = parse_fee_report_command(message.text)
     if (
         mode == "a"
@@ -2239,6 +2938,9 @@ async def cmd_fee(message: Message, bot: Bot):
     user_id = message.from_user.id
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
         return await _reply(message, ADMIN_DENY_TEXT)
+    from bot.panel_ui import can_see_fee
+    if not can_see_fee(user_id, chat_id, fee_hidden=await _get_fee_hidden(chat_id)):
+        return await _reply(message, "❌ حق واسطه این گروه مخفی است و فقط مالک به آن دسترسی دارد.")
     fee = await _get_fee(chat_id)
     parts = message.text.split()
     if len(parts) == 1:
@@ -2367,6 +3069,9 @@ async def cb_fee_report(call: CallbackQuery, bot: Bot):
 
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
         return await call.answer(ADMIN_DENY_TEXT, show_alert=True)
+    from bot.panel_ui import can_see_fee
+    if not can_see_fee(user_id, chat_id, fee_hidden=await _get_fee_hidden(chat_id)):
+        return await call.answer("حق واسطه مخفی است و فقط مالک دسترسی دارد.", show_alert=True)
 
     text = await build_fee_text_by_mode(chat_id, bot, mode)
     if not text:
@@ -2391,8 +3096,15 @@ async def cmd_card_self(message: Message, bot: Bot):
     chat_id = message.chat.id
     user_id = message.from_user.id
     own, adm, _ = get_user_status(chat_id, user_id)
-    role = "owner" if own else "admin" if adm else "member"
-    text = await db_get_card(chat_id, user_id, role)
+    cashier = await active_cashier(chat_id)
+    if own:
+        text = await db_get_card(chat_id, user_id, "owner")
+    elif adm:
+        text = await db_get_card(chat_id, user_id, "admin")
+    elif cashier:
+        text = await db_get_card(chat_id, cashier, "admin")
+    else:
+        text = await db_get_card(chat_id, user_id, "owner")
     return await safe_send(bot, chat_id, text, reply_to=message.message_id)
 
 
@@ -2474,10 +3186,171 @@ async def cmd_del_card(message: Message, bot: Bot):
 
 # ─── شروع مسابقه تاس (استفاده از dice_game.py) ───────────────────────────────
 
-@router.message(F.text.regexp(r"^شروع\s+\d+"))
-async def cmd_start_game(message: Message, bot: Bot):
+@router.message(F.text.regexp(r"^شروع\s*پیوی"))
+async def cmd_pv_start_setting(message: Message, bot: Bot):
+    from bot.pv_dice import handle_pv_setting_command, ensure_sweeper
+    await ensure_sweeper(bot)
+    await handle_pv_setting_command(message, bot)
+
+
+@router.message(F.text.regexp(r"^شروع\s+\d+.*پیوی\s*$"))
+async def cmd_start_pv_duel(message: Message, bot: Bot):
+    """چالش تاس دونفره در پیوی — برای همه اعضا."""
+    from bot.pv_dice import (
+        parse_pv_start_command, get_pv_start_settings, format_off_message,
+        user_busy_label, format_pv_busy_message, create_invite, ensure_sweeper, MIN_BET,
+        get_min_pv_bet, effective_min_pv_bet, format_min_pv_denial,
+    )
+    from bot.dice_game import has_active_game, BET_MODE_FIXED
+
+    await ensure_sweeper(bot)
     chat_id = message.chat.id
     user_id = message.from_user.id
+    parsed = parse_pv_start_command(normalize_numbers(message.text or ""))
+    if not parsed:
+        return
+    if parsed.get("error") == "pv_only_2":
+        return await _reply(message, "⚔️ چالش پیوی فقط برای ۲ نفر است.\nمثال: <code>شروع 2 100 پیوی</code>")
+    if parsed.get("error") == "min_bet":
+        group_min = await get_min_pv_bet(chat_id)
+        eff = effective_min_pv_bet(group_min)
+        return await _reply(message, f"❌ حداقل مبلغ شرط {eff:,} واحد است.")
+    if parsed.get("error") == "bad_bet":
+        return await _reply(message, "❌ مبلغ باید عدد باشد.\nمثال: <code>شروع 2 100 پیوی</code>")
+
+    if parsed.get("has_bet"):
+        group_min = await get_min_pv_bet(chat_id)
+        eff = effective_min_pv_bet(group_min)
+        if int(parsed["bet_amount"]) < eff:
+            return await _reply(
+                message,
+                format_min_pv_denial(eff, int(parsed["bet_amount"])),
+            )
+
+    cfg = await get_pv_start_settings(chat_id)
+    if not cfg.get("enabled"):
+        return await _reply(message, format_off_message(cfg.get("reason") or ""))
+
+    if not message.reply_to_message:
+        return await _reply(
+            message,
+            "↩️ روی پیام حریف ریپلای کنید و بنویسید:\n"
+            "<code>شروع 2 100 پیوی</code>",
+        )
+    target_id = await get_target_from_reply(message, bot)
+    if not target_id:
+        return
+    if int(target_id) == int(user_id):
+        return await _reply(message, "❌ نمی‌توانید با خودتان بازی کنید.")
+
+    my_busy = user_busy_label(user_id)
+    if my_busy:
+        return await _reply(message, format_pv_busy_message(my_busy))
+    if has_active_game(chat_id):
+        # اگر خود کاربر در بازی گروهی است — dice game is per-chat not per-user easily
+        pass
+    their_busy = user_busy_label(int(target_id))
+    if their_busy:
+        tag = await _mention(int(target_id), bot, chat_id)
+        return await _reply(
+            message,
+            format_pv_busy_message(their_busy, for_other=True, other_name=tag),
+        )
+
+    # also block if target/self in group active game (player or lobby starter)
+    from bot.dice_game import is_user_involved_in_group_game
+    if is_user_involved_in_group_game(chat_id, user_id):
+        return await _reply(message, "⚠️ شما در بازی گروهی این گپ هستید؛ اول آن را تمام کنید.")
+    if is_user_involved_in_group_game(chat_id, int(target_id)):
+        tag = await _mention(int(target_id), bot, chat_id)
+        return await _reply(message, f"⏳ {tag} در بازی گروهی این گپ است؛ منتظر پایان باشید.")
+
+    fee_percent = await _get_fee(chat_id) if parsed["has_bet"] else 0
+    if parsed["has_bet"]:
+        bet_mode = parsed["explicit_mode"] or await _get_bet_mode(chat_id)
+        from bot.dice_game import calc_bet_costs
+        from bot.finance import get_playable_balance, format_insufficient_balance_message
+
+        costs = calc_bet_costs(int(parsed["bet_amount"]), int(fee_percent or 0), bet_mode, 2)
+        entry = int(costs.get("entry") or 0)
+        if entry > 0:
+            fee_per = int(costs.get("fee_per") or 0)
+            if bet_mode == BET_MODE_FIXED and fee_per > 0:
+                fee_line = f"\n   └ حق واسطه ({fee_percent}٪): {fee_per:,} واحد (از جایزه)"
+            elif fee_per > 0:
+                fee_line = f"\n   ├ شرط: {int(parsed['bet_amount']):,} واحد\n   └ حق واسطه: {fee_per:,} واحد"
+            else:
+                fee_line = ""
+            mode_line = " (فیکس)" if bet_mode == BET_MODE_FIXED else " (اضافه)"
+            fee_suffix = f"{mode_line}{fee_line}"
+
+            total_bal, playable, pending = await get_playable_balance(chat_id, user_id)
+            if playable < entry:
+                return await _reply(
+                    message,
+                    format_insufficient_balance_message(
+                        entry_cost=entry,
+                        total_balance=total_bal,
+                        playable=playable,
+                        pending=pending,
+                        fee_line=fee_suffix,
+                    ),
+                )
+
+            t_total, t_playable, t_pending = await get_playable_balance(chat_id, int(target_id))
+            if t_playable < entry:
+                tag = await _mention(int(target_id), bot, chat_id)
+                shortfall = entry - t_playable
+                pending_line = (
+                    f"\n⏳ موجودی در انتظار تسویه: {t_pending:,} واحد" if t_pending > 0 else ""
+                )
+                return await _reply(
+                    message,
+                    (
+                        f"❌ موجودی حریف کافی نیست!\n\n"
+                        f"👤 حریف: {tag}\n"
+                        f"💳 هزینه ورودی: {entry:,} واحد{fee_suffix}\n\n"
+                        f"💰 موجودی قابل‌استفاده حریف: {t_playable:,} واحد{pending_line}\n"
+                        f"🔻 کمبود: {shortfall:,} واحد\n\n"
+                        f"تا وقتی موجودی حریف به حد کافی نرسد، دعوت پیوی ارسال نمی‌شود."
+                    ),
+                )
+    else:
+        bet_mode = BET_MODE_FIXED
+
+    challenger_name = await _mention(user_id, bot, chat_id)
+    target_name = await _mention(int(target_id), bot, chat_id)
+    # strip HTML for PV plain-ish names
+    import re as _re
+    ch_plain = _re.sub(r"<[^>]+>", "", challenger_name) or str(user_id)
+    tg_plain = _re.sub(r"<[^>]+>", "", target_name) or str(target_id)
+
+    await create_invite(
+        bot,
+        group_id=chat_id,
+        challenger_id=user_id,
+        target_id=int(target_id),
+        bet_amount=int(parsed["bet_amount"]),
+        has_bet=bool(parsed["has_bet"]),
+        bet_mode=bet_mode,
+        fee_percent=int(fee_percent or 0),
+        group_msg_id=message.message_id,
+        challenger_name=ch_plain,
+        target_name=tg_plain,
+    )
+
+
+@router.message(F.text.regexp(r"^شروع\s+\d+"))
+async def cmd_start_game(message: Message, bot: Bot):
+    # اگر دستور پیوی باشد، هندلر تخصصی باید گرفته باشد؛ اینجا فقط گپ
+    if (message.text or "").strip().endswith("پیوی"):
+        return
+    from bot.pv_dice import user_busy_label, format_pv_busy_message
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    busy = user_busy_label(user_id)
+    if busy:
+        return await _reply(message, format_pv_busy_message(busy))
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
         return await _reply(message, "شما دسترسی مجاز را ندارید")
     parts = normalize_numbers(message.text).split()
@@ -2491,12 +3364,14 @@ async def cmd_start_game(message: Message, bot: Bot):
             "• شروع [تعداد] → بازی رایگان\n"
             "• شروع [تعداد] [مبلغ] → طبق حالت بازی گروه\n"
             "• شروع [تعداد] [مبلغ] فیکس → ورودی ثابت\n"
-            "• شروع [تعداد] [مبلغ] اضافه → ورودی = شرط + حق واسطه\n\n"
+            "• شروع [تعداد] [مبلغ] اضافه → ورودی = شرط + حق واسطه\n"
+            "• شروع 2 [مبلغ] پیوی → چالش دونفره در پیوی (با ریپلای)\n\n"
             "مثال‌ها:\n"
             "  شروع 2\n"
             "  شروع 2 50\n"
             "  شروع 2 50 فیکس\n"
-            "  شروع 2 50 اضافه"
+            "  شروع 2 50 اضافه\n"
+            "  شروع 2 100 پیوی"
         ))
     try:
         total_players = int(parts[1])
@@ -2531,11 +3406,12 @@ async def cmd_start_game(message: Message, bot: Bot):
         bet_mode = explicit_mode if explicit_mode else await _get_bet_mode(chat_id)
     else:
         bet_mode = BET_MODE_FIXED
+    starter_id = user_id
     create_game(
         chat_id, total_players,
         bet_amount=bet_amount, fee_percent=fee_percent,
         has_bet=has_bet, bet_mode=bet_mode if has_bet else BET_MODE_FIXED,
-        starter_admin_id=user_id,
+        starter_admin_id=starter_id,
     )
     mode_label = _START_MODE_LABELS.get(bet_mode, bet_mode)
     if has_bet:
@@ -2614,12 +3490,23 @@ async def cmd_cancel_game(message: Message, bot: Bot):
     user_id = message.from_user.id
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
         return await _reply(message, "شما دسترسی مجاز را ندارید")
+
+    from bot.dice_game import WAITING_ROUNDS, GAME_PROGRESS
+    from django.core.cache import cache as django_cache
     game = get_game(chat_id)
-    if not game:
+    had_state = bool(
+        game
+        or chat_id in GAME_PROGRESS
+        or chat_id in WAITING_ROUNDS
+        or django_cache.get(f"dice_finalizing_{chat_id}")
+        or django_cache.get(f"dice_waiting_finalize_{chat_id}")
+    )
+    if not had_state:
         return await _reply(message, "❌ هیچ بازی فعالی برای لغو وجود ندارد!")
-    total_players = game.get("total_players", 0)
-    players_count = len(game.get("players", []))
-    status = game.get("status", "unknown")
+
+    total_players = game.get("total_players", 0) if game else 0
+    players_count = len(game.get("players", [])) if game else 0
+    status = game.get("status", "unknown") if game else "unknown"
     status_text = {"waiting": "در حال ثبت‌نام", "playing": "در حال انجام"}.get(status, "فعال")
     finish_game_cleanup(chat_id)
     return await _reply(message, (
@@ -2634,7 +3521,10 @@ async def cmd_cancel_game(message: Message, bot: Bot):
 def _dice_stats_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            IKB(text="📅 روزانه",  callback_data="dstat:daily"),
+            IKB(text="📅 امروز",  callback_data="dstat:daily"),
+            IKB(text="📅 دیروز",  callback_data="dstat:yesterday"),
+        ],
+        [
             IKB(text="📆 هفتگی",  callback_data="dstat:weekly"),
             IKB(text="📊 کل",     callback_data="dstat:total"),
         ],
@@ -2643,31 +3533,29 @@ def _dice_stats_kb() -> InlineKeyboardMarkup:
 
 
 async def _build_dice_stats_text(chat_id: int, period: str, bot: Bot) -> str:
-    rows = await db_get_dice_stats(chat_id, period)
-    labels = {"daily": "📅 روزانه (۲۴ ساعت گذشته)", "weekly": "📆 هفتگی (۷ روز گذشته)", "total": "📊 کل"}
-    title = labels.get(period, period)
-    if not rows:
-        return f"<b>{title}</b>\n\nهنوز تاسی ثبت نشده است."
+    from bot.dice_stats_fmt import format_dice_game_stats
 
-    medals = ["🥇", "🥈", "🥉"]
-    lines = [f"<b>🎲 آمار تاس — {title}</b>", "━━━━━━━━━━━━━━━━"]
-    for i, r in enumerate(rows):
-        uid = r["telegram_user_id"]
+    labels = {
+        "daily": "🎲 آمار تاس · 📅 امروز",
+        "yesterday": "🎲 آمار تاس · 📅 دیروز",
+        "weekly": "🎲 آمار تاس · 📆 هفتگی",
+        "total": "🎲 آمار تاس · 📊 کل",
+    }
+    title = labels.get(period, "🎲 آمار تاس")
+    records = await db_fetch_dice_game_history(chat_id, period)
+    if not records:
+        return f"<b>{title}</b>\n\n📭 مسابقه‌ای ثبت نشده."
+
+    user_ids = list({rec.telegram_user_id for rec in records})
+    name_map = {}
+    for uid in user_ids:
         try:
             member = await bot.get_chat_member(chat_id, uid)
-            name = member.user.full_name or str(uid)
+            name_map[uid] = html.escape(member.user.full_name or member.user.first_name or str(uid))
         except Exception:
-            name = str(uid)
-        rank = medals[i] if i < 3 else f"{i+1}."
-        avg = float(r["avg"])
-        lines.append(
-            f"{rank} <b>{name}</b>\n"
-            f"   🎲 {r['rolls']} بار  |  مجموع: {r['total']}  |  میانگین: {avg:.1f}\n"
-            f"   بیشترین: {r['max_val']}  |  کمترین: {r['min_val']}"
-        )
-    lines.append("━━━━━━━━━━━━━━━━")
-    lines.append(f"👥 تعداد بازیکنان: {len(rows)}")
-    return "\n".join(lines)
+            name_map[uid] = f'<a href="tg://user?id={uid}">کاربر</a>'
+
+    return format_dice_game_stats(records, title, name_map)
 
 
 @router.message(F.text.in_(["آمار تاس", "امار تاس", "آمار بازی", "امار بازی"]))
@@ -2678,10 +3566,18 @@ async def cmd_dice_stats(message: Message, bot: Bot):
                     reply_markup=_dice_stats_kb(), reply_to=message.message_id)
 
 
-@router.message(F.text.in_(["آمار تاس روزانه", "امار تاس روزانه"]))
+@router.message(F.text.in_(["آمار تاس روزانه", "امار تاس روزانه", "آمار تاس امروز", "امار تاس امروز"]))
 async def cmd_dice_stats_daily(message: Message, bot: Bot):
     chat_id = message.chat.id
     text = await _build_dice_stats_text(chat_id, "daily", bot)
+    await safe_send(bot, chat_id, text,
+                    reply_markup=_dice_stats_kb(), reply_to=message.message_id)
+
+
+@router.message(F.text.in_(["آمار تاس دیروز", "امار تاس دیروز", "آمار بازی دیروز", "امار بازی دیروز"]))
+async def cmd_dice_stats_yesterday(message: Message, bot: Bot):
+    chat_id = message.chat.id
+    text = await _build_dice_stats_text(chat_id, "yesterday", bot)
     await safe_send(bot, chat_id, text,
                     reply_markup=_dice_stats_kb(), reply_to=message.message_id)
 
@@ -2742,11 +3638,22 @@ async def cmd_dice(message: Message, bot: Bot):
         await handle_round_selection(chat_id, user_id, text, bot, message.message_id)
         return
 
-    # تاس خاموش → فقط وقتی بازی فعال نیست بلاک شود
-    if not has_active_game(chat_id):
+    # تاس خاموش → فقط وقتی بازی/چالش race فعال نیست بلاک شود
+    game = get_game(chat_id)
+    dice_game_active = has_active_game(chat_id) or (
+        game and game.get("status") in ("waiting", "playing")
+    )
+    if not dice_game_active:
         group_cmds = get_group_commands(chat_id)
         if "تاس" not in group_cmds:
-            return await _reply(message, "این قابلیت توسط ادمین گروه غیرفعال شده است.")
+            from bot.challenges import has_active_race_challenge
+            if await has_active_race_challenge(chat_id, "dice"):
+                pass  # چالش تاس فعال — اجازه بده
+            else:
+                from bot.helpers import quiet_extra_on
+                if quiet_extra_on(chat_id):
+                    return
+                return await _reply(message, "این قابلیت توسط ادمین گروه غیرفعال شده است.")
 
     theme_id = get_group_theme(chat_id)
     dice_option_off = chat_id not in cache.DICE_OPTION
@@ -2794,10 +3701,16 @@ async def handle_native_dice(message: Message, bot: Bot):
     # فقط تاس 🎲 با game logic کامل درگیر می‌شه
     if emoji == "🎲":
         # تاس خاموش و بدون بازی → نادیده
-        if not has_active_game(chat_id):
+        game = get_game(chat_id)
+        dice_game_active = has_active_game(chat_id) or (
+            game and game.get("status") in ("waiting", "playing")
+        )
+        if not dice_game_active:
             group_cmds = get_group_commands(chat_id)
             if "تاس" not in group_cmds:
-                return
+                from bot.challenges import has_active_race_challenge
+                if not await has_active_race_challenge(chat_id, "dice"):
+                    return
 
         LAST_DICE[chat_id] = value
         await db_record_dice_roll(chat_id, user_id, value)
@@ -2813,11 +3726,23 @@ async def handle_native_dice(message: Message, bot: Bot):
 
         # بازی تعیین (waiting)
         if has_active_game(chat_id):
-            should_cont = await should_continue(chat_id, user_id, bot, message.message_id, "تاس")
+            should_cont, _join_note = await should_continue(chat_id, user_id, bot, message.message_id, "تاس")
             if should_cont == 0:
                 return
             if should_cont == 2:
-                await asyncio.sleep(0.5)
+                # اول تم تاس مثل متن، بعد ثبت‌نام کامل
+                try:
+                    from bot.dice_themes import get_theme, build_single_dice_message
+                    from bot.helpers import get_group_theme, safe_send
+                    theme = get_theme(get_group_theme(chat_id))
+                    await safe_send(
+                        bot, chat_id,
+                        build_single_dice_message(int(value), theme),
+                        reply_to=message.message_id,
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(0.4)
                 await register_and_save_dice(chat_id, user_id, value, bot, message.message_id)
         # تاس آزاد — استیکر خودش کافیه، چیزی نمی‌فرستیم
         return

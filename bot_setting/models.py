@@ -158,6 +158,11 @@ class BotSiteConfig(models.Model):
         verbose_name="تم‌های سفارشی تاس",
         help_text='مثل {"1":{"single_header":"..."},"16":{...}} — روی ۱۵ تم پیش‌فرض می‌نشیند',
     )
+    admin_sensitive_hidden = models.BooleanField(
+        default=False,
+        verbose_name="مخفی حساس از ادمین (سراسری)",
+        help_text="اگر روشن باشد، ادمین‌ها در همه گروه‌ها حق واسطه، فعالیت‌ها، حساب ادمین و گزارش مالک را نمی‌بینند.",
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

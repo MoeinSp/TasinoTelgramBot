@@ -201,6 +201,55 @@ async def get_target_from_reply(message: Message, bot: Bot) -> Optional[int]:
     return target.id
 
 
+_UNBAN_TARGET_RE = re.compile(
+    r"^(?:آن\s*بن|ان\s*بن|آنبن|انبن|حذف\s*بن)\s+(@?\S+)\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_unban_target(text: str) -> str | None:
+    """شناسه یا یوزرنیم بعد از دستور آنبن — مثلاً انبن ucski33233"""
+    if not text:
+        return None
+    m = _UNBAN_TARGET_RE.match(text.strip())
+    if not m:
+        return None
+    return m.group(1).strip().lstrip("@")
+
+
+@sync_to_async
+def _lookup_banned_tg_user_id(chat_id: int, ident: str) -> int | None:
+    from account.models import TelegramGroupMember
+
+    ident = (ident or "").strip()
+    if ident.isdigit():
+        return int(ident)
+    rows = list(
+        TelegramGroupMember.objects.filter(
+            telegram_chat_id=chat_id, role="banned"
+        ).values_list("telegram_user_id", flat=True)
+    )
+    matches = [uid for uid in rows if str(uid) == ident or str(uid).endswith(ident)]
+    if len(matches) == 1:
+        return int(matches[0])
+    return None
+
+
+async def resolve_unban_target_id(bot: Bot, chat_id: int, raw: str) -> int | None:
+    """آیدی عددی، @username، یا جستجو در لیست بن."""
+    ident = (raw or "").strip().lstrip("@")
+    if not ident:
+        return None
+    if ident.isdigit():
+        return int(ident)
+    try:
+        chat = await bot.get_chat(f"@{ident}")
+        return int(chat.id)
+    except Exception:
+        pass
+    return await _lookup_banned_tg_user_id(chat_id, ident)
+
+
 # ─── user_mention ─────────────────────────────────────────────────────────────
 
 @sync_to_async
@@ -330,6 +379,24 @@ def db_disable_dice_option(chat_id: int):
 
 
 @sync_to_async
+def db_enable_quiet_extra(chat_id: int):
+    from account.models import TelegramGroup
+    TelegramGroup.objects.filter(telegram_chat_id=chat_id).update(quiet_extra=True)
+    cache.QUIET_EXTRA.add(chat_id)
+
+
+@sync_to_async
+def db_disable_quiet_extra(chat_id: int):
+    from account.models import TelegramGroup
+    TelegramGroup.objects.filter(telegram_chat_id=chat_id).update(quiet_extra=False)
+    cache.QUIET_EXTRA.discard(chat_id)
+
+
+def quiet_extra_on(chat_id) -> bool:
+    return int(chat_id) in cache.QUIET_EXTRA or chat_id in cache.QUIET_EXTRA
+
+
+@sync_to_async
 def db_get_dice_turn_limit(chat_id: int) -> int:
     from account.models import TelegramGroup
     if chat_id in cache.DICE_TURN_LIMIT:
@@ -386,13 +453,29 @@ def db_get_locks(chat_id: int) -> dict:
 @sync_to_async
 def db_set_owner(chat_id: int, user_id: int):
     from account.models import TelegramGroup, TelegramGroupMember
+    from bot import cache
+
+    chat_id = int(chat_id)
+    user_id = int(user_id)
     grp, _ = TelegramGroup.objects.get_or_create(telegram_chat_id=chat_id, defaults={"name": ""})
-    TelegramGroupMember.objects.filter(telegram_chat_id=chat_id, is_owner=True).update(
-        is_owner=False, role="member"
+
+    old_owner_ids = list(
+        TelegramGroupMember.objects.filter(
+            telegram_chat_id=chat_id, is_owner=True,
+        ).values_list("telegram_user_id", flat=True)
     )
+    if old_owner_ids:
+        TelegramGroupMember.objects.filter(
+            telegram_chat_id=chat_id, telegram_user_id__in=old_owner_ids,
+        ).update(is_owner=False, is_admin=False, role="member")
+        admins = cache.ADMINS_CACHE.setdefault(chat_id, set())
+        for oid in old_owner_ids:
+            if int(oid) != user_id:
+                admins.discard(int(oid))
+
     m, _ = TelegramGroupMember.objects.get_or_create(
         telegram_chat_id=chat_id, telegram_user_id=user_id,
-        defaults={"group": grp}
+        defaults={"group": grp},
     )
     m.is_owner = True
     m.is_admin = True
@@ -401,6 +484,10 @@ def db_set_owner(chat_id: int, user_id: int):
     cache.OWNER_CACHE[chat_id] = user_id
     cache.ADMINS_CACHE.setdefault(chat_id, set()).add(user_id)
     cache.VIP_USERS_CACHE.setdefault(chat_id, set()).discard(user_id)
+    return {
+        "owner_id": user_id,
+        "previous_owners": [int(x) for x in old_owner_ids if int(x) != user_id],
+    }
 
 
 @sync_to_async
@@ -1182,16 +1269,6 @@ def contains_username(text: str) -> bool:
 # ─── آمار تاس ────────────────────────────────────────────────────────────────
 
 @sync_to_async
-def db_record_dice_roll(chat_id: int, user_id: int, value: int):
-    from account.models import DiceRollStat
-    DiceRollStat.objects.create(
-        telegram_chat_id=chat_id,
-        telegram_user_id=user_id,
-        value=value,
-    )
-
-
-@sync_to_async
 def db_get_dice_stats(chat_id: int, period: str) -> list:
     """
     period: 'daily' | 'weekly' | 'total'
@@ -1232,6 +1309,38 @@ def db_get_dice_stats(chat_id: int, period: str) -> list:
         c.execute(sql, params)
         cols = [d[0] for d in c.description]
         return [dict(zip(cols, row)) for row in c.fetchall()]
+
+
+@sync_to_async
+def db_record_dice_roll(chat_id: int, user_id: int, value: int):
+    from account.models import DiceRollStat
+    DiceRollStat.objects.create(
+        telegram_chat_id=chat_id,
+        telegram_user_id=user_id,
+        value=value,
+    )
+
+
+@sync_to_async
+def db_fetch_dice_game_history(chat_id: int, period: str) -> list:
+    """period: daily | yesterday | weekly | total"""
+    import datetime
+    from django.utils import timezone
+    from account.models import DiceGameHistory
+
+    qs = DiceGameHistory.objects.filter(telegram_chat_id=chat_id)
+    now = timezone.now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if period == "daily":
+        qs = qs.filter(created_at__gte=today_start)
+    elif period == "yesterday":
+        qs = qs.filter(
+            created_at__gte=today_start - datetime.timedelta(days=1),
+            created_at__lt=today_start,
+        )
+    elif period == "weekly":
+        qs = qs.filter(created_at__gte=now - datetime.timedelta(weeks=1))
+    return list(qs)
 
 
 # ─── کارت بانکی ──────────────────────────────────────────────────────────────

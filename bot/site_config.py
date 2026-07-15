@@ -48,6 +48,7 @@ def apply_site_config_cache(data: dict | None = None) -> None:
         "channel_url": data.get("channel_url") or "https://t.me/TasinoBot",
         "premium_emoji_ids": cleaned,
         "dice_themes": cleaned_themes,
+        "admin_sensitive_hidden": bool(data.get("admin_sensitive_hidden", False)),
     })
 
 
@@ -90,6 +91,7 @@ def _site_snapshot(cfg) -> dict:
         "channel_url": cfg.channel_url or "",
         "premium_emoji_ids": getattr(cfg, "premium_emoji_ids", None) or {},
         "dice_themes": getattr(cfg, "dice_themes", None) or {},
+        "admin_sensitive_hidden": bool(getattr(cfg, "admin_sensitive_hidden", False)),
     }
 
 
@@ -293,13 +295,30 @@ def db_import_dice_themes(entries: dict, replace: bool = False) -> dict:
     return data
 
 
+@sync_to_async
+def db_set_admin_sensitive_hidden(hidden: bool) -> dict:
+    from bot_setting.models import BotSiteConfig
+    cfg = BotSiteConfig.get_singleton()
+    cfg.admin_sensitive_hidden = bool(hidden)
+    cfg.save(update_fields=["admin_sensitive_hidden", "updated_at"])
+    data = _site_snapshot(cfg)
+    apply_site_config_cache(data)
+    return data
+
+
+def is_admin_sensitive_hidden() -> bool:
+    return bool(cache.SITE_CONFIG.get("admin_sensitive_hidden", False))
+
+
 def site_config_status_text() -> str:
     c = cache.SITE_CONFIG
-    bot_state = "🟢 روشن" if c.get("bot_enabled", True) else "⚫ خاموش"
+    bot_state = "روشن" if c.get("bot_enabled", True) else "خاموش"
+    sens = "روشن" if c.get("admin_sensitive_hidden") else "خاموش"
     return (
         "🔗 <b>تنظیمات لینک‌های پیوی</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"⚡ ربات سراسری: <b>{bot_state}</b>\n\n"
+        f"⚡ ربات سراسری: <b>{bot_state}</b>\n"
+        f"🔒 مخفی حساس از ادمین: <b>{sens}</b>\n\n"
         f"🔥 لینکدونی:\n<code>{c.get('link_directory_url')}</code>\n"
         f"متن دکمه: <b>{c.get('link_directory_title')}</b>\n\n"
         f"💬 پشتیبانی:\n<code>{c.get('support_url')}</code>\n"

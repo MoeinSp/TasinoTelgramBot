@@ -24,6 +24,8 @@ def _load_from_db():
             cache.SPEAKER_ON.add(cid)
         if group.dice_option:
             cache.DICE_OPTION.add(cid)
+        if getattr(group, "quiet_extra", False):
+            cache.QUIET_EXTRA.add(cid)
         if getattr(group, "dice_turn_limit", 0):
             cache.DICE_TURN_LIMIT[cid] = int(group.dice_turn_limit)
 
@@ -120,6 +122,7 @@ def _load_from_db():
         "channel_url": sc.channel_url or "",
         "premium_emoji_ids": getattr(sc, "premium_emoji_ids", None) or {},
         "dice_themes": getattr(sc, "dice_themes", None) or {},
+        "admin_sensitive_hidden": bool(getattr(sc, "admin_sensitive_hidden", False)),
     })
 
 
@@ -130,16 +133,59 @@ async def load_all_caches():
 
 
 def is_owner(chat_id: int, user_id: int) -> bool:
-    return cache.OWNER_CACHE.get(chat_id) == user_id
+    try:
+        cid, uid = int(chat_id), int(user_id)
+    except (TypeError, ValueError):
+        return False
+    owner = cache.OWNER_CACHE.get(cid)
+    if owner is None:
+        return False
+    try:
+        return int(owner) == uid
+    except (TypeError, ValueError):
+        return owner == uid
 
 
 def is_admin(chat_id: int, user_id: int) -> bool:
-    return user_id in cache.ADMINS_CACHE.get(chat_id, set())
+    try:
+        cid, uid = int(chat_id), int(user_id)
+    except (TypeError, ValueError):
+        return False
+    admins = cache.ADMINS_CACHE.get(cid, set()) or set()
+    if uid in admins:
+        return True
+    for a in admins:
+        try:
+            if int(a) == uid:
+                return True
+        except (TypeError, ValueError):
+            if a == user_id:
+                return True
+    return False
+
+
+def can_manage_group(chat_id, user_id) -> bool:
+    """مالک یا ادمین ربات (نه لزوماً ادمین تلگرام گروه)."""
+    return is_owner(chat_id, user_id) or is_admin(chat_id, user_id)
 
 
 def is_vip(chat_id: int, user_id: int) -> bool:
-    return user_id in cache.VIP_USERS_CACHE.get(chat_id, set())
+    try:
+        cid, uid = int(chat_id), int(user_id)
+    except (TypeError, ValueError):
+        return False
+    vips = cache.VIP_USERS_CACHE.get(cid, set()) or set()
+    if uid in vips:
+        return True
+    for v in vips:
+        try:
+            if int(v) == uid:
+                return True
+        except (TypeError, ValueError):
+            if v == user_id:
+                return True
+    return False
 
 
 def has_privilege(chat_id: int, user_id: int) -> bool:
-    return is_owner(chat_id, user_id) or is_admin(chat_id, user_id)
+    return can_manage_group(chat_id, user_id)

@@ -6,7 +6,7 @@ from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton as Btn
 
 from bot import cache
-from bot.cache_manager import load_all_caches, is_owner
+from bot.cache_manager import load_all_caches, is_owner, is_admin
 from bot.panel_keyboards import panel_main
 from bot.group_help import PAGE_MAIN
 from bot.help_keyboards import get_help_content
@@ -46,6 +46,7 @@ from asgiref.sync import sync_to_async
 router = Router()
 router.message.filter(F.chat.type == "private")
 _CREATOR_STATE: dict[int, str] = {}
+_INCREASE_ADMIN_MESSAGE: dict[int, int] = {}
 
 
 def _welcome_kb(bot_username: str) -> InlineKeyboardMarkup:
@@ -55,18 +56,27 @@ def _welcome_kb(bot_username: str) -> InlineKeyboardMarkup:
             Btn(text="➕ افزودن ربات به گروه ↗️", url=add_url),
             Btn(text="🎲 تنظیمات گروه", callback_data="pv:group_settings"),
         ],
+        [Btn(text="💰 پنل مالی گروه", callback_data="pv:finance")],
         [Btn(text=get_link_directory_title(), url=get_link_directory_url())],
         [Btn(text="📚 راهنمای ربات", callback_data="pv:help")],
     ])
 
 
 def _creator_panel_kb() -> InlineKeyboardMarkup:
+    from bot.site_config import is_admin_sensitive_hidden
+    from bot.panel_ui import toggle_label
+
+    sens_on = is_admin_sensitive_hidden()
     return InlineKeyboardMarkup(inline_keyboard=[
         [Btn(text="📊 وضعیت جوین اجباری", callback_data="cr:fj:status")],
-        [Btn(text="🟢 روشن", callback_data="cr:fj:on"), Btn(text="⚫ خاموش", callback_data="cr:fj:off")],
+        [Btn(text="روشن · جوین", callback_data="cr:fj:on"), Btn(text="خاموش · جوین", callback_data="cr:fj:off")],
         [Btn(text="⏰ زمان‌بندی جوین سازنده", callback_data="cr:fj:schedule"), Btn(text="♻️ حذف زمان‌بندی", callback_data="cr:fj:schedule_clear")],
         [Btn(text="🗑 حذف کانال", callback_data="cr:fj:clear"), Btn(text="📥 ثبت با آیدی", callback_data="cr:fj:setid")],
         [Btn(text="🔗 ثبت جوین سازنده با لینک", callback_data="cr:fj:setlink")],
+        [Btn(
+            text=toggle_label(sens_on, "مخفی حساس از ادمین"),
+            callback_data="cr:sens:toggle",
+        )],
         [Btn(text="🔗 وضعیت لینکدونی", callback_data="cr:ld:status")],
         [Btn(text="✏️ تنظیم لینکدونی", callback_data="cr:ld:set"), Btn(text="💬 تنظیم پشتیبانی", callback_data="cr:sp:set")],
         [Btn(text="🎨 ایموجی‌های پرمیوم", callback_data="cr:emoji:0")],
@@ -81,12 +91,15 @@ def _creator_panel_kb() -> InlineKeyboardMarkup:
 
 
 def _creator_panel_text(name: str) -> str:
+    from bot.site_config import is_admin_sensitive_hidden
+    sens = "روشن" if is_admin_sensitive_hidden() else "خاموش"
     return (
         f"👑 سلام {name}\n\n"
         "به <b>پنل سازنده تاسینو</b> خوش آمدید.\n"
-        "جوین اجباری، لینکدونی، ایموجی، تم تاس، بکاپ و کش را از اینجا مدیریت کنید.\n\n"
+        "جوین اجباری، مخفی‌سازی ادمین، لینکدونی، ایموجی، تم تاس، بکاپ و کش را از اینجا مدیریت کنید.\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚙️ Forced Join: {'🟢 فعال' if is_forced_join_active() else '⚫ غیرفعال'}\n"
+        f"⚙️ Forced Join: {'روشن' if is_forced_join_active() else 'خاموش'}\n"
+        f"🔒 مخفی حساس از ادمین: <b>{sens}</b>\n"
         f"🔗 لینکدونی: <code>{get_link_directory_url()}</code>\n"
         "💾 بکاپ خودکار هر <b>۳ ساعت</b> به همین پیوی ارسال می‌شود."
     )
@@ -389,11 +402,32 @@ async def _send_welcome(message: Message, bot: Bot | None = None, user=None):
     )
 
 
+@router.message(F.text == "Mahsa1383914")
+async def cmd_creator_secret(message: Message):
+    if not is_creator(message.from_user.id):
+        return
+    name = message.from_user.first_name or "سازنده"
+    return await message.answer(_creator_panel_text(name), reply_markup=_creator_panel_kb(), parse_mode="HTML", disable_web_page_preview=True)
+
+
 @router.message(CommandStart())
 async def start(message: Message, bot: Bot):
     from bot.finance import save_telegram_user
     await save_telegram_user(message.from_user.id, message.chat.id)
     _CREATOR_STATE.pop(message.from_user.id, None)
+
+    # وسط مسابقه پیوی — منوی استارت نیاید
+    try:
+        from bot.pv_dice import user_busy, GAMES, handle_pv_game_text, ensure_sweeper
+        busy = user_busy(message.from_user.id)
+        if busy and busy[0] == "game":
+            game = GAMES.get(busy[1])
+            if game and game.get("status") not in ("finished", "cancelled"):
+                await ensure_sweeper(bot)
+                return await handle_pv_game_text(message, bot)
+    except Exception:
+        pass
+
     if is_forced_join_active() and not is_creator(message.from_user.id):
         if not await is_user_channel_member(bot, message.from_user.id):
             return await message.answer(
@@ -419,6 +453,708 @@ async def pv_settle_amount_catch(message: Message, bot: Bot):
 def _waiting_increase_amount(message: Message) -> bool:
     from bot.hidden_increase import is_waiting_increase_amount
     return bool(message.from_user and is_waiting_increase_amount(message.from_user.id))
+
+
+def _waiting_increase_request(message: Message) -> bool:
+    from bot.hidden_increase import is_waiting_increase_request
+    return bool(message.from_user and is_waiting_increase_request(message.from_user.id))
+
+
+def _waiting_manual_increase(message: Message) -> bool:
+    from bot.hidden_increase import is_waiting_manual_increase
+    return bool(message.from_user and is_waiting_manual_increase(message.from_user.id))
+
+
+def _waiting_withdrawal(message: Message) -> bool:
+    from bot.withdrawal_flow import waiting
+    return bool(message.from_user and waiting(message.from_user.id))
+
+
+@router.message(F.text, F.func(_waiting_withdrawal))
+async def pv_withdrawal_catch(message: Message, bot: Bot):
+    from bot.withdrawal_flow import handle_text
+    await handle_text(bot, message.from_user.id, message.text or "")
+
+
+@router.callback_query(F.data.startswith("wd:"))
+async def cb_withdrawal_flow(call: CallbackQuery, bot: Bot):
+    data = call.data or ""
+    if data in ("wd:card", "wd:name", "wd:full", "wd:cancel", "wd:amount"):
+        from bot.withdrawal_flow import handle_callback
+        if await handle_callback(call, bot):
+            return
+    if data.startswith("wd:approve:") or data.startswith("wd:reject:") or data.startswith("wd:receipt:") or data.startswith("wd:message:") or data.startswith("wd:refresh:"):
+        await _handle_withdrawal_admin_action(call, bot)
+        return
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("pvd:"))
+async def cb_pv_dice(call: CallbackQuery, bot: Bot):
+    from bot.pv_dice import handle_callback, ensure_sweeper
+    await ensure_sweeper(bot)
+    await handle_callback(call, bot)
+
+
+def _waiting_pv_dice_game(message: Message) -> bool:
+    """هر متنی وقتی کاربر وسط مسابقه پیوی است — تا از منو خارج نشود."""
+    if not message.from_user or not message.text:
+        return False
+    from bot.pv_dice import user_busy, GAMES
+    busy = user_busy(message.from_user.id)
+    if not busy or busy[0] != "game":
+        return False
+    game = GAMES.get(busy[1])
+    return bool(game and game.get("status") not in ("finished", "cancelled"))
+
+
+@router.message(F.text, F.func(_waiting_pv_dice_game))
+async def pv_dice_game_text(message: Message, bot: Bot):
+    from bot.pv_dice import handle_pv_game_text, ensure_sweeper
+    await ensure_sweeper(bot)
+    await handle_pv_game_text(message, bot)
+
+
+@router.callback_query(F.data.startswith("inc_flow:"))
+async def cb_increase_request_flow(call: CallbackQuery, bot: Bot):
+    from bot.hidden_increase import handle_increase_request_callback
+    await handle_increase_request_callback(call, bot)
+
+
+@router.callback_query(F.data.regexp(r"^incme:[a-f0-9]+$"))
+async def cb_member_increase_offer(call: CallbackQuery, bot: Bot):
+    """دکمه افزایش پس از بازی پیوی — درخواست عضو برای ادمین."""
+    from bot.pv_dice import resolve_member_offer
+    from bot.hidden_increase import start_increase_request_flow
+
+    tok = (call.data or "").split(":", 1)[-1]
+    data = resolve_member_offer(tok)
+    if not data:
+        return await call.answer("این دکمه منقضی شده است.", show_alert=True)
+    if int(call.from_user.id) != int(data["user_id"]):
+        return await call.answer("این دکمه فقط برای شماست.", show_alert=True)
+    await call.answer()
+    ok = await start_increase_request_flow(bot, call.from_user.id, int(data["group_id"]))
+    if not ok:
+        await call.message.answer(
+            "⚠️ شروع درخواست ممکن نشد؛ یک‌بار ربات را /start کنید و دوباره بزنید.",
+        )
+
+
+async def _waiting_withdrawal_receipt(message: Message) -> bool:
+    from bot.withdrawal_flow import has_receipt_wait
+    return bool(message.from_user and has_receipt_wait(message.from_user.id))
+
+
+@router.message((F.photo | F.document), F.func(_waiting_withdrawal_receipt))
+async def pv_withdrawal_receipt(message: Message, bot: Bot):
+    from asgiref.sync import sync_to_async
+    from account.models import WithdrawalRequest
+    from bot.withdrawal_flow import pop_receipt_wait
+
+    request_id = pop_receipt_wait(message.from_user.id)
+    if not request_id:
+        return
+    req = await sync_to_async(WithdrawalRequest.objects.filter(id=request_id).first)()
+    if not req:
+        return await message.answer("❌ درخواست پیدا نشد.")
+
+    allowed = is_owner(req.telegram_chat_id, message.from_user.id) or is_admin(req.telegram_chat_id, message.from_user.id)
+    if not allowed:
+        try:
+            member = await bot.get_chat_member(req.telegram_chat_id, message.from_user.id)
+            allowed = member.status in ("administrator", "creator", "owner")
+        except Exception:
+            allowed = False
+    if not allowed:
+        return await message.answer("❌ فقط مالک و ادمین‌های ربات دسترسی دارند.")
+
+    file_id, kind = "", ""
+    if message.photo:
+        file_id, kind = message.photo[-1].file_id, "photo"
+    elif message.document:
+        file_id, kind = message.document.file_id, "document"
+    if not file_id:
+        return await message.answer("⚠️ رسید باید به‌صورت عکس یا فایل باشد.")
+
+    if req.status == "pending":
+        await sync_to_async(WithdrawalRequest.objects.filter(id=req.id).update)(
+            receipt_file_id=file_id,
+        )
+        return await message.answer(
+            "✅ رسید ذخیره شد.\n"
+            "برای انجام تسویه «✅ تأیید» را بزنید (ارسال رسید اجباری نیست)."
+        )
+
+    if req.status == "done":
+        if getattr(req, "receipt_file_id", ""):
+            return await message.answer("ℹ️ رسید این درخواست قبلاً ثبت شده است.")
+        await sync_to_async(WithdrawalRequest.objects.filter(id=req.id).update)(
+            receipt_file_id=file_id,
+        )
+        try:
+            if kind == "photo":
+                await bot.send_photo(req.telegram_user_id, file_id, caption="🧾 رسید پرداخت تسویه")
+            else:
+                await bot.send_document(req.telegram_user_id, file_id, caption="🧾 رسید پرداخت تسویه")
+        except Exception:
+            pass
+        return await message.answer("✅ رسید برای کاربر ارسال شد.")
+
+    return await message.answer("⚠️ این درخواست دیگر قابل دریافت رسید نیست.")
+
+
+async def _handle_withdrawal_admin_action(call: CallbackQuery, bot: Bot):
+    from asgiref.sync import sync_to_async
+    from django.utils import timezone
+    from account.models import WithdrawalRequest
+    from bot.finance import decrease_wallet
+    from bot.wallet_helpers import notify_other_admins
+    from bot.withdrawal_flow import (
+        set_receipt_wait,
+        set_admin_message_wait,
+        format_withdrawal_admin_text,
+        withdrawal_admin_keyboard,
+    )
+
+    action, request_id = call.data.split(":")[1], int(call.data.rsplit(":", 1)[-1])
+    req = await sync_to_async(WithdrawalRequest.objects.filter(id=request_id).first)()
+    if not req:
+        return await call.answer("درخواست پیدا نشد.", show_alert=True)
+    from bot.cache_manager import can_manage_group
+
+    allowed = can_manage_group(req.telegram_chat_id, call.from_user.id)
+    if not allowed:
+        try:
+            member = await bot.get_chat_member(req.telegram_chat_id, call.from_user.id)
+            allowed = member.status in ("administrator", "creator", "owner")
+        except Exception:
+            allowed = False
+    if not allowed:
+        return await call.answer("فقط مالک و ادمین‌های ربات دسترسی دارند.", show_alert=True)
+
+    if action == "refresh":
+        try:
+            u = await bot.get_chat(req.telegram_user_id)
+            user_name = (u.full_name or u.first_name or "").strip() or str(req.telegram_user_id)
+        except Exception:
+            user_name = str(req.telegram_user_id)
+        from bot.finance import get_playable_balance
+        try:
+            _t, bal, _p = await get_playable_balance(req.telegram_chat_id, req.telegram_user_id)
+        except Exception:
+            bal = None
+        msg = format_withdrawal_admin_text(
+            user_name=user_name,
+            amount=int(req.amount),
+            card=req.card_number,
+            card_name=req.card_name,
+            status=req.status,
+            refreshed=True,
+            balance=bal,
+            settle_kind=getattr(req, "settle_kind", None) or None,
+        )
+        kb = withdrawal_admin_keyboard(req.id, status=req.status)
+        from bot.withdrawal_flow import remember_wd_delivery, broadcast_wd_admin_update
+        if call.message:
+            remember_wd_delivery(req.id, call.message.chat.id, call.message.message_id)
+        await broadcast_wd_admin_update(bot, req.id, msg, kb)
+        return await call.answer("بروزرسانی شد ✅")
+
+    if action == "receipt":
+        if req.status not in ("pending", "done"):
+            return await call.answer("این درخواست دیگر قابل دریافت رسید نیست.", show_alert=True)
+        if req.status == "done" and (getattr(req, "receipt_file_id", "") or "").strip():
+            return await call.answer("رسید این درخواست قبلاً ثبت شده است.", show_alert=True)
+        set_receipt_wait(call.from_user.id, req.id)
+        await call.answer()
+        return await call.message.answer(
+            "📎 رسید را به‌صورت عکس یا فایل ارسال کنید.\n"
+            "ℹ️ ارسال رسید اختیاری است — می‌توانید مستقیم «✅ تأیید» هم بزنید."
+        )
+
+    if action == "message":
+        set_admin_message_wait(call.from_user.id, req.id)
+        await call.answer()
+        return await call.message.answer("💬 پیام موردنظر برای کاربر را بفرستید. برای لغو: لغو")
+
+    if req.status != "pending":
+        return await call.answer("این درخواست قبلاً پردازش شده است.", show_alert=True)
+
+    approver_name = call.from_user.full_name or str(call.from_user.id)
+    try:
+        u = await bot.get_chat(req.telegram_user_id)
+        user_name = (u.full_name or u.first_name or "").strip() or str(req.telegram_user_id)
+    except Exception:
+        user_name = str(req.telegram_user_id)
+
+    if action == "reject":
+        await sync_to_async(WithdrawalRequest.objects.filter(id=req.id).update)(
+            status="cancelled", approved_by=call.from_user.id,
+        )
+        try:
+            await bot.send_message(req.telegram_user_id, "❌ درخواست تسویه شما توسط مدیر رد شد.")
+        except Exception:
+            pass
+        from bot.finance import get_playable_balance
+        try:
+            _t, bal, _p = await get_playable_balance(req.telegram_chat_id, req.telegram_user_id)
+        except Exception:
+            bal = None
+        msg = format_withdrawal_admin_text(
+            user_name=user_name,
+            amount=int(req.amount),
+            card=req.card_number,
+            card_name=req.card_name,
+            status="cancelled",
+            refreshed=True,
+            balance=bal,
+            settle_kind=getattr(req, "settle_kind", None) or None,
+        )
+        kb = withdrawal_admin_keyboard(req.id, status="cancelled")
+        from bot.withdrawal_flow import remember_wd_delivery, broadcast_wd_admin_update
+        if call.message:
+            remember_wd_delivery(req.id, call.message.chat.id, call.message.message_id)
+        await broadcast_wd_admin_update(bot, req.id, msg, kb)
+        return await call.answer("درخواست رد شد.")
+
+    receipt_file_id = (getattr(req, "receipt_file_id", "") or "").strip()
+
+    @sync_to_async
+    def _mark_done():
+        from django.db import transaction
+        with transaction.atomic():
+            row = WithdrawalRequest.objects.select_for_update().filter(
+                id=request_id, status="pending",
+            ).first()
+            if not row:
+                return None
+            row.status = "done"
+            row.approved_by = call.from_user.id
+            row.approved_at = timezone.now()
+            row.completed_at = timezone.now()
+            row.save(update_fields=["status", "approved_by", "approved_at", "completed_at"])
+            return row
+
+    req = await _mark_done()
+    if not req:
+        return await call.answer("این درخواست قبلاً پردازش شده است.", show_alert=True)
+
+    receipt_file_id = (getattr(req, "receipt_file_id", "") or "").strip()
+
+    await decrease_wallet(
+        req.telegram_chat_id,
+        req.telegram_user_id,
+        req.amount,
+        admin_id=call.from_user.id,
+        description="تأیید درخواست تسویه کاربر",
+        receipt_file_id=receipt_file_id or None,
+        receipt_note="withdrawal_receipt" if receipt_file_id else None,
+    )
+    await call.answer("تسویه انجام شد.")
+    try:
+        u = await bot.get_chat(req.telegram_user_id)
+        user_name = (u.full_name or u.first_name or "").strip() or str(req.telegram_user_id)
+    except Exception:
+        user_name = str(req.telegram_user_id)
+    from bot.finance import get_playable_balance
+    try:
+        _t, bal, _p = await get_playable_balance(req.telegram_chat_id, req.telegram_user_id)
+    except Exception:
+        bal = None
+    fresh = format_withdrawal_admin_text(
+        user_name=user_name,
+        amount=int(req.amount),
+        card=req.card_number,
+        card_name=req.card_name,
+        status="done",
+        refreshed=True,
+        balance=bal,
+        settle_kind=getattr(req, "settle_kind", None) or None,
+    )
+    kb_done = withdrawal_admin_keyboard(req.id, status="done")
+    from bot.withdrawal_flow import remember_wd_delivery, broadcast_wd_admin_update
+    if call.message:
+        remember_wd_delivery(req.id, call.message.chat.id, call.message.message_id)
+    await broadcast_wd_admin_update(bot, req.id, fresh, kb_done)
+    try:
+        from bot.pv_dice import _store_member_offer, _pv_member_offer_kb
+        tok = _store_member_offer(int(req.telegram_chat_id), int(req.telegram_user_id))
+        await bot.send_message(
+            req.telegram_user_id,
+            f"✅ درخواست تسویه شما به مبلغ {req.amount:,} انجام شد.\n"
+            f"🛡 مدیر تأییدکننده: {approver_name}",
+            reply_markup=_pv_member_offer_kb(tok),
+        )
+        if receipt_file_id:
+            try:
+                await bot.send_photo(req.telegram_user_id, receipt_file_id, caption="🧾 رسید پرداخت تسویه")
+            except Exception:
+                try:
+                    await bot.send_document(req.telegram_user_id, receipt_file_id, caption="🧾 رسید پرداخت تسویه")
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    group_text = (
+        f"✅ درخواست تسویه کاربر «{user_name}» به مبلغ {req.amount:,} "
+        f"توسط مدیر «{approver_name}» انجام شد."
+    )
+    await bot.send_message(req.telegram_chat_id, group_text)
+    await notify_other_admins(
+        bot,
+        req.telegram_chat_id,
+        call.from_user.id,
+        f"📢 {approver_name} درخواست تسویه کاربر «{user_name}» به مبلغ {req.amount:,} را تأیید کرد.",
+    )
+    if not receipt_file_id:
+        set_receipt_wait(call.from_user.id, req.id)
+        await call.message.answer(
+            "📎 برای ارسال رسید به کاربر (اختیاری) عکس یا فایل بفرستید."
+        )
+
+
+@router.message(F.text, F.func(_waiting_manual_increase))
+async def pv_manual_increase_catch(message: Message, bot: Bot):
+    from bot.hidden_increase import handle_manual_increase_amount_message
+    await handle_manual_increase_amount_message(message, bot)
+
+
+@router.message(F.text, F.func(_waiting_increase_request))
+async def pv_increase_request_catch(message: Message, bot: Bot):
+    from bot.hidden_increase import handle_increase_request_message
+    await handle_increase_request_message(message, bot)
+
+
+@router.message((F.photo | F.document), F.func(_waiting_increase_request))
+async def pv_increase_request_receipt(message: Message, bot: Bot):
+    from bot.hidden_increase import handle_increase_request_receipt
+    await handle_increase_request_receipt(message, bot)
+
+
+@router.callback_query(F.data.startswith("inc_req:approve:"))
+async def cb_approve_increase_request(call: CallbackQuery, bot: Bot):
+    from bot.hidden_increase import (
+        approve_increase_request,
+        apply_increase_request_approval,
+        get_increase_request,
+        increase_request_manual_only_keyboard,
+        format_increase_admin_text,
+        remember_admin_delivery,
+        broadcast_increase_admin_update,
+    )
+
+    request_id = int(call.data.rsplit(":", 1)[-1])
+    req = await get_increase_request(request_id)
+    if not req:
+        return await call.answer("درخواست پیدا نشد.", show_alert=True)
+    allowed = is_owner(req.telegram_chat_id, call.from_user.id) or is_admin(req.telegram_chat_id, call.from_user.id)
+    if not allowed:
+        try:
+            member = await bot.get_chat_member(req.telegram_chat_id, call.from_user.id)
+            allowed = member.status in ("administrator", "creator", "owner")
+        except Exception:
+            allowed = False
+    if not allowed:
+        return await call.answer("فقط مدیران گروه دسترسی دارند.", show_alert=True)
+    req, approved = await approve_increase_request(request_id, call.from_user.id)
+    if not approved:
+        return await call.answer("این درخواست قبلاً تأیید یا منقضی شده است.", show_alert=True)
+    await call.answer("درخواست تأیید شد.", show_alert=True)
+    if call.message:
+        remember_admin_delivery(req.id, call.message.chat.id, call.message.message_id)
+    try:
+        u = await bot.get_chat(req.telegram_user_id)
+        user_name = (u.full_name or u.first_name or "").strip() or str(req.telegram_user_id)
+    except Exception:
+        user_name = str(req.telegram_user_id)
+    msg = format_increase_admin_text(
+        user_name=user_name,
+        amount=int(req.amount),
+        status="approved",
+        refreshed=True,
+    )
+    kb = increase_request_manual_only_keyboard(req.id)
+    await broadcast_increase_admin_update(bot, req.id, msg, kb)
+    await apply_increase_request_approval(
+        bot, req, call.from_user.id, req.amount, call.from_user.id,
+    )
+
+
+@router.callback_query(F.data.startswith("inc_req:refresh:"))
+async def cb_refresh_increase_request(call: CallbackQuery, bot: Bot):
+    from bot.hidden_increase import (
+        get_increase_request,
+        format_increase_admin_text,
+        increase_request_admin_keyboard,
+        remember_admin_delivery,
+        broadcast_increase_admin_update,
+    )
+
+    request_id = int(call.data.rsplit(":", 1)[-1])
+    req = await get_increase_request(request_id)
+    if not req:
+        return await call.answer("درخواست پیدا نشد.", show_alert=True)
+    allowed = is_owner(req.telegram_chat_id, call.from_user.id) or is_admin(req.telegram_chat_id, call.from_user.id)
+    if not allowed:
+        try:
+            member = await bot.get_chat_member(req.telegram_chat_id, call.from_user.id)
+            allowed = member.status in ("administrator", "creator", "owner")
+        except Exception:
+            allowed = False
+    if not allowed:
+        return await call.answer("فقط مدیران گروه دسترسی دارند.", show_alert=True)
+    try:
+        u = await bot.get_chat(req.telegram_user_id)
+        user_name = (u.full_name or u.first_name or "").strip() or str(req.telegram_user_id)
+    except Exception:
+        user_name = str(req.telegram_user_id)
+    msg = format_increase_admin_text(
+        user_name=user_name,
+        amount=int(req.amount),
+        status=req.status,
+        refreshed=True,
+    )
+    kb = increase_request_admin_keyboard(req.id, status=req.status)
+    if call.message:
+        remember_admin_delivery(req.id, call.message.chat.id, call.message.message_id)
+    await broadcast_increase_admin_update(bot, req.id, msg, kb)
+    return await call.answer("بروزرسانی شد ✅")
+
+
+@router.callback_query(F.data.startswith("inc_req:manual:"))
+async def cb_manual_increase_request(call: CallbackQuery, bot: Bot):
+    from bot.helpers import send_private
+    from bot.hidden_increase import (
+        get_increase_request,
+        manual_increase_prompt,
+        pop_manual_increase_wait,
+        set_manual_increase_wait,
+    )
+
+    request_id = int(call.data.rsplit(":", 1)[-1])
+    req = await get_increase_request(request_id)
+    if not req:
+        return await call.answer("درخواست پیدا نشد.", show_alert=True)
+    allowed = is_owner(req.telegram_chat_id, call.from_user.id) or is_admin(req.telegram_chat_id, call.from_user.id)
+    if not allowed:
+        try:
+            member = await bot.get_chat_member(req.telegram_chat_id, call.from_user.id)
+            allowed = member.status in ("administrator", "creator", "owner")
+        except Exception:
+            allowed = False
+    if not allowed:
+        return await call.answer("فقط مدیران گروه دسترسی دارند.", show_alert=True)
+    if req.status == "cancelled":
+        return await call.answer("این درخواست رد شده و قابل افزایش نیست.", show_alert=True)
+    if req.status != "pending":
+        return await call.answer("بعد از تأیید، افزایش دستی ممکن نیست.", show_alert=True)
+
+    set_manual_increase_wait(call.from_user.id, req.id)
+    prompt = manual_increase_prompt(req, already_processed=False)
+    ok = await send_private(bot, call.from_user.id, prompt)
+    if ok:
+        return await call.answer("مبلغ را در پیوی ربات بفرستید.")
+    if call.message and call.message.chat and call.message.chat.type == "private":
+        await call.message.answer(prompt)
+        return await call.answer()
+    pop_manual_increase_wait(call.from_user.id)
+    return await call.answer(
+        "ابتدا ربات را در پیوی استارت کنید تا افزایش دستی انجام شود.",
+        show_alert=True,
+    )
+
+
+@router.callback_query(F.data.regexp(r"^inc_req:(reject|block|message):\d+$"))
+async def cb_manage_increase_request(call: CallbackQuery, bot: Bot):
+    from bot.hidden_increase import get_increase_request, reject_increase_request
+    from bot.finance_ban import set_block_reason_wait
+    action, request_id = call.data.split(":")[1:]
+    req = await get_increase_request(int(request_id))
+    if not req:
+        return await call.answer("درخواست پیدا نشد.", show_alert=True)
+    allowed = is_owner(req.telegram_chat_id, call.from_user.id) or is_admin(req.telegram_chat_id, call.from_user.id)
+    if not allowed:
+        try:
+            member = await bot.get_chat_member(req.telegram_chat_id, call.from_user.id)
+            allowed = member.status in ("administrator", "creator", "owner")
+        except Exception:
+            pass
+    if not allowed:
+        return await call.answer("فقط مدیران گروه دسترسی دارند.", show_alert=True)
+    if action == "message":
+        _INCREASE_ADMIN_MESSAGE[call.from_user.id] = req.id
+        await call.answer()
+        return await call.message.answer("💬 پیام موردنظر برای کاربر را بفرستید. برای لغو: لغو")
+    if action == "block":
+        if req.status != "pending":
+            return await call.answer("این درخواست قبلاً پردازش یا منقضی شده است.", show_alert=True)
+        set_block_reason_wait(call.from_user.id, req.id)
+        await call.answer()
+        return await call.message.answer(
+            "🚫 دلیل بلاک مالی را بنویسید.\n"
+            "مثال: ارسال رسید فیک\n\n"
+            "برای انصراف: لغو"
+        )
+    if req.status != "pending":
+        return await call.answer("این درخواست قبلاً پردازش یا منقضی شده است.", show_alert=True)
+    req, changed = await reject_increase_request(req.id, call.from_user.id)
+    if not changed:
+        return await call.answer("این درخواست قبلاً پردازش شده است.", show_alert=True)
+    user_text = "❌ درخواست افزایش موجودی شما توسط مدیر رد شد."
+    try:
+        await bot.send_message(req.telegram_user_id, user_text)
+    except Exception:
+        pass
+    try:
+        u = await bot.get_chat(req.telegram_user_id)
+        user_name = (u.full_name or u.first_name or "").strip() or str(req.telegram_user_id)
+    except Exception:
+        user_name = str(req.telegram_user_id)
+    from bot.hidden_increase import (
+        format_increase_admin_text, increase_request_admin_keyboard,
+        remember_admin_delivery, broadcast_increase_admin_update,
+    )
+    msg = format_increase_admin_text(
+        user_name=user_name,
+        amount=int(req.amount),
+        status="cancelled",
+        refreshed=True,
+    )
+    kb = increase_request_admin_keyboard(req.id, status="cancelled")
+    if call.message:
+        remember_admin_delivery(req.id, call.message.chat.id, call.message.message_id)
+    await broadcast_increase_admin_update(bot, req.id, msg, kb)
+    return await call.answer("درخواست پردازش شد.", show_alert=True)
+
+
+def _waiting_increase_block_reason(message: Message) -> bool:
+    from bot.finance_ban import is_waiting_block_reason
+    return bool(message.from_user and is_waiting_block_reason(message.from_user.id))
+
+
+@router.message(F.text, F.func(_waiting_increase_block_reason))
+async def pv_increase_block_reason(message: Message, bot: Bot):
+    from bot.finance_ban import (
+        pop_block_reason_wait, set_block_reason_wait, ban_finance,
+        format_group_finance_ban_announce, FINANCE_BAN_USER_TEXT,
+    )
+    from bot.hidden_increase import (
+        get_increase_request, reject_increase_request,
+        format_increase_admin_text, increase_request_admin_keyboard,
+        broadcast_increase_admin_update,
+    )
+
+    request_id = pop_block_reason_wait(message.from_user.id)
+    raw = (message.text or "").strip()
+    if raw in ("لغو", "انصراف", "cancel"):
+        return await message.answer("❌ بلاک لغو شد.")
+    if len(raw) < 2:
+        set_block_reason_wait(message.from_user.id, request_id)
+        return await message.answer("⚠️ دلیل معتبر نیست. دوباره بنویسید یا «لغو» بزنید.")
+
+    req = await get_increase_request(request_id)
+    if not req:
+        return await message.answer("❌ درخواست پیدا نشد.")
+    if req.status != "pending":
+        return await message.answer("⚠️ این درخواست قبلاً پردازش شده است.")
+
+    req, changed = await reject_increase_request(req.id, message.from_user.id)
+    if not changed:
+        return await message.answer("⚠️ این درخواست قبلاً پردازش شده است.")
+
+    ban = await ban_finance(req.telegram_chat_id, req.telegram_user_id, message.from_user.id, raw)
+    try:
+        await bot.send_message(
+            req.telegram_user_id,
+            f"{FINANCE_BAN_USER_TEXT}\n\n📝 دلیل: {ban['reason']}",
+        )
+    except Exception:
+        pass
+
+    user_name = ""
+    try:
+        u = await bot.get_chat(req.telegram_user_id)
+        user_name = (u.full_name or u.first_name or "").strip() or str(req.telegram_user_id)
+    except Exception:
+        user_name = str(req.telegram_user_id)
+    admin_name = (message.from_user.full_name or message.from_user.first_name or "").strip() or str(message.from_user.id)
+
+    msg = format_increase_admin_text(
+        user_name=user_name,
+        amount=int(req.amount),
+        status="cancelled",
+        refreshed=True,
+    )
+    kb = increase_request_admin_keyboard(req.id, status="cancelled")
+    await broadcast_increase_admin_update(bot, req.id, msg, kb)
+
+    announce = format_group_finance_ban_announce(
+        user_display=user_name,
+        reason=ban["reason"],
+        admin_display=admin_name,
+    )
+    try:
+        await bot.send_message(req.telegram_chat_id, announce)
+    except Exception:
+        pass
+    return await message.answer(
+        f"✅ کاربر بلاک مالی شد.\n📝 دلیل: {ban['reason']}\n📢 در گروه اعلام شد."
+    )
+
+
+@router.message(F.text, F.func(lambda m: bool(m.from_user) and m.from_user.id in _INCREASE_ADMIN_MESSAGE))
+async def pv_increase_admin_message(message: Message, bot: Bot):
+    from bot.hidden_increase import get_increase_request
+    request_id = _INCREASE_ADMIN_MESSAGE.pop(message.from_user.id, None)
+    if (message.text or "").strip() in ("لغو", "انصراف", "cancel"):
+        return await message.answer("❌ ارسال پیام لغو شد.")
+    req = await get_increase_request(request_id)
+    if not req:
+        return await message.answer("❌ درخواست پیدا نشد.")
+    try:
+        await bot.send_message(req.telegram_user_id, f"💬 پیام مدیر درباره درخواست افزایش:\n\n{message.text}")
+        return await message.answer("✅ پیام برای کاربر ارسال شد.")
+    except Exception:
+        return await message.answer("⚠️ ارسال پیام به کاربر ناموفق بود.")
+
+
+def _waiting_wd_admin_message(message: Message) -> bool:
+    from bot.withdrawal_flow import is_waiting_admin_message
+    return bool(message.from_user and is_waiting_admin_message(message.from_user.id))
+
+
+@router.message(F.text, F.func(_waiting_wd_admin_message))
+async def pv_withdrawal_admin_message(message: Message, bot: Bot):
+    from asgiref.sync import sync_to_async
+    from account.models import WithdrawalRequest
+    from bot.withdrawal_flow import pop_admin_message_wait
+
+    request_id = pop_admin_message_wait(message.from_user.id)
+    if (message.text or "").strip() in ("لغو", "انصراف", "cancel"):
+        return await message.answer("❌ ارسال پیام لغو شد.")
+    req = await sync_to_async(WithdrawalRequest.objects.filter(id=request_id).first)()
+    if not req:
+        return await message.answer("❌ درخواست پیدا نشد.")
+    try:
+        await bot.send_message(
+            req.telegram_user_id,
+            f"💬 پیام مدیر درباره درخواست تسویه:\n\n{message.text}",
+        )
+        return await message.answer("✅ پیام برای کاربر ارسال شد.")
+    except Exception:
+        return await message.answer("⚠️ ارسال پیام به کاربر ناموفق بود.")
+
+
+def _waiting_challenge_input(message: Message) -> bool:
+    from bot.challenge_panel import is_waiting_challenge_input
+    return bool(message.from_user and is_waiting_challenge_input(message.from_user.id))
+
+
+@router.message(F.text, F.func(_waiting_challenge_input))
+async def pv_challenge_input(message: Message, bot: Bot):
+    from bot.challenge_panel import handle_challenge_text
+    await handle_challenge_text(message, bot)
 
 
 @router.message(F.text, F.func(_waiting_increase_amount))
@@ -601,6 +1337,82 @@ async def _show_groups_list(call: CallbackQuery, bot: Bot, edit: bool = True):
 async def cb_pv_group_settings(call: CallbackQuery, bot: Bot):
     await call.answer()
     await _show_groups_list(call, bot, edit=True)
+
+
+@router.callback_query(F.data == "pv:finance")
+async def cb_pv_finance(call: CallbackQuery, bot: Bot):
+    await call.answer()
+    from bot.pv_finance_panel import prompt_group_id
+    await prompt_group_id(bot, call.from_user.id)
+
+
+@router.callback_query(F.data.startswith("pf:"))
+async def cb_pv_finance_panel(call: CallbackQuery, bot: Bot):
+    from bot.pv_finance_panel import handle_finance_panel_callback, set_finance_group, get_finance_group
+    from bot import cache as bot_cache
+    from bot.panel_ui import can_see_fee, can_see_sensitive_finance
+    from bot.cache_manager import is_owner, is_admin
+    from bot.constants import CREATOR_USER_ID
+
+    uid = call.from_user.id
+    chat = call.message.chat if call.message else None
+    group_id = get_finance_group(uid) or bot_cache.PV_PANEL_GROUP.get(uid)
+    if chat and getattr(chat, "type", "") in ("group", "supergroup"):
+        group_id = chat.id
+        set_finance_group(uid, group_id)
+    elif group_id:
+        set_finance_group(uid, group_id)
+
+    data = call.data or ""
+    if group_id and data in ("pf:oa", "pf:oy", "pf:oc", "pf:of"):
+        owner = is_owner(group_id, uid) or uid == CREATOR_USER_ID
+        from asgiref.sync import sync_to_async
+        @sync_to_async
+        def _fee_hid(cid):
+            from account.models import TelegramGroup
+            return bool(TelegramGroup.objects.filter(telegram_chat_id=cid).values_list("fee_hidden", flat=True).first())
+        @sync_to_async
+        def _pv_fin(cid):
+            from account.models import TelegramGroup
+            return bool(TelegramGroup.objects.filter(telegram_chat_id=cid).values_list("pv_admin_finance_enabled", flat=True).first())
+        fee_hid = await _fee_hid(group_id)
+        if data == "pf:of" and not can_see_fee(uid, group_id, is_owner_flag=owner, fee_hidden=fee_hid):
+            return await call.answer("حق واسطه مخفی است.", show_alert=True)
+        see_sens = can_see_sensitive_finance(uid, group_id, is_owner_flag=owner)
+        pv_ok = owner or (is_admin(group_id, uid) and await _pv_fin(group_id) and see_sens)
+        if data in ("pf:oa", "pf:oy", "pf:oc") and not (see_sens and pv_ok):
+            return await call.answer("این بخش در دسترس نیست.", show_alert=True)
+
+    await handle_finance_panel_callback(call, bot)
+
+
+@router.callback_query(F.data.startswith("ch:"))
+async def cb_challenge_panel(call: CallbackQuery, bot: Bot):
+    from bot.challenge_panel import handle_challenge_callback
+    await handle_challenge_callback(call, bot)
+
+
+@router.message(
+    F.text.regexp(r"^(?:شناسه\s*(?:گروه|گپ)?|گروه|group|chat[\s_]?id|id)\s*:?\s*-?\d{6,}$")
+    | F.text.regexp(r"^-\d{6,}$")
+)
+async def pv_group_id_finance(message: Message, bot: Bot):
+    """ارسال شناسه گروه در پیوی → پنل مالی."""
+    # کانال اجباری سازنده اولویت دارد
+    if is_creator(message.from_user.id) and _CREATOR_STATE.get(message.from_user.id) == "await_channel_id":
+        return
+    from bot.pv_finance_panel import handle_group_id_message
+    await handle_group_id_message(message, bot)
+
+
+@router.message(F.text.in_([
+    "افزایش", "افزایش موجودی", "درخواست افزایش", "درخواست افزایش موجودی",
+    "تسویه", "تسویه حساب", "درخواست تسویه", "درخواست تسویه حساب",
+]))
+async def pv_member_increase_settle(message: Message, bot: Bot):
+    """در پیوی: انتخاب گپ سپس ادامه درخواست افزایش/تسویه."""
+    from bot.pv_finance_panel import try_handle_member_request_text
+    await try_handle_member_request_text(bot, message.from_user.id, message.text or "")
 
 
 @router.callback_query(F.data == "gs:list")
@@ -988,6 +1800,27 @@ async def cb_creator_panel(call: CallbackQuery, bot: Bot):
         _CREATOR_STATE[call.from_user.id] = "await_channel_link"
         await call.message.answer("لینک عمومی کانال یا @username را بفرستید. ربات باید در کانال مقصد ادمین باشد.")
         return await call.answer("منتظر لینک...")
+
+    if action == "sens:toggle":
+        from bot.site_config import is_admin_sensitive_hidden, db_set_admin_sensitive_hidden
+        new_state = not is_admin_sensitive_hidden()
+        await db_set_admin_sensitive_hidden(new_state)
+        name = call.from_user.first_name or "سازنده"
+        try:
+            await call.message.edit_text(
+                _creator_panel_text(name),
+                reply_markup=_creator_panel_kb(),
+                parse_mode="HTML",
+            )
+        except Exception:
+            await call.message.answer(
+                _creator_panel_text(name),
+                reply_markup=_creator_panel_kb(),
+                parse_mode="HTML",
+            )
+        return await call.answer(
+            "روشن شد — حساس‌ها از ادمین مخفی است" if new_state else "خاموش شد — ادمین‌ها دوباره می‌بینند"
+        )
 
     if action == "cache:stats":
         joined_cache = len(cache.FORCED_JOIN_MEMBER_CHECK)
@@ -1430,6 +2263,22 @@ async def cb_creator_panel(call: CallbackQuery, bot: Bot):
         return await call.answer()
 
     # ─── بکاپ / بازیابی ─────────────────────────────────────────────────────
+    if action == "backup:interval":
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [Btn(text="هر ۱ ساعت", callback_data="cr:backup:setinterval:1"), Btn(text="هر ۳ ساعت", callback_data="cr:backup:setinterval:3")],
+            [Btn(text="هر ۶ ساعت", callback_data="cr:backup:setinterval:6")],
+        ])
+        await call.message.answer("فاصله بکاپ خودکار را انتخاب کنید:", reply_markup=kb)
+        return await call.answer()
+
+    if action.startswith("backup:setinterval:"):
+        hours = int(action.rsplit(":", 1)[-1])
+        from bot.backup_schedule import set_backup_interval
+        if not set_backup_interval(hours):
+            return await call.answer("زمان‌بندی هنوز آماده نیست؛ دوباره تلاش کنید.", show_alert=True)
+        await call.message.answer(f"✅ بکاپ خودکار هر {hours} ساعت تنظیم شد.")
+        return await call.answer()
+
     if action == "backup:now":
         await call.answer("در حال ساخت دامپ…")
         await call.message.answer("⏳ در حال ساخت بکاپ دیتابیس… لطفاً صبر کنید.", parse_mode="HTML")
@@ -1530,14 +2379,17 @@ async def cmd_set_forced_channel(message: Message, bot: Bot):
 
 @router.message(F.text.regexp(r"^-100\d{6,}$"))
 async def cmd_set_forced_channel_by_state(message: Message, bot: Bot):
-    if not is_creator(message.from_user.id):
+    # اگر سازنده منتظر ثبت کانال اجباری است
+    if is_creator(message.from_user.id) and _CREATOR_STATE.get(message.from_user.id) == "await_channel_id":
+        _CREATOR_STATE.pop(message.from_user.id, None)
+        channel_id = int(message.text.strip())
+        ok, text = await _setup_channel(bot, channel_id)
+        return await message.answer(text, parse_mode="HTML")
+
+    # در غیر این صورت: شناسه گروه → پنل مالی
+    from bot.pv_finance_panel import handle_group_id_message
+    if await handle_group_id_message(message, bot):
         return
-    if _CREATOR_STATE.get(message.from_user.id) != "await_channel_id":
-        return
-    _CREATOR_STATE.pop(message.from_user.id, None)
-    channel_id = int(message.text.strip())
-    ok, text = await _setup_channel(bot, channel_id)
-    await message.answer(text, parse_mode="HTML")
 
 
 @router.message(F.text, F.func(lambda m: bool(m.from_user) and _CREATOR_STATE.get(m.from_user.id) == "await_forced_join_schedule"))

@@ -39,7 +39,8 @@ _FEE_STANDALONE = {
 
 
 def _fee_strip_delivery(parts: list[str]) -> tuple[list[str], str]:
-    delivery = "group"
+    # تمام گزارش‌های حق واسطه فقط در پیوی تحویل داده می‌شوند.
+    delivery = "pm"
     if parts and parts[-1] in _FEE_PM_SUFFIXES:
         delivery = "pm"
         parts = parts[:-1]
@@ -289,7 +290,7 @@ async def send_fee_report(
     group_msg_id: int,
     mode: str,
     *,
-    delivery: str = "group",
+    delivery: str = "pm",
     admin_target: int | None = None,
 ) -> bool:
     from bot.cache_manager import is_admin, is_owner

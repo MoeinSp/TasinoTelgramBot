@@ -15,6 +15,7 @@ from bot.helpers import send_private
 from bot.tx_reports import build_tx_report_text, tx_report_kb
 
 PER_PAGE = 5
+GROUP_LIST_PER_PAGE = 25
 
 _GROUP_SUFFIXES = frozenset({
     "همون گروه", "همین گروه", "گروه", "در گروه",
@@ -24,8 +25,8 @@ _PM_SUFFIXES = frozenset({
 })
 
 
-def parse_accounts_command(text: str) -> str | None:
-    """'pm' | 'group' | None — حساب ها → گروه؛ حساب ها پیوی → پیوی."""
+def parse_accounts_command(text: str) -> tuple[str, int] | None:
+    """('pm'|'group', page) | None — حساب ها / حساب ها 2 / حساب ها پیوی."""
     if not text:
         return None
     t = text.strip()
@@ -38,12 +39,29 @@ def parse_accounts_command(text: str) -> str | None:
     else:
         return None
     if not rest:
-        return "group"
+        return ("group", 1)
     if rest in _PM_SUFFIXES:
-        return "pm"
+        return ("pm", 1)
     if rest in _GROUP_SUFFIXES:
-        return "group"
-    return None
+        return ("group", 1)
+
+    page = 1
+    mode = "group"
+    tokens = rest.replace("صفحه", " ").split()
+    if not tokens:
+        return ("group", 1)
+    for tok in tokens:
+        if tok in _PM_SUFFIXES:
+            mode = "pm"
+        elif tok in _GROUP_SUFFIXES:
+            mode = "group"
+        elif tok.isdigit():
+            page = max(1, int(tok))
+        else:
+            return None
+    if mode == "pm":
+        return ("pm", 1)
+    return ("group", page)
 
 # انتظار مبلغ تسویه دلخواه: user_id → dict
 _amount_wait: dict[int, dict] = {}
@@ -202,9 +220,9 @@ async def build_accounts_text(
     total_balance = sum(int(a["point"] or 0) for a in accounts)
 
     lines = [
-        "📒 لیست حساب‌های فعال گروه",
+        "📒 <b>حساب‌های فعال</b>",
         "━━━━━━━━━━━━━━━━━━",
-        f"📄 صفحه {page} از {total_pages}",
+        f"صفحه {page} از {total_pages}",
     ]
     if group_name:
         lines.append(f"🏷 گروه: {html.escape(group_name)}")

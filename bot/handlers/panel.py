@@ -3,6 +3,7 @@
 """
 import logging
 
+from asgiref.sync import sync_to_async
 from aiogram import Router, F, Bot
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton as Btn
 
@@ -10,7 +11,7 @@ from bot import cache
 from bot.cache_manager import has_privilege, is_owner
 from bot.constants import CREATOR_USER_ID
 from bot.panel_keyboards import (
-    get_static_panel, panel_main, is_live_page,
+    get_static_panel, panel_main, panel_home_text, is_live_page,
     locks_panel_text, locks_panel_kb,
     settings_panel_text, settings_panel_kb,
     game_panel_text, game_panel_kb,
@@ -18,11 +19,62 @@ from bot.panel_keyboards import (
     fun_panel_text, fun_panel_kb,
     manage_panel_text, manage_panel_kb,
     finance_panel_text, finance_panel_kb,
-    panel_header, FUN_CMD_SET,
+    challenges_panel_text, challenges_panel_kb,
+    owner_panel_text, owner_panel_kb,
+    FUN_CMD_SET,
 )
-from bot.group_help import PAGE_MAIN
+from bot.panel_ui import toggle_label, can_see_sensitive_finance, can_see_fee, is_creator
 
 router = Router()
+
+
+@sync_to_async
+def _fee_is_hidden(chat_id: int) -> bool:
+    from account.models import TelegramGroup
+    return bool(TelegramGroup.objects.filter(telegram_chat_id=chat_id).values_list("fee_hidden", flat=True).first())
+
+
+@sync_to_async
+def _pv_admin_finance(chat_id: int) -> bool:
+    from account.models import TelegramGroup
+    return bool(
+        TelegramGroup.objects.filter(telegram_chat_id=chat_id)
+        .values_list("pv_admin_finance_enabled", flat=True)
+        .first()
+    )
+
+
+@sync_to_async
+def _set_fee_hidden(chat_id: int, hidden: bool) -> bool:
+    from account.models import TelegramGroup
+    g = TelegramGroup.objects.filter(telegram_chat_id=chat_id).first()
+    if not g:
+        return False
+    g.fee_hidden = bool(hidden)
+    g.save(update_fields=["fee_hidden"])
+    return g.fee_hidden
+
+
+@sync_to_async
+def _toggle_pv_admin_finance_db(chat_id: int) -> bool | None:
+    from account.models import TelegramGroup
+    g = TelegramGroup.objects.filter(telegram_chat_id=chat_id).first()
+    if not g:
+        return None
+    g.pv_admin_finance_enabled = not bool(g.pv_admin_finance_enabled)
+    g.save(update_fields=["pv_admin_finance_enabled"])
+    return g.pv_admin_finance_enabled
+
+
+@sync_to_async
+def _member_balance(chat_id: int, user_id: int) -> int:
+    from account.models import TelegramGroupMember
+    m = TelegramGroupMember.objects.filter(
+        telegram_chat_id=chat_id, telegram_user_id=user_id,
+    ).first()
+    return int(m.point or 0) if m else 0
+
+
 _log = logging.getLogger(__name__)
 _GROUP_JOIN_STATE: dict[int, int] = {}
 
@@ -32,6 +84,7 @@ _TOGGLE_PAGE = {
     "antiraid": "settings", "bot": "settings",
     "speaker": "game", "tg_emoji": "game", "dice_option": "game",
     "group_lock": "locks",
+    "fee_hidden": "owner", "pv_admin_finance": "owner",
 }
 
 
@@ -77,9 +130,27 @@ async def _fetch_locks(chat_id: int) -> dict:
     return locks
 
 
-async def _group_snapshot(chat_id: int) -> dict:
+async def _group_snapshot(chat_id: int, user_id: int | None = None) -> dict:
     from bot.helpers import db_get_group_fee, db_get_group_theme, db_get_group_commands
+    from bot.cache_manager import is_admin
+
     enabled = await db_get_group_commands(chat_id)
+    fee_hidden = await _fee_is_hidden(chat_id)
+    owner = bool(user_id and (is_owner(chat_id, user_id) or is_creator(user_id)))
+    admin = bool(user_id and (is_admin(chat_id, user_id) or owner))
+    pv_fin = await _pv_admin_finance(chat_id)
+    see_sens = True
+    see_fee = True
+    if user_id:
+        see_sens = can_see_sensitive_finance(user_id, chat_id, is_owner_flag=owner)
+        see_fee = can_see_fee(user_id, chat_id, is_owner_flag=owner, fee_hidden=fee_hidden)
+    if owner:
+        can_manage_finance = True
+    elif admin and pv_fin and see_sens:
+        can_manage_finance = True
+    else:
+        can_manage_finance = False
+    bal = await _member_balance(chat_id, user_id) if user_id else 0
     return {
         "bot": chat_id not in cache.OFF_GROUP,
         "welcome": chat_id not in cache.WELCOME_DISABLED,
@@ -93,12 +164,20 @@ async def _group_snapshot(chat_id: int) -> dict:
         "night": cache.NIGHT_MODE.get(chat_id),
         "theme": await db_get_group_theme(chat_id),
         "fee": await db_get_group_fee(chat_id),
+        "fee_hidden": fee_hidden,
+        "pv_admin_finance": pv_fin,
         "enabled_commands": set(enabled),
+        "is_owner": owner,
+        "is_admin": admin,
+        "can_manage_finance": can_manage_finance,
+        "can_see_sensitive": see_sens,
+        "can_see_fee": see_fee,
+        "balance": bal,
     }
 
 
-async def _render_live_panel(code: str, chat_id: int):
-    snap = await _group_snapshot(chat_id)
+async def _render_live_panel(code: str, chat_id: int, user_id: int | None = None):
+    snap = await _group_snapshot(chat_id, user_id)
     if code in ("locks", "1", "1.1"):
         locks = await _fetch_locks(chat_id)
         return locks_panel_text(locks, snap["group_lock"]), locks_panel_kb(locks, snap["group_lock"])
@@ -115,16 +194,22 @@ async def _render_live_panel(code: str, chat_id: int):
     if code == "manage":
         return manage_panel_text(), manage_panel_kb()
     if code == "finance":
-        return finance_panel_text(), finance_panel_kb()
+        return finance_panel_text(snap), finance_panel_kb(snap)
+    if code == "challenges":
+        return challenges_panel_text(), challenges_panel_kb()
+    if code == "owner":
+        if not snap.get("is_owner"):
+            return "❌ فقط مالک گروه به این بخش دسترسی دارد.", panel_main(is_owner=False)
+        return owner_panel_text(snap), owner_panel_kb(snap)
     if code == "group_join":
         from bot.group_forced_join import get_group_target
         cfg = await get_group_target(chat_id)
-        status = f"🟢 {cfg['title']}\n{cfg['link']}" if cfg else "⚫ تنظیم نشده"
-        text = f"🔗 <b>جوین اجباری گروه</b>\n\n{status}\n\nهر گروه حداکثر یک لینک دارد؛ جوین سازنده جداگانه اعمال می‌شود."
+        status = f"روشن · {cfg['title']}\n{cfg['link']}" if cfg else "خاموش · تنظیم نشده"
+        text = f"🔗 <b>جوین اجباری گروه</b>\n\n{status}\n\nهر گروه حداکثر یک لینک دارد."
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [Btn(text="➕ تنظیم/جایگزینی لینک", callback_data="gfj:set")],
-            [Btn(text="🗑 حذف لینک", callback_data="gfj:clear")],
-            [Btn(text="🔙 بازگشت", callback_data="p:manage")],
+            [Btn(text="تنظیم/جایگزینی لینک", callback_data="gfj:set")],
+            [Btn(text="حذف لینک", callback_data="gfj:clear")],
+            [Btn(text="‹ بازگشت", callback_data="p:manage")],
         ])
         return text, kb
     return None, None
@@ -161,32 +246,36 @@ async def cb_panel(call: CallbackQuery):
         await call.answer()
         return
 
+    if code == "challenges":
+        from bot.pv_finance_panel import set_finance_group
+        from bot.challenge_panel import open_challenge_home
+        set_finance_group(user_id, chat_id)
+        await call.answer()
+        await open_challenge_home(call.bot, user_id, chat_id)
+        return
+
     if code in ("0", ""):
-        text, kb = PAGE_MAIN, panel_main(pv=is_pv)
+        snap = await _group_snapshot(chat_id, user_id)
+        role = "مالک" if snap["is_owner"] else ("ادمین" if snap["is_admin"] else "مدیر")
+        gname = ""
         if is_pv:
-            title = cache.PV_PANEL_GROUP.get(user_id)
-            # نام گروه را اگر در کش پیام قبلی بود نگه نمی‌داریم؛ از DB می‌گیریم
-            from asgiref.sync import sync_to_async
             @sync_to_async
             def _gname(cid):
                 from account.models import TelegramGroup
                 g = TelegramGroup.objects.filter(telegram_chat_id=cid).first()
                 return (g.name if g and g.name else None) or str(cid)
             gname = await _gname(chat_id)
-            text = (
-                f"⚙️ <b>پنل تنظیمات</b>\n"
-                f"🏷 گروه: <b>{gname}</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"{PAGE_MAIN}"
-            )
+        text = panel_home_text(group_name=gname, role=role)
+        kb = panel_main(pv=is_pv, is_owner=snap["is_owner"])
     elif is_live_page(code) or code == "group_join":
-        text, kb = await _render_live_panel(code, chat_id)
+        text, kb = await _render_live_panel(code, chat_id, user_id)
         if text is None:
             await call.answer("❌ بخش یافت نشد", show_alert=True)
             return
         kb = _with_pv_nav(kb, is_pv)
     else:
-        text, kb = get_static_panel(code, pv=is_pv)
+        snap = await _group_snapshot(chat_id, user_id)
+        text, kb = get_static_panel(code, pv=is_pv, is_owner=snap["is_owner"])
         if text is None:
             await call.answer("❌ بخش یافت نشد", show_alert=True)
             return
@@ -327,7 +416,7 @@ async def cb_cmd(call: CallbackQuery, bot: Bot):
     # toggle قفل تکی
     if action.startswith("lock_toggle_"):
         toast = await _toggle_lock(action[12:], chat_id)
-        text, kb = await _render_live_panel("locks", chat_id)
+        text, kb = await _render_live_panel("locks", chat_id, user_id)
         kb = _with_pv_nav(kb, is_pv)
         try:
             await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -346,13 +435,48 @@ async def cb_cmd(call: CallbackQuery, bot: Bot):
         from bot.helpers import db_toggle_group_command
         on = await db_toggle_group_command(chat_id, cmd_name)
         page = "fun" if cmd_name in FUN_CMD_SET else "games"
-        text, kb = await _render_live_panel(page, chat_id)
+        text, kb = await _render_live_panel(page, chat_id, user_id)
         kb = _with_pv_nav(kb, is_pv)
         try:
             await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
         except Exception as e:
             _log.error("cmd toggle refresh: %s", e)
-        await call.answer(f"{'🟢' if on else '⚫'} {cmd_name}")
+        await call.answer(toggle_label(on, cmd_name))
+        return
+
+    if action == "tgl_fee_hidden":
+        if not is_owner(chat_id, user_id) and not is_creator(user_id):
+            await call.answer("فقط مالک", show_alert=True)
+            return
+        cur = await _fee_is_hidden(chat_id)
+        await _set_fee_hidden(chat_id, not cur)
+        text, kb = await _render_live_panel("owner", chat_id, user_id)
+        kb = _with_pv_nav(kb, is_pv)
+        try:
+            await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            pass
+        await call.answer(toggle_label(not cur, "مخفی حق واسطه"))
+        return
+
+    if action == "tgl_pv_admin_finance":
+        if not is_owner(chat_id, user_id) and not is_creator(user_id):
+            await call.answer("فقط مالک", show_alert=True)
+            return
+        new_state = await _toggle_pv_admin_finance_db(chat_id)
+        text, kb = await _render_live_panel("owner", chat_id, user_id)
+        kb = _with_pv_nav(kb, is_pv)
+        try:
+            await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            pass
+        await call.answer(toggle_label(bool(new_state), "دسترسی مالی ادمین"))
+        return
+
+    if action == "open_finance_pv":
+        from bot.pv_finance_panel import open_finance_panel
+        ok = await open_finance_panel(bot, user_id, chat_id)
+        await call.answer("پنل مالی در پیوی ارسال شد." if ok else "پیوی را باز کنید.", show_alert=not ok)
         return
 
     # toggle ویژگی‌ها (خوشامد، کپچا، ...)
@@ -360,7 +484,7 @@ async def cb_cmd(call: CallbackQuery, bot: Bot):
         key = action[4:]
         toast = await _toggle_feature(key, chat_id, bot)
         page = _TOGGLE_PAGE.get(key, "settings")
-        text, kb = await _render_live_panel(page, chat_id)
+        text, kb = await _render_live_panel(page, chat_id, user_id)
         kb = _with_pv_nav(kb, is_pv)
         try:
             await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -371,7 +495,6 @@ async def cb_cmd(call: CallbackQuery, bot: Bot):
 
     text = await _execute(action, chat_id, user_id, bot)
     if text:
-        # در پیوی نتیجه را در همان چت نشان بده؛ در گروه به خود گروه
         dest = call.message.chat.id if is_pv else chat_id
         reply_to = call.message.message_id if not is_pv else None
         await bot.send_message(dest, text, reply_to_message_id=reply_to, parse_mode="HTML")
@@ -504,7 +627,7 @@ async def _toggle_feature(key: str, chat_id: int, bot: Bot) -> str:
     else:
         return "❌"
 
-    return f"{'🟢' if on else '⚫'} {label}"
+    return toggle_label(on, label)
 
 
 async def _execute(action: str, chat_id: int, user_id: int, bot: Bot) -> str:
@@ -614,48 +737,52 @@ async def _execute(action: str, chat_id: int, user_id: int, bot: Bot) -> str:
         return "📚 یادگیری:\n\n" + "\n".join(lines)
 
     if action == "group_status":
-        snap = await _group_snapshot(chat_id)
+        snap = await _group_snapshot(chat_id, user_id)
         cfg = cache.ANTI_FLOOD_SETTINGS.get(chat_id, {"limit": 5, "window": 10})
         timeout = cache.CAPTCHA_TIMEOUT.get(chat_id, 180)
         night = snap.get("night")
+        fee_txt = f"{snap['fee']}٪" if snap.get("can_see_fee") else "مخفی"
         return (
             "📊 <b>جزئیات گروه</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"🤖 ربات: {'🟢 فعال' if snap['bot'] else '⚫ خاموش'}\n"
-            f"🔐 قفل کل: {'🔒 بسته' if snap['group_lock'] else '🔓 باز'}\n"
-            f"🎉 خوشامد: {'🟢' if snap['welcome'] else '⚫'}\n"
-            f"🔐 کپچا: {'🟢' if snap['captcha'] else '⚫'}"
+            f"ربات: {'روشن' if snap['bot'] else 'خاموش'}\n"
+            f"قفل کل: {'روشن' if snap['group_lock'] else 'خاموش'}\n"
+            f"خوشامد: {'روشن' if snap['welcome'] else 'خاموش'}\n"
+            f"کپچا: {'روشن' if snap['captcha'] else 'خاموش'}"
             + (f" ({timeout}s)" if snap['captcha'] else "") + "\n"
-            f"🚫 فلود: {'🟢' if snap['flood'] else '⚫'}"
+            f"فلود: {'روشن' if snap['flood'] else 'خاموش'}"
             + (f" — {cfg['limit']}/{cfg['window']}s" if snap['flood'] else "") + "\n"
-            f"🚨 ضد رید: {'🟢' if snap['antiraid'] else '⚫'}\n"
-            f"🔊 سخنگو: {'🟢' if snap['speaker'] else '⚫'}\n"
-            f"🎮 ایموجی: {'🟢' if snap['tg_emoji'] else '⚫'}\n"
-            f"🎲 تاس متوالی: {'🟢' if snap['dice_option'] else '⚫'}\n"
-            f"🌙 شب: {f'{night[0]}:00–{night[1]}:00' if night else '⚫ خاموش'}\n"
-            f"🎨 تم تاس: {snap['theme']}\n"
-            f"💹 حق واسطه: {snap['fee']}٪"
+            f"ضد رید: {'روشن' if snap['antiraid'] else 'خاموش'}\n"
+            f"سخنگو: {'روشن' if snap['speaker'] else 'خاموش'}\n"
+            f"ایموجی: {'روشن' if snap['tg_emoji'] else 'خاموش'}\n"
+            f"تاس متوالی: {'روشن' if snap['dice_option'] else 'خاموش'}\n"
+            f"شب: {f'{night[0]}:00–{night[1]}:00' if night else 'خاموش'}\n"
+            f"تم تاس: {snap['theme']}\n"
+            f"حق واسطه: {fee_txt}"
         )
 
     if action == "my_balance":
         member = await db_get_member(chat_id, user_id)
-        return f"👛 موجودی شما: {(member.point if member else 0):,} تومان"
+        return f"موجودی شما: {(member.point if member else 0):,} واحد"
 
     if action == "accounts":
-        return "📊 برای لیست حساب‌ها بنویس:  حساب ها"
+        return "برای لیست حساب‌ها از بخش مالی → حساب اعضا استفاده کنید."
 
     if action == "report":
-        return "📑 برای گزارش بنویس:  گزارش"
+        return "برای گزارش از بخش مالی → گزارش تراکنش استفاده کنید."
 
     if action == "settle_me":
-        return "🤝 برای تسویه بنویس:  تسویه"
+        return "برای تسویه از بخش مالی → درخواست تسویه استفاده کنید."
 
     if action == "card_show":
-        return "💳 برای کارت بنویس:  شماره کارت"
+        return "کارت مالک: در گروه بنویسید <code>شماره کارت</code>"
 
     if action == "fee_show":
+        fee_hidden = await _fee_is_hidden(chat_id)
+        if not can_see_fee(user_id, chat_id, fee_hidden=fee_hidden):
+            return "❌ حق واسطه این گروه مخفی است و فقط مالک به آن دسترسی دارد."
         fee = await db_get_group_fee(chat_id)
-        return f"💹 حق واسطه: {fee}٪\n\nتغییر: <code>حق واسطه 10</code>"
+        return f"حق واسطه: {fee}٪\n\nتغییر: <code>حق واسطه 10</code>"
 
     if action == "dice_theme":
         theme = await db_get_group_theme(chat_id)

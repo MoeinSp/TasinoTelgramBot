@@ -92,10 +92,11 @@ async def resolve_target(bot: Bot, raw: str) -> JoinTarget:
 async def missing_targets(bot: Bot, group_id: int, user_id: int) -> tuple[list[JoinTarget], list[JoinTarget]]:
     targets = await load_targets(group_id)
     from bot.cache_manager import is_owner, is_admin, is_vip
-    exempt_from_group_link = is_owner(group_id, user_id) or is_admin(group_id, user_id) or is_vip(group_id, user_id)
+    is_group_manager = is_owner(group_id, user_id) or is_admin(group_id, user_id)
+    is_special_member = is_vip(group_id, user_id)
     try:
         group_member = await bot.get_chat_member(group_id, user_id)
-        exempt_from_group_link = exempt_from_group_link or group_member.status in (
+        is_group_manager = is_group_manager or group_member.status in (
             ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR,
         )
     except Exception:
@@ -103,8 +104,10 @@ async def missing_targets(bot: Bot, group_id: int, user_id: int) -> tuple[list[J
     applicable = []
     missing = []
     for target in targets:
-        # لینک مالک فقط برای اعضای عادی است؛ لینک سازنده برای مدیران هم اجباری است.
-        if target.source == "group" and exempt_from_group_link:
+        # مالک/ادمین از هر دو لینک معاف است؛ عضو ویژه فقط از لینک مالک گروه.
+        if target.source == "creator" and is_group_manager:
+            continue
+        if target.source == "group" and (is_group_manager or is_special_member):
             continue
         applicable.append(target)
         try:

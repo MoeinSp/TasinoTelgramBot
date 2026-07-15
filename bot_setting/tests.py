@@ -36,7 +36,7 @@ class GroupForcedJoinTests(TestCase):
         self.assertEqual({t.title for t in targets}, {"creator", "owner"})
         self.assertEqual(len(targets), 2)
 
-    async def test_admin_is_exempt_only_from_group_owner_link(self):
+    async def test_admin_is_exempt_from_creator_and_group_links(self):
         cfg, _ = await ForcedJoinConfig.objects.aget_or_create(pk=1)
         cfg.enabled = True
         cfg.channel_id = -2001
@@ -51,7 +51,7 @@ class GroupForcedJoinTests(TestCase):
         )))
         from bot.group_forced_join import missing_targets
         applicable, missing = await missing_targets(bot, self.group.telegram_chat_id, 123)
-        self.assertEqual([t.source for t in applicable], ["creator"])
-        self.assertEqual([t.source for t in missing], ["creator"])
+        self.assertEqual(applicable, [])
+        self.assertEqual(missing, [])
 
 # Create your tests here.

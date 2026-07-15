@@ -106,6 +106,23 @@ class TelegramGroup(models.Model):
         default=True,
         verbose_name="اخطار خودکار"
     )
+    quiet_extra = models.BooleanField(
+        default=False,
+        verbose_name="کم پیام",
+        help_text="با روشن بودن، پیام‌های تکراری مثل «توی این بازی نیستی» و «قابلیت غیرفعال» ارسال نمی‌شوند.",
+    )
+
+    pv_start_enabled = models.BooleanField(
+        default=False,
+        verbose_name="شروع پیوی",
+        help_text="اجازه شروع مسابقه تاس دونفره در پیوی ربات.",
+    )
+    pv_start_off_reason = models.CharField(
+        max_length=300,
+        blank=True,
+        default="",
+        verbose_name="دلیل خاموش بودن شروع پیوی",
+    )
 
     is_speaker_enabled = models.BooleanField(
         default=False,
@@ -148,6 +165,11 @@ class TelegramGroup(models.Model):
         verbose_name="درصد کارمزد"
     )
 
+    fee_hidden = models.BooleanField(
+        default=False,
+        verbose_name="مخفی بودن حق واسطه برای مدیران"
+    )
+
     bet_mode = models.CharField(
         max_length=10,
         default="fixed",
@@ -163,6 +185,30 @@ class TelegramGroup(models.Model):
         default=False,
         verbose_name="افزایش موجودی مخفی",
         help_text="اگر روشن باشد، ادمین فقط «افزایش موجودی» می‌زند و مبلغ را در پیوی وارد می‌کند.",
+    )
+
+    pv_admin_finance_enabled = models.BooleanField(
+        default=False,
+        verbose_name="دسترسی ادمین به پنل مالی پیوی",
+        help_text="اگر روشن باشد، ادمین‌ها در پیوی همان گزارش‌های مالی مالک را می‌بینند.",
+    )
+
+    min_withdrawal_amount = models.PositiveIntegerField(
+        default=0,
+        verbose_name="حداقل مبلغ تسویه کاربر",
+        help_text="۰ = غیرفعال. مثلاً ۵۰ یعنی کاربر با موجودی قابل تسویه زیر ۵۰ نمی‌تواند درخواست تسویه بدهد.",
+    )
+
+    min_pv_bet = models.PositiveIntegerField(
+        default=0,
+        verbose_name="حداقل مبلغ شرط پیوی",
+        help_text="۰ = فقط حداقل سراسری. مثلاً ۳۰ یعنی شروع پیوی با شرط کمتر از ۳۰ قبول نمی‌شود.",
+    )
+
+    game_seq = models.PositiveIntegerField(
+        default=0,
+        verbose_name="شمارنده آیدی بازی",
+        help_text="آخرین شمارهٔ اختصاص‌داده‌شده به مسابقات این گروه (آیدی بازی).",
     )
 
     welcome_enabled = models.BooleanField(
@@ -515,6 +561,29 @@ class DiceRollStat(models.Model):
         return f"{self.telegram_user_id} rolled {self.value} @ {self.rolled_at}"
 
 
+class DiceGameHistory(models.Model):
+    """تاریخچه مسابقات تاس (برای آمار بازی، نه هر تاس تکی)."""
+    telegram_chat_id = models.BigIntegerField(db_index=True)
+    telegram_user_id = models.BigIntegerField()
+    total = models.IntegerField()
+    average = models.FloatField()
+    count = models.IntegerField()
+    winner = models.BooleanField(default=False)
+    amount_won = models.IntegerField(default=0)
+    bet_amount = models.IntegerField(default=0)
+    game_session = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["telegram_chat_id", "created_at"]),
+            models.Index(fields=["telegram_chat_id", "game_session"]),
+        ]
+
+    def __str__(self):
+        return f"{self.telegram_chat_id} | {self.telegram_user_id} | {self.total}"
+
+
 class Note(models.Model):
     group = models.ForeignKey(
         TelegramGroup,
@@ -555,6 +624,8 @@ class WalletTransaction(models.Model):
     amount = models.BigIntegerField()
     balance_after = models.BigIntegerField()
     description = models.CharField(max_length=256, blank=True, default="")
+    receipt_file_id = models.TextField(blank=True, default="")
+    receipt_note = models.CharField(max_length=256, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -566,3 +637,157 @@ class WalletTransaction(models.Model):
 
     def __str__(self):
         return f"{self.telegram_user_id} | {self.type} | {self.amount}"
+
+
+class AdminAccounting(models.Model):
+    telegram_chat_id = models.BigIntegerField(db_index=True)
+    admin_id = models.BigIntegerField(db_index=True)
+    share_percent = models.PositiveSmallIntegerField(default=50)
+    is_active_cashier = models.BooleanField(default=False)
+    activity_started_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=("telegram_chat_id", "admin_id"), name="uniq_telegram_admin_accounting")]
+
+
+class AdminActivitySession(models.Model):
+    telegram_chat_id = models.BigIntegerField(db_index=True)
+    admin_id = models.BigIntegerField(db_index=True)
+    started_at = models.DateTimeField(db_index=True)
+    ended_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    start_group_balance = models.BigIntegerField(null=True, blank=True, verbose_name="تراز کل گروه در شروع")
+    end_group_balance = models.BigIntegerField(null=True, blank=True, verbose_name="تراز کل گروه در پایان")
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["telegram_chat_id", "-started_at"]),
+            models.Index(fields=["telegram_chat_id", "admin_id", "-started_at"]),
+        ]
+        ordering = ["-started_at"]
+
+
+class WithdrawalRequest(models.Model):
+    STATUS = (("pending", "Pending"), ("receipt", "Waiting Receipt"), ("done", "Done"), ("cancelled", "Cancelled"))
+    telegram_chat_id = models.BigIntegerField(db_index=True)
+    telegram_user_id = models.BigIntegerField(db_index=True)
+    amount = models.BigIntegerField(default=0)
+    card_number = models.CharField(max_length=16)
+    card_name = models.CharField(max_length=100)
+    settle_kind = models.CharField(
+        max_length=16,
+        blank=True,
+        default="custom",
+        help_text="full=تسویه کامل، custom=مبلغ دلخواه",
+    )
+    status = models.CharField(max_length=16, choices=STATUS, default="pending", db_index=True)
+    approved_by = models.BigIntegerField(null=True, blank=True)
+    receipt_file_id = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+
+class BalanceIncreaseRequest(models.Model):
+    STATUS = (("waiting_receipt", "Waiting receipt"), ("pending", "Pending"), ("approved", "Approved"), ("cancelled", "Cancelled"))
+    telegram_chat_id = models.BigIntegerField(db_index=True)
+    telegram_user_id = models.BigIntegerField(db_index=True)
+    amount = models.BigIntegerField()
+    status = models.CharField(max_length=20, choices=STATUS, default="waiting_receipt", db_index=True)
+    receipt_file_id = models.TextField(blank=True, default="")
+    receipt_note = models.CharField(max_length=32, blank=True, default="")
+    approved_by = models.BigIntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+
+
+class FinanceRequestBan(models.Model):
+    """مسدودسازی فقط برای درخواست افزایش/تسویه — بدون بن از گروه."""
+    telegram_chat_id = models.BigIntegerField(db_index=True)
+    telegram_user_id = models.BigIntegerField(db_index=True)
+    banned_by = models.BigIntegerField(null=True, blank=True)
+    reason = models.CharField(max_length=500, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["telegram_chat_id", "telegram_user_id"],
+                name="uniq_tg_finance_request_ban",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["telegram_chat_id", "telegram_user_id"]),
+        ]
+
+
+class GroupChallenge(models.Model):
+    TYPES = (
+        ("dice", "چالش تاس"),
+        ("dart", "چالش دارت"),
+        ("luck", "چالش شانس"),
+        ("football", "چالش فوتبال"),
+        ("basketball", "چالش بسکتبال"),
+        ("max_bet", "بیشترین مبلغ شرط"),
+        ("max_count", "بیشترین تعداد"),
+        ("max_increase", "بیشترین افزایش موجودی"),
+        ("sum_increase", "مجموع افزایش موجودی"),
+    )
+    STATUS = (
+        ("active", "فعال"),
+        ("ended", "پایان‌یافته"),
+        ("cancelled", "لغو شده"),
+    )
+
+    telegram_chat_id = models.BigIntegerField(db_index=True)
+    created_by = models.BigIntegerField(db_index=True)
+    challenge_type = models.CharField(max_length=32, choices=TYPES, db_index=True)
+    prize_amount = models.BigIntegerField(default=0)
+    min_games_today = models.PositiveIntegerField(default=0)
+    min_wallet = models.BigIntegerField(default=0)
+    start_at = models.DateTimeField(db_index=True)
+    end_at = models.DateTimeField(db_index=True)
+    status = models.CharField(max_length=16, choices=STATUS, default="active", db_index=True)
+    winner_id = models.BigIntegerField(null=True, blank=True)
+    winner_score = models.BigIntegerField(default=0)
+    settled = models.BooleanField(default=False)
+    announce_message_id = models.BigIntegerField(null=True, blank=True)
+    end_warning_sent_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["telegram_chat_id", "status", "end_at"]),
+            models.Index(fields=["telegram_chat_id", "challenge_type", "status"]),
+        ]
+        ordering = ["-created_at"]
+
+
+class ChallengeEntry(models.Model):
+    challenge = models.ForeignKey(GroupChallenge, related_name="entries", on_delete=models.CASCADE)
+    telegram_user_id = models.BigIntegerField(db_index=True)
+    best_score = models.BigIntegerField(default=0)
+    total_score = models.BigIntegerField(default=0)
+    plays = models.PositiveIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["challenge", "telegram_user_id"], name="uniq_tg_challenge_entry_user"),
+        ]
+        indexes = [
+            models.Index(fields=["challenge", "-total_score"]),
+            models.Index(fields=["challenge", "-best_score"]),
+        ]
+
+
+class GamePlayLog(models.Model):
+    telegram_chat_id = models.BigIntegerField(db_index=True)
+    telegram_user_id = models.BigIntegerField(db_index=True)
+    game_type = models.CharField(max_length=32, db_index=True)
+    score = models.BigIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["telegram_chat_id", "telegram_user_id", "game_type", "created_at"]),
+        ]

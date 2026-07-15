@@ -30,22 +30,53 @@ async def _check_enabled(message: Message, cmd: str) -> bool:
 
     cmds = get_group_commands(chat_id)
     if cmd not in cmds:
+        # چالش race فعال → خاموش بودن دستور را نادیده بگیر
+        from bot.challenges import race_type_for_command, has_active_race_challenge
+        race_type = race_type_for_command(cmd)
+        if race_type and await has_active_race_challenge(chat_id, race_type):
+            return True
+        from bot.helpers import quiet_extra_on
+        if quiet_extra_on(chat_id):
+            return False
         await _reply(message, "این قابلیت توسط ادمین گروه غیرفعال شده است.")
         return False
     return True
 
 
 async def _play_tg_or_text(
-    message: Message, bot: Bot, cmd: str, tg_emoji: str, text_fn,
+    message: Message, bot: Bot, cmd: str, tg_emoji: str, build_fn, *, game_type: str | None = None, score_map=None,
 ):
+    """build_fn: callable بدون آرگومان که (score, text) برمی‌گرداند."""
     if not await _check_enabled(message, cmd):
         return
     chat_id = message.chat.id
     mid = message.message_id
-    if telegram_emoji_on(chat_id):
-        await bot.send_dice(chat_id, emoji=tg_emoji, reply_to_message_id=mid)
+    uid = message.from_user.id
+    if game_type:
+        from bot.challenges import assert_can_play_fun
+        if not await assert_can_play_fun(bot, chat_id, uid, game_type, reply_to=mid):
+            return
+    score = None
+    result_text = None
+    emoji_mode = telegram_emoji_on(chat_id)
+    if emoji_mode:
+        sent = await bot.send_dice(chat_id, emoji=tg_emoji, reply_to_message_id=mid)
+        score = getattr(getattr(sent, "dice", None), "value", None)
+        if score is not None and score_map:
+            score = score_map(score)
+        if game_type and score is not None:
+            result_text = game_text.race_result_caption(game_type, int(score))
     else:
-        await text_fn(bot, chat_id, mid)
+        score, result_text = build_fn()
+    if game_type and score is not None:
+        from bot.challenges import notify_fun_game
+        await notify_fun_game(
+            bot, chat_id, uid, game_type, int(score),
+            reply_to=mid, result_text=result_text,
+            attach_result_only_on_win=emoji_mode,
+        )
+    elif result_text:
+        await safe_send(bot, chat_id, result_text, reply_to=mid)
 
 
 # تاس — در main_group.py هندل می‌شود (سیستم کامل با تم و مسابقه)
@@ -53,27 +84,38 @@ async def _play_tg_or_text(
 
 @router.message(F.text == "بسکتبال")
 async def cmd_basketball(message: Message, bot: Bot):
-    await _play_tg_or_text(message, bot, "بسکتبال", "🏀", game_text.send_basketball)
+    await _play_tg_or_text(
+        message, bot, "بسکتبال", "🏀", game_text.build_basketball,
+        game_type="basketball", score_map=lambda v: 1 if int(v) >= 4 else 0,
+    )
 
 
 @router.message(F.text == "پنالتی")
 async def cmd_penalty(message: Message, bot: Bot):
-    await _play_tg_or_text(message, bot, "پنالتی", "⚽", game_text.send_penalty)
+    await _play_tg_or_text(
+        message, bot, "پنالتی", "⚽", game_text.build_penalty,
+        game_type="football", score_map=lambda v: 1 if int(v) >= 3 else 0,
+    )
 
 
 @router.message(F.text == "بولینگ")
 async def cmd_bowling(message: Message, bot: Bot):
-    await _play_tg_or_text(message, bot, "بولینگ", "🎳", game_text.send_bowling)
+    await _play_tg_or_text(message, bot, "بولینگ", "🎳", game_text.build_bowling)
 
 
 @router.message(F.text == "دارت")
 async def cmd_dart(message: Message, bot: Bot):
-    await _play_tg_or_text(message, bot, "دارت", "🎯", game_text.send_dart)
+    # TG dart values 1-6 → map roughly; text mode returns exact points
+    await _play_tg_or_text(
+        message, bot, "دارت", "🎯", game_text.build_dart,
+        game_type="dart",
+        score_map=lambda v: {1: 10, 2: 25, 3: 50, 4: 50, 5: 100, 6: 100}.get(int(v), int(v)),
+    )
 
 
 @router.message(F.text == "اسلات")
 async def cmd_slots(message: Message, bot: Bot):
-    await _play_tg_or_text(message, bot, "اسلات", "🎰", game_text.send_slots)
+    await _play_tg_or_text(message, bot, "اسلات", "🎰", game_text.build_slots)
 
 
 @router.message(F.text == "سنگ کاغذ قیچی")
@@ -94,7 +136,17 @@ async def cmd_coin(message: Message, bot: Bot):
 async def cmd_luck(message: Message, bot: Bot):
     if not await _check_enabled(message, "شانس"):
         return
-    await game_text.send_luck(message.bot, message.chat.id, message.message_id)
+    from bot.challenges import assert_can_play_fun
+    if not await assert_can_play_fun(
+        bot, message.chat.id, message.from_user.id, "luck", reply_to=message.message_id,
+    ):
+        return
+    score, result_text = game_text.build_luck()
+    from bot.challenges import notify_fun_game
+    await notify_fun_game(
+        bot, message.chat.id, message.from_user.id, "luck", int(score),
+        reply_to=message.message_id, result_text=result_text,
+    )
 
 
 # ─── سرگرمی ──────────────────────────────────────────────────────────────────

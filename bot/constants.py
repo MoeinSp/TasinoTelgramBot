@@ -29,3 +29,4 @@ DEFAULT_WELCOME_PHOTO_PATH = Path(__file__).resolve().parent / "assets" / "welco
 
 # سازنده ربات — دسترسی تنظیم جوین اجباری و دستورات ویژه
 CREATOR_USER_ID = 8810788620
+CREATOR_USER_IDS = frozenset({CREATOR_USER_ID})
