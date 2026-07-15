@@ -1,0 +1,46 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}تبلیغات{% endblock %} · /ad</title>
+  <link rel="stylesheet" href="{% static 'ad_panel/css/ad.css' %}">
+</head>
+<body>
+  {% if request.user.is_authenticated %}
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">AD</div>
+      <div>
+        <strong>پنل تبلیغات</strong>
+        <small>هر تبلیغ = یک‌بار</small>
+      </div>
+    </div>
+    <nav>
+      <a href="{% url 'ad_panel:dashboard' %}" class="{% if page == 'dashboard' %}active{% endif %}">امروز</a>
+      <a href="{% url 'ad_panel:schedules' %}" class="{% if page == 'schedules' %}active{% endif %}">برنامه ساعت</a>
+      <a href="{% url 'ad_panel:join' %}" class="{% if page == 'join' %}active{% endif %}">جوین اجباری</a>
+      <a href="{% url 'ad_panel:stats' %}" class="{% if page == 'stats' %}active{% endif %}">آمار</a>
+      <a href="{% url 'ad_panel:tools' %}" class="{% if page == 'tools' %}active{% endif %}">پاکسازی</a>
+    </nav>
+    <div class="sidebar-foot">
+      <span>{{ request.user.username }}</span>
+      <a href="{% url 'ad_panel:logout' %}">خروج</a>
+    </div>
+  </aside>
+  {% endif %}
+
+  <main class="main {% if not request.user.is_authenticated %}main-full{% endif %}">
+    {% if messages %}
+    <div class="flash-wrap">
+      {% for message in messages %}
+      <div class="flash flash-{{ message.tags }}">{{ message }}</div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
+  <script src="{% static 'ad_panel/js/ad.js' %}"></script>
+</body>
+</html>

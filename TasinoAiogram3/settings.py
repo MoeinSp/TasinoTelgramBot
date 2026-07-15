@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     "wordfilter",
     "bot_setting",
     "scheduledmessage",
+    "ad_panel",
 ]
 
 REDIS_URL = os.getenv(

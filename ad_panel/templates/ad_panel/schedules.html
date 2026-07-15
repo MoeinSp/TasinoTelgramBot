@@ -1,0 +1,46 @@
+{% extends "ad_panel/base.html" %}
+{% block title %}برنامه ساعت{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1>برنامه ساعت</h1>
+    <p class="muted">هر ردیف = یک ساعت + یک نوع (گروه / ربات / بمب / سوپر بمب). بعداً قابل ویرایش است.</p>
+  </div>
+  <a class="btn btn-primary" href="{% url 'ad_panel:schedule_new' %}">+ برنامه جدید</a>
+</header>
+
+<div class="cards">
+  {% for s in schedules %}
+  <article class="card">
+    <div class="card-head">
+      <h2>{% if s.is_favorite %}● {% endif %}{{ s.name }}</h2>
+    </div>
+    <div class="entry-list">
+      {% for e in s.normalized_entries %}
+      <div class="entry-chip">
+        <span class="ltr mono">{% if e.time == '25:00' %}25:00{% else %}{{ e.time }}{% endif %}</span>
+        {% if e.time == '25:00' %}<span class="tag tag-night">۱ شب فردا</span>{% endif %}
+        <span class="tag tag-{{ e.mode }}">
+          {% if e.mode == 'group' %}گروه
+          {% elif e.mode == 'pv' %}ربات
+          {% elif e.mode == 'bomb' %}بمب
+          {% else %}سوپر بمب{% endif %}
+        </span>
+      </div>
+      {% empty %}
+      <span class="muted">خالی</span>
+      {% endfor %}
+    </div>
+    <div class="form-actions">
+      <a class="btn btn-primary btn-sm" href="{% url 'ad_panel:dashboard' %}?schedule={{ s.pk }}">برو به امروز</a>
+      <a class="btn btn-sm" href="{% url 'ad_panel:schedule_edit' s.pk %}">ویرایش</a>
+      <form method="post" action="{% url 'ad_panel:schedule_delete' s.pk %}" onsubmit="return confirm('حذف؟')">
+        {% csrf_token %}<button class="btn btn-sm btn-ghost danger" type="submit">حذف</button>
+      </form>
+    </div>
+  </article>
+  {% empty %}
+  <div class="card empty">هنوز برنامه‌ای نیست. <a href="{% url 'ad_panel:schedule_new' %}">بساز</a></div>
+  {% endfor %}
+</div>
+{% endblock %}

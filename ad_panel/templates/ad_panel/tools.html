@@ -1,0 +1,128 @@
+{% extends "ad_panel/base.html" %}
+{% block title %}پاکسازی{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1>پاکسازی و تنظیمات</h1>
+    <p class="muted">تبلیغات منقضی / ارسال‌شده قدیمی و جوین‌های تمام‌شده را تمیز کن · {{ preview.now|date:"Y/m/d H:i" }}</p>
+  </div>
+  <a class="btn btn-ghost" href="{% url 'ad_panel:stats' %}">مشاهده آمار</a>
+</header>
+
+<section class="stats stats-4">
+  <div class="stat"><span>کل پنل</span><b>{{ preview.panel_total }}</b></div>
+  <div class="stat"><span>ارسال‌شده</span><b>{{ preview.sent_all }}</b></div>
+  <div class="stat"><span>از دست‌رفته</span><b>{{ preview.missed }}</b></div>
+  <div class="stat"><span>جوین منقضی</span><b>{{ preview.joins_expired }}</b></div>
+</section>
+
+<div class="grid-2">
+  <section class="card">
+    <h2>پاکسازی سریع</h2>
+    <p class="muted small">پیشنهادی: منقضی‌ها + ارسال‌شده‌های قدیمی‌تر از ۷ روز + خاموش کردن جوین منقضی</p>
+    <form method="post" class="stack" onsubmit="return confirm('پاکسازی ایمن اجرا شود؟')">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="all_safe">
+      <label>حذف ارسال‌شده‌های قدیمی‌تر از (روز)
+        <input type="number" name="days" value="7" min="1" max="365" class="slots-input" dir="ltr">
+      </label>
+      <button class="btn btn-primary" type="submit">اجرای پاکسازی ایمن</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>وضعیت فعلی</h2>
+    <ul class="clean-list">
+      <li><span>ارسال‌شده &gt; ۳ روز</span><b>{{ preview.sent_old_3 }}</b></li>
+      <li><span>ارسال‌شده &gt; ۷ روز</span><b>{{ preview.sent_old_7 }}</b></li>
+      <li><span>ارسال‌شده &gt; ۳۰ روز</span><b>{{ preview.sent_old_30 }}</b></li>
+      <li><span>گذشته و ارسال‌نشده</span><b>{{ preview.missed }}</b></li>
+      <li><span>تبلیغ خاموش</span><b>{{ preview.inactive }}</b></li>
+      <li><span>جوین خاموش</span><b>{{ preview.joins_inactive }}</b></li>
+      <li><span>جوین منقضی (هنوز فعال)</span><b>{{ preview.joins_expired }}</b></li>
+    </ul>
+  </section>
+</div>
+
+<section class="card">
+  <h2>عملیات جداگانه</h2>
+  <div class="tools-grid">
+    <form method="post" class="tool-card" onsubmit="return confirm('تبلیغات گذشتهٔ ارسال‌نشده حذف شوند؟')">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="missed">
+      <strong>از دست‌رفته‌ها</strong>
+      <p class="muted small">تبلیغاتی که زمانشان گذشته و ارسال نشده‌اند ({{ preview.missed }})</p>
+      <button class="btn btn-sm" type="submit">حذف</button>
+    </form>
+
+    <form method="post" class="tool-card" onsubmit="return confirm('ارسال‌شده‌های قدیمی حذف شوند؟')">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="sent_older">
+      <strong>ارسال‌شده قدیمی</strong>
+      <p class="muted small">حذف بعد از N روز</p>
+      <input type="number" name="days" value="7" min="1" max="365" class="slots-input" dir="ltr">
+      <button class="btn btn-sm" type="submit">حذف</button>
+    </form>
+
+    <form method="post" class="tool-card" onsubmit="return confirm('ارسال‌شده‌های امروز پاک شوند؟')">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="sent_today">
+      <strong>ارسال‌شده امروز</strong>
+      <p class="muted small">فقط آرشیو امروز (صف فعال دست نمی‌خورد)</p>
+      <button class="btn btn-sm" type="submit">حذف</button>
+    </form>
+
+    <form method="post" class="tool-card" onsubmit="return confirm('تبلیغات خاموش حذف شوند؟')">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="inactive_ads">
+      <strong>تبلیغات خاموش</strong>
+      <p class="muted small">{{ preview.inactive }} مورد</p>
+      <button class="btn btn-sm" type="submit">حذف</button>
+    </form>
+
+    <form method="post" class="tool-card" onsubmit="return confirm('جوین‌های منقضی خاموش شوند؟')">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="expire_joins">
+      <strong>جوین منقضی</strong>
+      <p class="muted small">خاموش کردن {{ preview.joins_expired }} مورد فعالِ تمام‌شده</p>
+      <button class="btn btn-sm" type="submit">خاموش</button>
+    </form>
+
+    <form method="post" class="tool-card" onsubmit="return confirm('همه جوین‌های خاموش حذف شوند؟')">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="delete_dead_joins">
+      <strong>حذف جوین خاموش</strong>
+      <p class="muted small">{{ preview.joins_inactive }} مورد</p>
+      <button class="btn btn-sm btn-ghost danger" type="submit">حذف دائمی</button>
+    </form>
+  </div>
+</section>
+
+<section class="card">
+  <h2>همگام‌سازی پنل‌ها</h2>
+  <p class="muted small">
+    اگر تبلیغ فقط روی یک ربات ثبت شد، از اینجا به بقیه بفرست.
+    {% if sync_self %}<span class="ltr">SELF={{ sync_self }}</span>{% else %}<b class="danger">SYNC_SELF_URL تنظیم نشده</b>{% endif %}
+  </p>
+  <ul class="clean-list" style="margin-bottom:1rem">
+    {% for p in peers %}
+      <li>
+        <span class="ltr">{{ p.label }}</span>
+        <b>{% if p.is_self %}همین{% else %}peer{% endif %}</b>
+      </li>
+    {% empty %}
+      <li><span>peerای پیدا نشد</span><b>—</b></li>
+    {% endfor %}
+  </ul>
+  <form method="post" class="stack" onsubmit="return confirm('همه تبلیغ‌ها و جوین‌های فعال به بقیه پنل‌ها ارسال شوند؟')">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="push_sync">
+    <button class="btn btn-primary" type="submit">ارسال به همه پنل‌ها</button>
+  </form>
+</section>
+
+<section class="card tip">
+  فقط رکوردهای پنل با پیشوند <b class="ltr">[AD]</b> و جوین‌های پنل پاک می‌شوند.
+  منطق ربات و تبلیغات دستیِ غیرپنل دست نمی‌خورد — مگر جوین‌های منقضی/خاموش که انتخاب کنی.
+</section>
+{% endblock %}

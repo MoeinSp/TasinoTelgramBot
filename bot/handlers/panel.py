@@ -24,6 +24,7 @@ from bot.group_help import PAGE_MAIN
 
 router = Router()
 _log = logging.getLogger(__name__)
+_GROUP_JOIN_STATE: dict[int, int] = {}
 
 # صفحه‌ای که بعد از toggle باید رفرش شود
 _TOGGLE_PAGE = {
@@ -115,6 +116,17 @@ async def _render_live_panel(code: str, chat_id: int):
         return manage_panel_text(), manage_panel_kb()
     if code == "finance":
         return finance_panel_text(), finance_panel_kb()
+    if code == "group_join":
+        from bot.group_forced_join import get_group_target
+        cfg = await get_group_target(chat_id)
+        status = f"🟢 {cfg['title']}\n{cfg['link']}" if cfg else "⚫ تنظیم نشده"
+        text = f"🔗 <b>جوین اجباری گروه</b>\n\n{status}\n\nهر گروه حداکثر یک لینک دارد؛ جوین سازنده جداگانه اعمال می‌شود."
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [Btn(text="➕ تنظیم/جایگزینی لینک", callback_data="gfj:set")],
+            [Btn(text="🗑 حذف لینک", callback_data="gfj:clear")],
+            [Btn(text="🔙 بازگشت", callback_data="p:manage")],
+        ])
+        return text, kb
     return None, None
 
 
@@ -167,7 +179,7 @@ async def cb_panel(call: CallbackQuery):
                 f"━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"{PAGE_MAIN}"
             )
-    elif is_live_page(code):
+    elif is_live_page(code) or code == "group_join":
         text, kb = await _render_live_panel(code, chat_id)
         if text is None:
             await call.answer("❌ بخش یافت نشد", show_alert=True)
@@ -185,6 +197,54 @@ async def cb_panel(call: CallbackQuery):
     except Exception as e:
         _log.error("panel edit: %s", e)
     await call.answer()
+
+
+@router.callback_query(F.data.startswith("gfj:"))
+async def cb_group_forced_join(call: CallbackQuery, bot: Bot):
+    action = call.data[4:]
+    if action.startswith("check:"):
+        from bot.group_forced_join import missing_targets, required_text, keyboard, send_temporary
+        group_id = int(action.split(":", 1)[1])
+        targets, missing = await missing_targets(bot, group_id, call.from_user.id)
+        if missing:
+            await call.answer("هنوز همه عضویت‌ها کامل نشده است.", show_alert=True)
+            try:
+                await call.message.edit_text(required_text(call.from_user.full_name, missing), reply_markup=keyboard(group_id, missing), parse_mode="HTML")
+            except Exception:
+                pass
+        else:
+            await call.answer("عضویت تأیید شد ✅")
+            await send_temporary(call.message, f"✅ عضویت {call.from_user.full_name} در همه لینک‌ها تأیید شد.")
+            try:
+                await call.message.delete()
+            except Exception:
+                pass
+        return
+
+    chat_id = _panel_chat_id(call)
+    if not chat_id or (call.from_user.id != CREATOR_USER_ID and not is_owner(chat_id, call.from_user.id)):
+        return await call.answer("فقط مالک گروه می‌تواند جوین اجباری را تغییر دهد.", show_alert=True)
+    if action == "set":
+        _GROUP_JOIN_STATE[call.from_user.id] = chat_id
+        await call.message.answer("لینک عمومی کانال یا @username را بفرستید. ربات باید در کانال مقصد ادمین باشد.")
+        return await call.answer("منتظر لینک...")
+    if action == "clear":
+        from bot.group_forced_join import clear_group_target
+        await clear_group_target(chat_id)
+        await call.message.answer("🗑 جوین اجباری این گروه حذف شد.")
+        return await call.answer("حذف شد")
+
+
+@router.message(F.text, F.func(lambda m: bool(m.from_user) and m.from_user.id in _GROUP_JOIN_STATE))
+async def set_group_forced_join_from_panel(message, bot: Bot):
+    chat_id = _GROUP_JOIN_STATE.pop(message.from_user.id)
+    from bot.group_forced_join import resolve_target, save_group_target
+    try:
+        target = await resolve_target(bot, message.text)
+        await save_group_target(chat_id, target.channel_id, target.title, target.link)
+        await message.answer(f"✅ جوین اجباری گروه تنظیم شد:\n{target.title}\n{target.link}")
+    except Exception as exc:
+        await message.answer(f"❌ تنظیم نشد: {exc}")
 
 
 # ─── لینک‌ساز ────────────────────────────────────────────────────────────────

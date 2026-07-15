@@ -63,7 +63,8 @@ def _creator_panel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [Btn(text="📊 وضعیت جوین اجباری", callback_data="cr:fj:status")],
         [Btn(text="🟢 روشن", callback_data="cr:fj:on"), Btn(text="⚫ خاموش", callback_data="cr:fj:off")],
-        [Btn(text="🗑 حذف کانال", callback_data="cr:fj:clear"), Btn(text="📥 ثبت کانال با آیدی", callback_data="cr:fj:setid")],
+        [Btn(text="🗑 حذف کانال", callback_data="cr:fj:clear"), Btn(text="📥 ثبت با آیدی", callback_data="cr:fj:setid")],
+        [Btn(text="🔗 ثبت جوین سازنده با لینک", callback_data="cr:fj:setlink")],
         [Btn(text="🔗 وضعیت لینکدونی", callback_data="cr:ld:status")],
         [Btn(text="✏️ تنظیم لینکدونی", callback_data="cr:ld:set"), Btn(text="💬 تنظیم پشتیبانی", callback_data="cr:sp:set")],
         [Btn(text="🎨 ایموجی‌های پرمیوم", callback_data="cr:emoji:0")],
@@ -965,6 +966,11 @@ async def cb_creator_panel(call: CallbackQuery, bot: Bot):
         )
         return await call.answer("منتظر آیدی کانال...")
 
+    if action == "fj:setlink":
+        _CREATOR_STATE[call.from_user.id] = "await_channel_link"
+        await call.message.answer("لینک عمومی کانال یا @username را بفرستید. ربات باید در کانال مقصد ادمین باشد.")
+        return await call.answer("منتظر لینک...")
+
     if action == "cache:stats":
         joined_cache = len(cache.FORCED_JOIN_MEMBER_CHECK)
         await call.message.answer(
@@ -1514,6 +1520,22 @@ async def cmd_set_forced_channel_by_state(message: Message, bot: Bot):
     channel_id = int(message.text.strip())
     ok, text = await _setup_channel(bot, channel_id)
     await message.answer(text, parse_mode="HTML")
+
+
+@router.message(F.text, F.func(lambda m: bool(m.from_user) and _CREATOR_STATE.get(m.from_user.id) == "await_channel_link"))
+async def cmd_set_forced_channel_by_link(message: Message, bot: Bot):
+    if not is_creator(message.from_user.id):
+        return
+    _CREATOR_STATE.pop(message.from_user.id, None)
+    from bot.group_forced_join import resolve_target
+    try:
+        target = await resolve_target(bot, message.text)
+        await db_save_forced_join_channel(
+            target.channel_id, target.title, target.link.rsplit("/", 1)[-1], target.link, True,
+        )
+        await message.answer(f"✅ جوین اجباری سازنده تنظیم شد:\n<b>{target.title}</b>\n{target.link}", parse_mode="HTML")
+    except Exception as exc:
+        await message.answer(f"❌ تنظیم نشد: {exc}")
 
 
 @router.message(F.forward_from_chat)

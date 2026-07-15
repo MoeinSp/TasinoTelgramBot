@@ -230,6 +230,7 @@ def manage_panel_text() -> str:
 
 def manage_panel_kb() -> InlineKeyboardMarkup:
     return _nav(
+        [_go("🔗 جوین اجباری گروه", "group_join")],
         [_go("👮 ادمین‌ها", "admins"), _go("⭐ اعضای ویژه", "vip")],
         [_go("🚫 بن", "ban"), _go("🤫 سکوت", "mute")],
         [_cmd("📣 تگ همه", "tag_all"), _cmd("⚠️ اخطار من", "my_warnings")],

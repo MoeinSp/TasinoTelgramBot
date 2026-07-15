@@ -190,6 +190,19 @@ class RequiredJoinMiddleware(BaseMiddleware):
         return None
 
 
+class GroupRequiredJoinMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        if not isinstance(event, Message) or event.chat.type not in ("group", "supergroup"):
+            return await handler(event, data)
+        # تنظیمات پنل باید حتی قبل از عضویت مالک قابل استفاده باشد.
+        if event.text and event.text.startswith(("تنظیم جوین اجباری", "حذف جوین اجباری")):
+            return await handler(event, data)
+        from bot.group_forced_join import enforce_group_join
+        if await enforce_group_join(event, data.get("bot")):
+            return await handler(event, data)
+        return None
+
+
 class GlobalBotOffMiddleware(BaseMiddleware):
     """اگر ربات سراسری خاموش باشد، فقط سازنده در پیوی می‌تواند کار کند."""
 

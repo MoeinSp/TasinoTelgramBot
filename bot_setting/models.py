@@ -94,6 +94,22 @@ class ForcedJoinConfig(models.Model):
         obj, _ = cls.objects.get_or_create(pk=1)
         return obj
 
+
+class GroupForcedJoin(models.Model):
+    group = models.OneToOneField("account.TelegramGroup", on_delete=models.CASCADE, related_name="forced_join")
+    channel_id = models.BigIntegerField()
+    title = models.CharField(max_length=200, blank=True, default="")
+    invite_link = models.URLField(max_length=512)
+    is_active = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "جوین اجباری گروه"
+        verbose_name_plural = "جوین‌های اجباری گروه‌ها"
+
+    def __str__(self):
+        return f"{self.group} → {self.title or self.channel_id}"
+
 class BotSiteConfig(models.Model):
     """تنظیمات سراسری ربات — یک رکورد (pk=1)."""
     bot_enabled = models.BooleanField(

@@ -1,0 +1,190 @@
+{% extends "ad_panel/base.html" %}
+{% block title %}آمار{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1>آمار تبلیغات</h1>
+    <p class="muted">{{ report.now|date:"Y/m/d H:i" }} · بازه {{ report.days }} روز اخیر</p>
+  </div>
+  <div class="head-actions">
+    <a class="btn {% if report.days == 7 %}btn-primary{% else %}btn-ghost{% endif %}" href="?days=7">۷ روز</a>
+    <a class="btn {% if report.days == 14 %}btn-primary{% else %}btn-ghost{% endif %}" href="?days=14">۱۴ روز</a>
+    <a class="btn {% if report.days == 30 %}btn-primary{% else %}btn-ghost{% endif %}" href="?days=30">۳۰ روز</a>
+  </div>
+</header>
+
+<section class="stats stats-4">
+  <div class="stat"><span>کل تبلیغات</span><b>{{ report.totals.total }}</b></div>
+  <div class="stat"><span>ارسال‌شده</span><b>{{ report.totals.sent }}</b></div>
+  <div class="stat"><span>در صف</span><b>{{ report.totals.pending }}</b></div>
+  <div class="stat"><span>نرخ ارسال</span><b>{{ report.totals.success_rate }}%</b></div>
+</section>
+
+<section class="stats stats-4">
+  <div class="stat"><span>ارسال موفق گروه</span><b>{{ report.totals.ok_groups }}</b></div>
+  <div class="stat"><span>ارسال موفق پیوی</span><b>{{ report.totals.ok_pv }}</b></div>
+  <div class="stat"><span>جوین زنده</span><b>{{ report.totals.joins_live }}</b></div>
+  <div class="stat"><span>از دست‌رفته</span><b>{{ report.totals.missed }}</b></div>
+</section>
+<p class="muted small">آمار گروه/پیوی = فقط تحویل <b>موفق</b> (خطاها شمرده نمی‌شوند) — نه تعداد کل گروه‌ها یا کاربران.</p>
+
+<div class="grid-2 charts-grid">
+  <section class="card">
+    <div class="card-head"><h2>روند روزانه</h2></div>
+    <canvas id="chart-daily" height="140"></canvas>
+  </section>
+  <section class="card">
+    <div class="card-head"><h2>تفکیک نوع</h2></div>
+    <canvas id="chart-mode" height="140"></canvas>
+  </section>
+</div>
+
+<section class="card">
+  <div class="card-head"><h2>ساعت‌های پرتکرار ارسال</h2></div>
+  <canvas id="chart-hours" height="100"></canvas>
+</section>
+
+<section class="card">
+  <div class="card-head"><h2>روند تحویل موفق روزانه</h2></div>
+  <canvas id="chart-delivery" height="120"></canvas>
+</section>
+
+<section class="card">
+  <div class="card-head"><h2>جزئیات نوع</h2></div>
+  <div class="mode-bars">
+    <div class="mode-bar-row mode-bar-wide">
+      <span class="tag tag-group">تبلیغ گروه</span>
+      <div class="bar-track"><div class="bar-fill bar-group" id="bar-group"></div></div>
+      <b class="mono" id="tot-group">0</b>
+      <span class="muted small" id="sent-group">۰ تبلیغ</span>
+      <span class="muted small" id="del-group">۰ گروه · ۰ پیوی</span>
+    </div>
+    <div class="mode-bar-row mode-bar-wide">
+      <span class="tag tag-pv">تبلیغ ربات</span>
+      <div class="bar-track"><div class="bar-fill bar-pv" id="bar-pv"></div></div>
+      <b class="mono" id="tot-pv">0</b>
+      <span class="muted small" id="sent-pv">۰ تبلیغ</span>
+      <span class="muted small" id="del-pv">۰ گروه · ۰ پیوی</span>
+    </div>
+    <div class="mode-bar-row mode-bar-wide">
+      <span class="tag tag-bomb">بمب</span>
+      <div class="bar-track"><div class="bar-fill bar-bomb" id="bar-bomb"></div></div>
+      <b class="mono" id="tot-bomb">0</b>
+      <span class="muted small" id="sent-bomb">۰ تبلیغ</span>
+      <span class="muted small" id="del-bomb">۰ گروه · ۰ پیوی</span>
+    </div>
+    <div class="mode-bar-row mode-bar-wide">
+      <span class="tag tag-super">سوپر بمب</span>
+      <div class="bar-track"><div class="bar-fill bar-super" id="bar-super"></div></div>
+      <b class="mono" id="tot-super">0</b>
+      <span class="muted small" id="sent-super">۰ تبلیغ</span>
+      <span class="muted small" id="del-super">۰ گروه · ۰ پیوی</span>
+    </div>
+  </div>
+</section>
+
+{{ report.daily|json_script:"data-daily" }}
+{{ report.by_mode|json_script:"data-mode" }}
+{{ report.by_mode_sent|json_script:"data-mode-sent" }}
+{{ report.by_mode_groups|json_script:"data-mode-groups" }}
+{{ report.by_mode_pv|json_script:"data-mode-pv" }}
+{{ report.hour_hist|json_script:"data-hours" }}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+(function () {
+  const daily = JSON.parse(document.getElementById("data-daily").textContent);
+  const byMode = JSON.parse(document.getElementById("data-mode").textContent);
+  const byModeSent = JSON.parse(document.getElementById("data-mode-sent").textContent);
+  const byModeGroups = JSON.parse(document.getElementById("data-mode-groups").textContent);
+  const byModePv = JSON.parse(document.getElementById("data-mode-pv").textContent);
+  const hours = JSON.parse(document.getElementById("data-hours").textContent);
+  const modeOrder = ["group", "pv", "bomb", "super"];
+  const modeNames = { group: "گروه", pv: "ربات", bomb: "بمب", super: "سوپر بمب" };
+  const colors = {
+    group: "#22c55e", pv: "#3b82f6", bomb: "#a855f7", super: "#ef4444",
+    sent: "#22c55e", pending: "#f59e0b", okg: "#38bdf8", okp: "#c084fc"
+  };
+  const max = Math.max(1, ...modeOrder.map((x) => byMode[x] || 0));
+  modeOrder.forEach((k) => {
+    const tot = document.getElementById("tot-" + k);
+    const sent = document.getElementById("sent-" + k);
+    const del = document.getElementById("del-" + k);
+    const bar = document.getElementById("bar-" + k);
+    if (tot) tot.textContent = byMode[k] || 0;
+    if (sent) sent.textContent = (byModeSent[k] || 0) + " تبلیغ";
+    if (del) del.textContent = (byModeGroups[k] || 0) + " گروه · " + (byModePv[k] || 0) + " پیوی";
+    if (bar) bar.style.width = ((byMode[k] || 0) / max * 100) + "%";
+  });
+
+  Chart.defaults.color = "#93a0b8";
+  Chart.defaults.borderColor = "rgba(148,163,184,.15)";
+  Chart.defaults.font.family = "Segoe UI, Tahoma, sans-serif";
+
+  new Chart(document.getElementById("chart-daily"), {
+    type: "bar",
+    data: {
+      labels: daily.map((d) => d.label),
+      datasets: [
+        { label: "ارسال‌شده", data: daily.map((d) => d.sent), backgroundColor: colors.sent, borderRadius: 6 },
+        { label: "در صف", data: daily.map((d) => d.pending), backgroundColor: colors.pending, borderRadius: 6 },
+      ],
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { position: "bottom" } },
+      scales: { y: { beginAtZero: true, ticks: { precision: 0 } } },
+    },
+  });
+
+  new Chart(document.getElementById("chart-mode"), {
+    type: "doughnut",
+    data: {
+      labels: modeOrder.map((k) => modeNames[k]),
+      datasets: [{
+        data: modeOrder.map((k) => byMode[k] || 0),
+        backgroundColor: modeOrder.map((k) => colors[k]),
+        borderWidth: 0,
+      }],
+    },
+    options: { responsive: true, plugins: { legend: { position: "bottom" } } },
+  });
+
+  new Chart(document.getElementById("chart-hours"), {
+    type: "line",
+    data: {
+      labels: hours.map((_, i) => String(i).padStart(2, "0")),
+      datasets: [{
+        label: "تعداد ارسال",
+        data: hours,
+        borderColor: "#3b82f6",
+        backgroundColor: "rgba(59,130,246,.2)",
+        fill: true,
+        tension: 0.35,
+        pointRadius: 2,
+      }],
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: { y: { beginAtZero: true, ticks: { precision: 0 } } },
+    },
+  });
+
+  new Chart(document.getElementById("chart-delivery"), {
+    type: "bar",
+    data: {
+      labels: daily.map((d) => d.label),
+      datasets: [
+        { label: "گروه موفق", data: daily.map((d) => d.ok_groups || 0), backgroundColor: colors.okg, borderRadius: 6 },
+        { label: "پیوی موفق", data: daily.map((d) => d.ok_pv || 0), backgroundColor: colors.okp, borderRadius: 6 },
+      ],
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { position: "bottom" } },
+      scales: { y: { beginAtZero: true, ticks: { precision: 0 } } },
+    },
+  });
+})();
+</script>
+{% endblock %}

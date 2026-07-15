@@ -1,0 +1,26 @@
+{% extends "ad_panel/base.html" %}
+{% block title %}ورود{% endblock %}
+{% block content %}
+<div class="login-wrap">
+  <div class="login-card">
+    <div class="brand brand-center">
+      <div class="brand-mark">AD</div>
+      <div>
+        <strong>پنل تبلیغات تاسینو</strong>
+        <small>ورود staff · آدرس /ad</small>
+      </div>
+    </div>
+    {% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
+    <form method="post" class="stack">
+      {% csrf_token %}
+      <label>نام کاربری
+        <input type="text" name="username" autofocus required>
+      </label>
+      <label>رمز عبور
+        <input type="password" name="password" required>
+      </label>
+      <button class="btn btn-primary btn-block" type="submit">ورود</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

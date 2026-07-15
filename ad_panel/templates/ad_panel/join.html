@@ -1,0 +1,59 @@
+{% extends "ad_panel/base.html" %}
+{% block title %}جوین اجباری{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1>جوین اجباری</h1>
+    <p class="muted">بازه: <b class="ltr">{{ window_start|date:"Y/m/d H:i" }}</b> → <b class="ltr">{{ window_end|date:"Y/m/d H:i" }}</b> · اولویت کمتر = بالاتر در لیست ربات</p>
+  </div>
+  <form method="post" action="{% url 'ad_panel:join_renumber' %}">
+    {% csrf_token %}
+    <button class="btn btn-ghost" type="submit">مرتب‌سازی اولویت ۱…n</button>
+  </form>
+</header>
+
+<div class="grid-2">
+  <form method="post" class="card form-card">
+    {% csrf_token %}
+    <label>لینک‌ها (تا ۵ خط — ترتیب خط = اولویت ۱،۲،۳…)
+      {{ form.join_links }}
+    </label>
+    <div class="form-actions">
+      <button class="btn btn-primary" type="submit">فعال‌سازی ۱۲→۱۲</button>
+    </div>
+  </form>
+
+  <section class="card">
+    <h2>فعال‌ها (با اولویت)</h2>
+    {% if joins %}
+    <ul class="list">
+      {% for j in joins %}
+      <li class="join-item">
+        <div class="join-main">
+          <strong>اولویت {{ j.priority }} · {{ j.title }}</strong>
+          <div class="ltr small">{{ j.text }}</div>
+          <div class="small muted ltr">
+            {% if j.start_datetime %}{{ j.start_datetime|date:"Y/m/d H:i" }}{% endif %}
+            →
+            {% if j.end_datetime %}{{ j.end_datetime|date:"Y/m/d H:i" }}{% endif %}
+          </div>
+        </div>
+        <div class="join-actions">
+          <form method="post" action="{% url 'ad_panel:join_set_priority' j.pk %}" class="prio-form">
+            {% csrf_token %}
+            <input type="number" name="priority" value="{{ j.priority }}" min="1" max="99" class="prio-input" title="اولویت">
+            <button class="btn btn-sm" type="submit">ثبت</button>
+          </form>
+          <form method="post" action="{% url 'ad_panel:deactivate_join' j.pk %}">{% csrf_token %}
+            <button class="btn btn-sm btn-ghost" type="submit">خاموش</button>
+          </form>
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted empty">خالی</p>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

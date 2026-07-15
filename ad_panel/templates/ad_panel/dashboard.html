@@ -1,0 +1,274 @@
+{% extends "ad_panel/base.html" %}
+{% block title %}امروز{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1>امروز</h1>
+    <p class="muted">{{ stats.now|date:"Y/m/d H:i" }} · هر تبلیغ یک‌بار · ساعت‌های شب (قبل ۶صبح) را صبح ثبت کن → بامداد فردا ارسال می‌شود</p>
+  </div>
+  <div class="head-actions">
+    {% if schedules %}
+    <form method="get" class="inline-pick">
+      <select name="schedule" onchange="this.form.submit()">
+        {% for s in schedules %}
+        <option value="{{ s.pk }}" {% if schedule and schedule.pk == s.pk %}selected{% endif %}>{{ s.name }}</option>
+        {% endfor %}
+      </select>
+    </form>
+    {% endif %}
+    <form method="post" action="{% url 'ad_panel:clear_today' %}" onsubmit="return confirm('صف ارسال‌نشده پاک شود؟')">
+      {% csrf_token %}
+      <button class="btn btn-ghost" type="submit">پاک کردن صف</button>
+    </form>
+  </div>
+</header>
+
+<section class="stats stats-3">
+  <div class="stat"><span>در صف</span><b>{{ stats.pending_today }}</b></div>
+  <div class="stat"><span>ارسال‌شده</span><b>{{ stats.sent_today }}</b></div>
+  <div class="stat"><span>جوین زنده</span><b>{{ stats.live_joins }}</b></div>
+</section>
+<section class="stats stats-2">
+  <div class="stat"><span>ارسال موفق گروه (امروز)</span><b>{{ stats.ok_groups_today }}</b></div>
+  <div class="stat"><span>ارسال موفق پیوی (امروز)</span><b>{{ stats.ok_pv_today }}</b></div>
+</section>
+<p class="muted small dash-links">
+  فقط تعداد <b>موفق</b> شمرده می‌شود — نه کل گروه‌ها/کاربران.
+  ·
+  <a href="{% url 'ad_panel:stats' %}">آمار و نمودار</a>
+  ·
+  <a href="{% url 'ad_panel:tools' %}">پاکسازی</a>
+</p>
+
+{% if not schedule %}
+<div class="card tip">
+  هنوز برنامه ساعتی نیست.
+  <a href="{% url 'ad_panel:schedule_new' %}">اول برنامه بساز</a>
+  (مثلاً ۹ صبح گروه، ۱ ظهر سوپر بمب، …)
+</div>
+{% else %}
+
+<section class="card">
+  <div class="card-head">
+    <h2>{{ schedule.name }}</h2>
+    <a class="btn btn-sm" href="{% url 'ad_panel:schedule_edit' schedule.pk %}">ویرایش برنامه</a>
+  </div>
+
+  <div class="slot-board">
+    {% for row in rows %}
+    <article class="slot-row status-{{ row.status }} {% if row.overnight %}overnight{% endif %} {% if row.hour25 %}hour25{% endif %}">
+      <div class="slot-meta">
+        <div class="ltr mono time">{{ row.time_label }}</div>
+        <span class="tag tag-{{ row.mode }}">{{ row.mode_label }}</span>
+        {% if row.hour25 %}
+        <span class="tag tag-night">۲۵ · ۱ شب فردا</span>
+        {% elif row.overnight %}
+        <span class="tag tag-night">امشب · بامداد فردا</span>
+        {% endif %}
+        <div class="small muted">ارسال: {{ row.when }}</div>
+        {% if row.status == 'sent' %}<span class="ok">ارسال شد</span>
+        {% elif row.status == 'queued' %}<span class="pending">در صف</span>
+        {% else %}<span class="muted">خالی / بدون تبلیغ</span>{% endif %}
+      </div>
+
+      {% if row.status == 'sent' %}
+      <div class="slot-done">
+        <div class="ok">این نوبت ارسال شده — تکرار نمی‌شود.</div>
+        {% if row.delivery %}
+        <div class="delivery-box">
+          {% if row.delivery.show_groups %}
+          <div class="delivery-line">
+            <span class="tag tag-group">گروه</span>
+            <b class="ok">{{ row.delivery.ok_groups }} موفق</b>
+            ·
+            <b class="fail">{{ row.delivery.fail_groups }} ناموفق</b>
+          </div>
+          {% endif %}
+          {% if row.delivery.show_pv %}
+          <div class="delivery-line">
+            <span class="tag tag-pv">پیوی</span>
+            <b class="ok">{{ row.delivery.ok_pv }} موفق</b>
+            ·
+            <b class="fail">{{ row.delivery.fail_pv }} ناموفق</b>
+          </div>
+          {% endif %}
+          <div class="muted small">بر اساس نتیجهٔ واقعی send — نه تعداد کل گروه‌ها/کاربران دیتابیس</div>
+        </div>
+        {% endif %}
+      </div>
+      {% else %}
+      <form method="post" action="{% url 'ad_panel:post_slot' %}" class="slot-form">
+        {% csrf_token %}
+        <input type="hidden" name="time" value="{{ row.time }}">
+        <input type="hidden" name="mode" value="{{ row.mode }}">
+        <input type="hidden" name="day_mode" value="{{ row.day_mode }}">
+        {% if row.hour25 %}
+        <div class="night-hint">ساعت ۲۵ = ۱ شب فردا (۰۱:۰۰ بامداد فردا). صبح امروز ثبت کن.</div>
+        {% elif row.overnight %}
+        <div class="night-hint">این تبلیغ را صبح امروز می‌گذاری؛ بامداد فردا یک‌بار ارسال می‌شود.</div>
+        {% endif %}
+        <label>متن تبلیغ
+          <textarea name="text" rows="3" placeholder="متن… — خالی بگذار = بدون تبلیغ این ساعت">{% if row.existing and row.status == 'queued' %}{{ row.existing.text }}{% endif %}</textarea>
+          <small class="help">اگر خالی ثبت کنی، برای این ساعت تبلیغی ارسال نمی‌شود</small>
+        </label>
+        {% if row.is_super %}
+        <label>لینک جوین اجباری
+          <input type="text" name="join_link" dir="ltr" placeholder="https://… از ۱۲ امروز تا ۱۲ فردا">
+          <small class="help">با ثبت این ردیف (اگر متن داشته باشد)، جوین از ۱۲ امروز تا ۱۲ فردا فعال می‌شود</small>
+        </label>
+        {% endif %}
+        <button class="btn btn-primary" type="submit">{% if row.status == 'queued' %}به‌روزرسانی{% else %}ثبت{% endif %}</button>
+      </form>
+      {% endif %}
+    </article>
+    {% empty %}
+    <p class="muted">این برنامه ردیفی ندارد.</p>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<section class="card" id="extra-ads">
+  <div class="card-head">
+    <h2>خارج از برنامه</h2>
+    <span class="muted small">تبلیغاتی که جدا ثبت کردی (نه ردیف‌های برنامه ساعت)</span>
+  </div>
+  {% if extra_ads %}
+  <div class="slot-board">
+    {% for row in extra_ads %}
+    <article class="slot-row status-{{ row.status }}">
+      <div class="slot-meta">
+        <div class="ltr mono time">{{ row.ad.run_at|date:"H:i" }}</div>
+        <span class="tag tag-night">خارج از برنامه</span>
+        <div class="small muted">{{ row.when }}</div>
+        <div class="small">{{ row.ad.title }}</div>
+        {% if row.status == 'sent' %}<span class="ok">ارسال شد</span>
+        {% elif row.status == 'queued' %}<span class="pending">در صف</span>
+        {% else %}<span class="off">خاموش</span>{% endif %}
+      </div>
+      <div class="slot-done">
+        {% if row.status == 'sent' %}
+        <div class="delivery-box">
+          {% if row.ad.send_to_all %}
+          <div class="delivery-line">
+            <span class="tag tag-group">گروه</span>
+            <b class="ok">{{ row.ok_groups }} موفق</b> · <b class="fail">{{ row.fail_groups }} ناموفق</b>
+          </div>
+          {% endif %}
+          {% if row.ad.send_to_pv %}
+          <div class="delivery-line">
+            <span class="tag tag-pv">پیوی</span>
+            <b class="ok">{{ row.ok_pv }} موفق</b> · <b class="fail">{{ row.fail_pv }} ناموفق</b>
+          </div>
+          {% endif %}
+        </div>
+        {% else %}
+        <div class="muted small">متن: {{ row.ad.text|truncatechars:120 }}</div>
+        {% endif %}
+        <form method="post" action="{% url 'ad_panel:delete_ad' row.ad.pk %}" onsubmit="return confirm('حذف این تبلیغ؟')">
+          {% csrf_token %}
+          <button class="btn btn-sm btn-ghost danger" type="submit">حذف</button>
+        </form>
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="muted empty">هنوز تبلیغ خارج از برنامه‌ای نیست. از فرم پایین اضافه کن.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <div class="card-head"><h2>جدید — خارج از برنامه</h2></div>
+  <p class="muted small">ساعت دلخواه بزن؛ بعد از ثبت در باکس بالا («خارج از برنامه») دیده می‌شود. پیش‌فرض: همین امروز.</p>
+  <section class="panel" id="periodic-ads" style="display:none">
+    <div class="section-head"><h2>تبلیغات دوره‌ای</h2><span class="muted small">ارسال خودکار با فاصلهٔ زمانی ثابت</span></div>
+    <form method="post" action="{% url 'ad_panel:post_periodic' %}" class="custom-form">
+      {% csrf_token %}
+      <div class="custom-grid">
+        <label>نوع<select name="mode">{% for key, label in mode_choices %}<option value="{{ key }}">{{ label }}</option>{% endfor %}</select></label>
+        <label>فاصله ارسال (دقیقه)<input type="number" name="interval_minutes" min="1" max="10080" placeholder="60" required></label>
+      </div>
+      <label>متن تبلیغ<textarea name="text" rows="3" placeholder="متن تبلیغ دوره‌ای…" required></textarea></label>
+      <button class="btn btn-primary" type="submit">ثبت تبلیغ دوره‌ای</button>
+    </form>
+    {% for ad in periodic_ads %}
+      <div class="ad-row"><div><strong>{{ ad.title }}</strong><div class="muted small">هر {{ ad.interval_minutes }} دقیقه · {% if ad.is_active %}فعال{% else %}خاموش{% endif %}</div><p>{{ ad.text|truncatechars:180 }}</p></div>
+        <div class="actions"><form method="post" action="{% url 'ad_panel:toggle_ad' ad.pk %}">{% csrf_token %}<button class="btn btn-sm" type="submit">{% if ad.is_active %}خاموش{% else %}فعال{% endif %}</button></form><form method="post" action="{% url 'ad_panel:delete_ad' ad.pk %}" onsubmit="return confirm('حذف این تبلیغ دوره‌ای؟')">{% csrf_token %}<button class="btn btn-sm btn-danger" type="submit">حذف</button></form></div>
+      </div>
+    {% empty %}<p class="muted empty">هنوز تبلیغ دوره‌ای ثبت نشده است.</p>{% endfor %}
+  </section>
+
+  <form method="post" action="{% url 'ad_panel:post_custom' %}" class="custom-form" id="custom-form">
+    {% csrf_token %}
+    <div class="custom-grid">
+      <label>نوع زمان‌بندی
+        <select name="schedule_type" id="custom-schedule-type">
+          <option value="fixed" selected>یک‌باره در ساعت مشخص</option>
+          <option value="interval">دوره‌ای</option>
+        </select>
+      </label>
+      <label>ساعت
+        <input type="text" name="time" class="slots-input" dir="ltr" placeholder="13:30 یا 27:00">
+      </label>
+      <label>فاصله ارسال دوره‌ای (دقیقه)
+        <input type="number" name="interval_minutes" min="1" max="10080" placeholder="فقط برای نوع دوره‌ای">
+      </label>
+      <label>روز ارسال
+        <select name="day_mode" id="custom-day-mode">
+          <option value="today" selected>همین امروز</option>
+          <option value="auto">خودکار (قبل ۶صبح / ۲۵ = بامداد فردا)</option>
+          <option value="tomorrow_am">بامداد فردا — ثبت از امروز</option>
+        </select>
+      </label>
+      <label>نوع
+        <select name="mode" id="custom-mode">
+          {% for val, label in mode_choices %}
+          <option value="{{ val }}">{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+    <label>متن تبلیغ
+      <textarea name="text" rows="3" placeholder="متن تبلیغ…" required></textarea>
+    </label>
+    <label id="custom-join-box" class="field-join">لینک جوین (سوپر بمب — ۱۲ امروز تا ۱۲ فردا)
+      <input type="text" name="join_link" dir="ltr" placeholder="https://…">
+    </label>
+    <div class="form-actions">
+      <button class="btn btn-primary" type="submit">ثبت تبلیغ خارج از برنامه</button>
+    </div>
+  </form>
+</section>
+
+{% if today_ads %}
+<section class="card">
+  <div class="card-head"><h2>صف امروز</h2></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>ساعت</th><th>عنوان</th><th>وضعیت</th><th>گروه موفق</th><th>پیوی موفق</th><th></th></tr></thead>
+      <tbody>
+      {% for ad in today_ads %}
+        <tr>
+          <td class="ltr mono">{{ ad.run_at|date:"m/d H:i" }}</td>
+          <td>{{ ad.title }}</td>
+          <td>
+            {% if ad.last_sent %}<span class="ok">ارسال شد</span>
+            {% elif ad.is_active %}<span class="pending">منتظر</span>
+            {% else %}<span class="off">خاموش</span>{% endif %}
+          </td>
+          <td class="ltr mono">{% if ad.last_sent %}{{ ad.success_groups }}✓ / {{ ad.fail_groups }}✗{% else %}—{% endif %}</td>
+          <td class="ltr mono">{% if ad.last_sent %}{{ ad.success_pv }}✓ / {{ ad.fail_pv }}✗{% else %}—{% endif %}</td>
+          <td>
+            <form method="post" action="{% url 'ad_panel:delete_ad' ad.pk %}" onsubmit="return confirm('حذف؟')">{% csrf_token %}
+              <button class="linkish danger" type="submit">حذف</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+{% endblock %}

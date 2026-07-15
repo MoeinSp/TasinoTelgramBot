@@ -1,0 +1,50 @@
+{% extends "ad_panel/base.html" %}
+{% block title %}{% if obj %}ویرایش برنامه{% else %}برنامه جدید{% endif %}{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1>{% if obj %}ویرایش برنامه{% else %}برنامه ساعت جدید{% endif %}</h1>
+    <p class="muted">ساعت ۲۵:۰۰ = ۱ شب فردا (۰۱:۰۰ بامداد فردا). متن خالی در پنل امروز = بدون تبلیغ آن ساعت.</p>
+  </div>
+</header>
+
+<form method="post" class="card form-card" id="schedule-form">
+  {% csrf_token %}
+  <label>نام برنامه {{ form.name }}</label>
+  <label class="check-row">{{ form.is_favorite }} استفاده در پنل امروز</label>
+
+  <h2 class="sub">ردیف‌ها</h2>
+  <p class="help">ساعت را مثل <b class="ltr">09:00</b> یا <b class="ltr">25:00</b> بنویس (۲۵ = ۱ شب فردا)</p>
+  <div id="schedule-rows" class="schedule-rows">
+    {% for e in entries %}
+    <div class="schedule-row">
+      <input type="text" name="row_time" class="slots-input" dir="ltr" value="{{ e.time }}" placeholder="09:00 یا 25:00" required>
+      <select name="row_mode">
+        {% for val, label in mode_choices %}
+        <option value="{{ val }}" {% if e.mode == val %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+      <button type="button" class="btn btn-sm btn-ghost danger row-del">حذف</button>
+    </div>
+    {% endfor %}
+  </div>
+  <button type="button" class="btn btn-sm" id="add-row">+ ردیف</button>
+
+  <template id="row-template">
+    <div class="schedule-row">
+      <input type="text" name="row_time" class="slots-input" dir="ltr" value="12:00" placeholder="09:00 یا 25:00" required>
+      <select name="row_mode">
+        {% for val, label in mode_choices %}
+        <option value="{{ val }}">{{ label }}</option>
+        {% endfor %}
+      </select>
+      <button type="button" class="btn btn-sm btn-ghost danger row-del">حذف</button>
+    </div>
+  </template>
+
+  <div class="form-actions">
+    <button class="btn btn-primary" type="submit">ذخیره</button>
+    <a class="btn btn-ghost" href="{% url 'ad_panel:schedules' %}">بازگشت</a>
+  </div>
+</form>
+{% endblock %}

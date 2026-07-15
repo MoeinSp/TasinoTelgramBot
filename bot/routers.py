@@ -12,6 +12,7 @@ from bot.handlers.group_lifecycle import router as group_lifecycle_router
 from bot.middleware import (
     MessageTrackingMiddleware, RequiredJoinMiddleware,
     PrivateUserSyncMiddleware, GlobalBotOffMiddleware,
+    GroupRequiredJoinMiddleware,
 )
 
 
@@ -26,6 +27,7 @@ def setup_routers(dp: Dispatcher):
     join_mw = RequiredJoinMiddleware()
     dp.message.outer_middleware(join_mw)
     dp.callback_query.outer_middleware(join_mw)
+    dp.message.outer_middleware(GroupRequiredJoinMiddleware())
 
     dp.include_router(private_router)
     dp.include_router(panel_router)   # callback پنل — گروه و پیوی
