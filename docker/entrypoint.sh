@@ -43,6 +43,23 @@ run_migrate() {
   exit 1
 }
 
+run_prepare() {
+  echo "==> makemigrations"
+  python manage.py makemigrations --no-input
+  run_migrate
+  echo "==> collectstatic"
+  python manage.py collectstatic --no-input
+  echo "==> django check"
+  python manage.py check
+}
+
+if [ "${1:-}" = "prepare-only" ]; then
+  wait_for_db
+  run_prepare
+  echo "==> prepare-only done"
+  exit 0
+fi
+
 if [ "${1:-}" = "migrate-only" ]; then
   wait_for_db
   run_migrate

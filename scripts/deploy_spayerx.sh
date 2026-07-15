@@ -60,11 +60,9 @@ else
   echo "==> بدون بیلد"
 fi
 
-if [ "$force_migrate" -eq 1 ]; then
-  sh scripts/migrate-if-needed.sh --force
-else
-  sh scripts/migrate-if-needed.sh
-fi
+echo "==> prepare: makemigrations + migrate + collectstatic + check"
+$DC rm -f prepare >/dev/null 2>&1 || true
+$DC up --no-build --abort-on-container-exit --exit-code-from prepare prepare
 
 echo "==> bot"
 $DC up -d --no-build bot

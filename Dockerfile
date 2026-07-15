@@ -20,4 +20,7 @@ COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh \
  && mkdir -p /app/staticfiles
 
+# کد در production از volume /app می‌آید؛ prepare پس از build و پیش از bot
+# به‌صورت خودکار makemigrations/migrate/collectstatic/check را اجرا می‌کند.
+
 ENTRYPOINT ["sh", "/entrypoint.sh"]

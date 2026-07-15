@@ -78,6 +78,20 @@ services:
     entrypoint: ["sh", "/entrypoint.sh", "migrate-only"]
     restart: "no"
 
+  # قبل از هر اجرای bot: migrationها ساخته/اعمال و staticها جمع می‌شوند.
+  prepare:
+    <<: *bot-image
+    container_name: tasino_prepare
+    env_file: .env.prod
+    environment:
+      DATABASE_URL: postgresql://tasino:${DB_PASSWORD}@db:5432/tasino_db
+      BOT_REDIS_URL: redis://redis:6379/2
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["sh", "/entrypoint.sh", "prepare-only"]
+    restart: "no"
+
   bot:
     <<: *bot-image
     container_name: tasino_bot
@@ -87,6 +101,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      prepare:
+        condition: service_completed_successfully
     env_file: .env.prod
     environment:
       DATABASE_URL: postgresql://tasino:${DB_PASSWORD}@db:5432/tasino_db
