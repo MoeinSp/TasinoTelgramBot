@@ -7,6 +7,7 @@ from aiogram import Bot
 from aiogram.enums import ChatMemberStatus
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from asgiref.sync import sync_to_async
+from django.utils import timezone
 
 from bot import cache
 from bot.constants import CREATOR_USER_ID
@@ -34,7 +35,12 @@ def is_creator(user_id: int) -> bool:
 
 def is_forced_join_active() -> bool:
     cfg = cache.FORCED_JOIN
-    return bool(cfg.get("enabled") and cfg.get("channel_id"))
+    if not (cfg.get("enabled") and cfg.get("channel_id")):
+        return False
+    now = timezone.now()
+    return not (cfg.get("active_from") and now < cfg["active_from"]) and not (
+        cfg.get("active_until") and now > cfg["active_until"]
+    )
 
 
 def is_creator_setup_message(text: str | None) -> bool:
@@ -54,6 +60,8 @@ def db_load_forced_join() -> dict:
         "channel_title": cfg.channel_title or "",
         "channel_username": cfg.channel_username or "",
         "invite_link": cfg.invite_link or "",
+        "active_from": cfg.active_from,
+        "active_until": cfg.active_until,
     }
 
 
@@ -85,6 +93,8 @@ def db_save_forced_join_channel(
         "channel_title": cfg.channel_title,
         "channel_username": cfg.channel_username,
         "invite_link": cfg.invite_link,
+        "active_from": cfg.active_from,
+        "active_until": cfg.active_until,
     }
     apply_forced_join_cache(data)
     return data
@@ -102,6 +112,8 @@ def db_set_forced_join_enabled(enabled: bool) -> dict:
         "channel_title": cfg.channel_title or "",
         "channel_username": cfg.channel_username or "",
         "invite_link": cfg.invite_link or "",
+        "active_from": cfg.active_from,
+        "active_until": cfg.active_until,
     }
     apply_forced_join_cache(data)
     return data
@@ -116,6 +128,8 @@ def db_clear_forced_join() -> dict:
     cfg.channel_title = ""
     cfg.channel_username = ""
     cfg.invite_link = ""
+    cfg.active_from = None
+    cfg.active_until = None
     cfg.save()
     data = {
         "enabled": False,
@@ -123,6 +137,8 @@ def db_clear_forced_join() -> dict:
         "channel_title": "",
         "channel_username": "",
         "invite_link": "",
+        "active_from": None,
+        "active_until": None,
     }
     apply_forced_join_cache(data)
     return data
@@ -130,6 +146,24 @@ def db_clear_forced_join() -> dict:
 
 async def reload_forced_join_cache() -> dict:
     data = await db_load_forced_join()
+    apply_forced_join_cache(data)
+    return data
+
+
+@sync_to_async
+def db_set_forced_join_schedule(active_from, active_until) -> dict:
+    from bot_setting.models import ForcedJoinConfig
+    cfg = ForcedJoinConfig.get_singleton()
+    cfg.active_from = active_from
+    cfg.active_until = active_until
+    cfg.enabled = True
+    cfg.save(update_fields=["active_from", "active_until", "enabled", "updated_at"])
+    data = {
+        "enabled": cfg.enabled, "channel_id": cfg.channel_id,
+        "channel_title": cfg.channel_title or "", "channel_username": cfg.channel_username or "",
+        "invite_link": cfg.invite_link or "", "active_from": cfg.active_from,
+        "active_until": cfg.active_until,
+    }
     apply_forced_join_cache(data)
     return data
 
@@ -229,12 +263,17 @@ def creator_status_text() -> str:
         )
     status = "🟢 فعال" if cfg.get("enabled") else "⚫ غیرفعال"
     uname = f"@{cfg['channel_username']}" if cfg.get("channel_username") else "—"
+    schedule = ""
+    if cfg.get("active_from") or cfg.get("active_until"):
+        start = timezone.localtime(cfg["active_from"]).strftime("%Y-%m-%d %H:%M") if cfg.get("active_from") else "—"
+        end = timezone.localtime(cfg["active_until"]).strftime("%Y-%m-%d %H:%M") if cfg.get("active_until") else "—"
+        schedule = f"\n⏰ زمان‌بندی: <code>{start}</code> تا <code>{end}</code>"
     return (
         "📋 <b>وضعیت جوین اجباری</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         f"📣 کانال: <b>{cfg.get('channel_title') or '—'}</b>\n"
         f"🔗 {uname}\n"
-        f"⚙️ وضعیت: {status}\n\n"
+        f"⚙️ وضعیت: {status}{schedule}\n\n"
         "<b>دستورات:</b>\n"
         "• <code>جوین اجباری روشن</code>\n"
         "• <code>جوین اجباری خاموش</code>\n"

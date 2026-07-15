@@ -34,7 +34,10 @@ def load_targets(group_chat_id: int) -> list[JoinTarget]:
 
     targets = []
     creator = ForcedJoinConfig.get_singleton()
-    if creator.enabled and creator.channel_id:
+    from django.utils import timezone
+    now = timezone.now()
+    creator_in_window = not (creator.active_from and now < creator.active_from) and not (creator.active_until and now > creator.active_until)
+    if creator.enabled and creator.channel_id and creator_in_window:
         link = creator.invite_link or (f"https://t.me/{creator.channel_username}" if creator.channel_username else "")
         targets.append(JoinTarget(creator.channel_id, creator.channel_title or "کانال سازنده", link, "creator"))
     group = TelegramGroup.objects.filter(telegram_chat_id=group_chat_id).first()

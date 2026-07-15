@@ -20,6 +20,7 @@ from bot.required_join import (
     creator_status_text,
     db_save_forced_join_channel,
     db_set_forced_join_enabled,
+    db_set_forced_join_schedule,
     db_clear_forced_join,
     verify_bot_channel_access,
     resolve_channel_invite_link,
@@ -63,6 +64,7 @@ def _creator_panel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [Btn(text="📊 وضعیت جوین اجباری", callback_data="cr:fj:status")],
         [Btn(text="🟢 روشن", callback_data="cr:fj:on"), Btn(text="⚫ خاموش", callback_data="cr:fj:off")],
+        [Btn(text="⏰ زمان‌بندی جوین سازنده", callback_data="cr:fj:schedule"), Btn(text="♻️ حذف زمان‌بندی", callback_data="cr:fj:schedule_clear")],
         [Btn(text="🗑 حذف کانال", callback_data="cr:fj:clear"), Btn(text="📥 ثبت با آیدی", callback_data="cr:fj:setid")],
         [Btn(text="🔗 ثبت جوین سازنده با لینک", callback_data="cr:fj:setlink")],
         [Btn(text="🔗 وضعیت لینکدونی", callback_data="cr:ld:status")],
@@ -951,6 +953,22 @@ async def cb_creator_panel(call: CallbackQuery, bot: Bot):
         await call.message.answer("⚫ جوین اجباری غیرفعال شد.", parse_mode="HTML")
         return await call.answer("انجام شد")
 
+    if action == "fj:schedule":
+        if not cache.FORCED_JOIN.get("channel_id"):
+            return await call.answer("ابتدا لینک/کانال جوین سازنده را تنظیم کنید.", show_alert=True)
+        _CREATOR_STATE[call.from_user.id] = "await_forced_join_schedule"
+        await call.message.answer(
+            "شروع و پایان را با این قالب بفرستید:\n"
+            "<code>2026-07-20 12:00 | 2026-07-25 23:30</code>\n\n"
+            "زمان‌ها بر اساس Asia/Tehran هستند.", parse_mode="HTML",
+        )
+        return await call.answer("منتظر بازه زمانی...")
+
+    if action == "fj:schedule_clear":
+        await db_set_forced_join_schedule(None, None)
+        await call.message.answer("♻️ زمان‌بندی حذف شد؛ وضعیت روشن/خاموش دستی اعمال می‌شود.")
+        return await call.answer("حذف شد")
+
     if action == "fj:clear":
         await db_clear_forced_join()
         await call.message.answer("🗑 کانال اجباری حذف شد و سیستم غیرفعال شد.", parse_mode="HTML")
@@ -1520,6 +1538,27 @@ async def cmd_set_forced_channel_by_state(message: Message, bot: Bot):
     channel_id = int(message.text.strip())
     ok, text = await _setup_channel(bot, channel_id)
     await message.answer(text, parse_mode="HTML")
+
+
+@router.message(F.text, F.func(lambda m: bool(m.from_user) and _CREATOR_STATE.get(m.from_user.id) == "await_forced_join_schedule"))
+async def cmd_set_forced_join_schedule(message: Message):
+    if not is_creator(message.from_user.id):
+        return
+    from datetime import datetime
+    from django.utils import timezone
+    try:
+        left, right = [part.strip() for part in message.text.split("|", 1)]
+        start = datetime.strptime(left, "%Y-%m-%d %H:%M")
+        end = datetime.strptime(right, "%Y-%m-%d %H:%M")
+        start = timezone.make_aware(start)
+        end = timezone.make_aware(end)
+        if end <= start:
+            raise ValueError("پایان باید بعد از شروع باشد")
+    except Exception as exc:
+        return await message.answer(f"❌ قالب یا بازه نامعتبر است: {exc}\nنمونه: 2026-07-20 12:00 | 2026-07-25 23:30")
+    _CREATOR_STATE.pop(message.from_user.id, None)
+    await db_set_forced_join_schedule(start, end)
+    await message.answer("✅ زمان‌بندی جوین اجباری سازنده ذخیره شد و فقط در همین بازه فعال خواهد بود.")
 
 
 @router.message(F.text, F.func(lambda m: bool(m.from_user) and _CREATOR_STATE.get(m.from_user.id) == "await_channel_link"))

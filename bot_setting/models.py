@@ -80,6 +80,8 @@ class ForcedJoinConfig(models.Model):
     channel_title = models.CharField(max_length=200, blank=True, default="", verbose_name="نام کانال")
     channel_username = models.CharField(max_length=100, blank=True, default="", verbose_name="یوزرنیم")
     invite_link = models.CharField(max_length=512, blank=True, default="", verbose_name="لینک دعوت")
+    active_from = models.DateTimeField(null=True, blank=True, verbose_name="شروع زمان‌بندی")
+    active_until = models.DateTimeField(null=True, blank=True, verbose_name="پایان زمان‌بندی")
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

@@ -107,6 +107,8 @@ def _load_from_db():
         "channel_title": fj.channel_title or "",
         "channel_username": fj.channel_username or "",
         "invite_link": fj.invite_link or "",
+        "active_from": fj.active_from,
+        "active_until": fj.active_until,
     })
     sc = BotSiteConfig.get_singleton()
     apply_site_config_cache({
