@@ -18,20 +18,21 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
     command: >
       postgres
-        -c shared_buffers=32MB
-        -c effective_cache_size=128MB
-        -c work_mem=2MB
-        -c maintenance_work_mem=16MB
-        -c max_connections=15
+        -c shared_buffers=128MB
+        -c effective_cache_size=512MB
+        -c work_mem=4MB
+        -c maintenance_work_mem=64MB
+        -c max_connections=40
         -c checkpoint_completion_target=0.9
-        -c wal_buffers=4MB
+        -c wal_buffers=16MB
         -c synchronous_commit=off
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    shm_size: "256m"
     deploy:
       resources:
         limits:
-          memory: 80m
+          memory: 768m
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tasino -d tasino_db"]
       interval: 10s
@@ -115,9 +116,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 320m
+          memory: 768m
         reservations:
-          memory: 80m
+          memory: 128m
     logging:
       driver: "json-file"
       options:

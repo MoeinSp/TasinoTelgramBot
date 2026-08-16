@@ -44,8 +44,14 @@ run_migrate() {
 }
 
 run_prepare() {
-  echo "==> makemigrations"
-  python manage.py makemigrations --no-input
+  # در پروداکشن makemigrations اجباری نکن — اگر مدل عوض شده و مایگریشن ساخته نشده،
+  # فقط هشدار بده؛ شکست واقعی از migrate/collectstatic/check باشد.
+  if [ "${RUN_MAKEMIGRATIONS:-0}" = "1" ]; then
+    echo "==> makemigrations"
+    python manage.py makemigrations --no-input
+  else
+    echo "==> skip makemigrations (set RUN_MAKEMIGRATIONS=1 to enable)"
+  fi
   run_migrate
   echo "==> collectstatic"
   python manage.py collectstatic --no-input
