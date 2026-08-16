@@ -112,6 +112,24 @@ class TelegramGroup(models.Model):
         help_text="با روشن بودن، پیام‌های تکراری مثل «توی این بازی نیستی» و «قابلیت غیرفعال» ارسال نمی‌شوند.",
     )
 
+    game_chat_lock = models.BooleanField(
+        default=False,
+        verbose_name="قفل بازی",
+        help_text="فقط پیام‌های بازی و پیشنهاد شرط (عدد / شروع …) مجاز؛ بقیه پاک می‌شود. ادمین و ویژه معاف‌اند.",
+    )
+
+    transfer_enabled = models.BooleanField(
+        default=True,
+        verbose_name="انتقال موجودی",
+        help_text="اگر خاموش باشد، دستور انتقال موجودی در گروه کار نمی‌کند.",
+    )
+
+    league_enabled = models.BooleanField(
+        default=False,
+        verbose_name="لیگ شرط",
+        help_text="اگر روشن باشد، حجم شرط کاربران در لیگ ثبت و جوایز پله‌ای پرداخت می‌شود.",
+    )
+
     pv_start_enabled = models.BooleanField(
         default=False,
         verbose_name="شروع پیوی",
@@ -122,6 +140,43 @@ class TelegramGroup(models.Model):
         blank=True,
         default="",
         verbose_name="دلیل خاموش بودن شروع پیوی",
+    )
+    pv_soft_timeout = models.BooleanField(
+        default=False,
+        verbose_name="باخت پیوی خاموش",
+        help_text="اگر روشن باشد، تاخیر در تاس‌تعیین/انتخاب راند/قبل از اولین تاس بازی اصلی باعث باخت نمی‌شود (بازی لغو می‌شود).",
+    )
+    pv_chat_enabled = models.BooleanField(
+        default=True,
+        verbose_name="چت پیوی",
+        help_text="اگر خاموش باشد، چت/واکنش داخل بازی پیوی برای اعضای گروه غیرفعال است.",
+    )
+    prize_stat_games = models.PositiveIntegerField(
+        default=0,
+        verbose_name="جایزه آمار تعداد",
+        help_text="جایزه نفر اول پربازی‌ترین در آمار روزانه (۰ = بدون جایزه).",
+    )
+    prize_stat_max_bet = models.PositiveIntegerField(
+        default=0,
+        verbose_name="جایزه آمار بیشترین شرط",
+        help_text="جایزه بیشترین شرط یک‌بازی در آمار روزانه (۰ = بدون جایزه).",
+    )
+    prize_week_1 = models.PositiveIntegerField(
+        default=0,
+        verbose_name="جایزه لیگ رتبه ۱",
+    )
+    prize_week_2 = models.PositiveIntegerField(
+        default=0,
+        verbose_name="جایزه لیگ رتبه ۲",
+    )
+    prize_week_3 = models.PositiveIntegerField(
+        default=0,
+        verbose_name="جایزه لیگ رتبه ۳",
+    )
+    league_board_theme = models.PositiveSmallIntegerField(
+        default=1,
+        verbose_name="تم جدول لیگ",
+        help_text="شماره تم نمایش جدول لیگ (۱ تا ۱۰).",
     )
 
     is_speaker_enabled = models.BooleanField(
@@ -203,6 +258,13 @@ class TelegramGroup(models.Model):
         default=0,
         verbose_name="حداقل مبلغ شرط پیوی",
         help_text="۰ = فقط حداقل سراسری. مثلاً ۳۰ یعنی شروع پیوی با شرط کمتر از ۳۰ قبول نمی‌شود.",
+    )
+
+    pv_results_chat_id = models.BigIntegerField(
+        null=True,
+        blank=True,
+        verbose_name="گپ اعلام نتایج پیوی",
+        help_text="اگر تنظیم شود، نتیجهٔ بازی‌های پیوی این گروه + شناسهٔ بازیکنان در آن گپ هم اعلام می‌شود.",
     )
 
     game_seq = models.PositiveIntegerField(
@@ -637,6 +699,44 @@ class WalletTransaction(models.Model):
 
     def __str__(self):
         return f"{self.telegram_user_id} | {self.type} | {self.amount}"
+
+
+class LeagueStanding(models.Model):
+    """پیشرفت لیگ شرط در هر گروه — بر اساس مجموع مبلغ شرط (هفتگی)."""
+    telegram_chat_id = models.BigIntegerField(db_index=True)
+    telegram_user_id = models.BigIntegerField(db_index=True)
+    season_id = models.CharField(
+        max_length=16,
+        blank=True,
+        default="",
+        db_index=True,
+        verbose_name="شناسه هفته",
+        help_text="تاریخ شنبهٔ شروع هفته به صورت YYYY-MM-DD",
+    )
+    wager_total = models.BigIntegerField(default=0, verbose_name="مجموع شرط")
+    claimed_level = models.PositiveSmallIntegerField(
+        default=0,
+        verbose_name="آخرین پلهٔ جایزه‌گرفته",
+        help_text="۰ = هنوز جایزه‌ای نگرفته؛ ۱..۵ = آخرین پله پرداخت‌شده",
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["telegram_chat_id", "telegram_user_id"],
+                name="uniq_tg_league_standing",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["telegram_chat_id", "-wager_total"]),
+            models.Index(fields=["telegram_chat_id", "season_id", "-wager_total"]),
+        ]
+        verbose_name = "رتبه لیگ"
+        verbose_name_plural = "رتبه‌های لیگ"
+
+    def __str__(self):
+        return f"{self.telegram_user_id}@{self.telegram_chat_id}: {self.wager_total}"
 
 
 class AdminAccounting(models.Model):

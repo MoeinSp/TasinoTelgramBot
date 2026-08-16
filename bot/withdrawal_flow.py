@@ -1,6 +1,8 @@
 """User initiated withdrawal flow for Telegram."""
 from __future__ import annotations
 
+import html
+
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton as IKB, InlineKeyboardMarkup
 from asgiref.sync import sync_to_async
@@ -18,6 +20,7 @@ BEGIN_NO_PV = "no_pv"
 BEGIN_MIN_BLOCKED = "min_blocked"
 BEGIN_PENDING = "pending_open"
 BEGIN_BANNED = "banned"
+BEGIN_NO_BALANCE = "no_balance"
 
 
 def remember_wd_delivery(request_id: int, chat_id: int, message_id: int) -> None:
@@ -115,6 +118,7 @@ def format_withdrawal_admin_text(
     refreshed: bool = False,
     balance: int | None = None,
     settle_kind: str | None = None,
+    card_warning: str = "",
 ) -> str:
     status_line = _STATUS_FA.get(status, status)
     head = "🔄 درخواست تسویه (بروزرسانی‌شده)" if refreshed else "📥 درخواست تسویه"
@@ -126,16 +130,20 @@ def format_withdrawal_admin_text(
         else:
             kind = "custom"
     kind_fa = "کامل" if kind == "full" else "دلخواه"
-    return (
-        f"{head}\n"
-        f"📌 وضعیت: {status_line}\n"
-        f"👤 کاربر: {user_name}\n"
-        f"📌 نوع تسویه: {kind_fa}\n"
-        f"💸 مبلغ تسویه: {amount:,}\n"
-        f"💳 کارت: <code>{card}</code>\n"
-        f"👤 نام کارت: {card_name}\n\n"
-        f"{_WD_WARN}"
-    )
+    lines = [
+        head,
+        f"📌 وضعیت: {status_line}",
+        f"👤 کاربر: {html.escape(str(user_name or ''))}",
+        f"📌 نوع تسویه: {kind_fa}",
+        f"💸 مبلغ تسویه: {amount:,}",
+        f"💳 کارت: <code>{html.escape(str(card or ''))}</code>",
+        f"👤 نام کارت: {html.escape(str(card_name or ''))}",
+    ]
+    warn = (card_warning or "").strip()
+    if warn:
+        lines.extend(["", warn])
+    lines.extend(["", _WD_WARN])
+    return "\n".join(lines)
 
 
 def withdrawal_admin_keyboard(request_id: int, *, status: str = "pending") -> InlineKeyboardMarkup:
@@ -146,6 +154,7 @@ def withdrawal_admin_keyboard(request_id: int, *, status: str = "pending") -> In
                 IKB(text="💬 پیام", callback_data=f"wd:message:{rid}"),
                 IKB(text="🔄 بروزرسانی", callback_data=f"wd:refresh:{rid}"),
             ],
+            [IKB(text="📜 کارت‌های قبلی", callback_data=f"wd:cards:{rid}")],
         ])
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -156,8 +165,125 @@ def withdrawal_admin_keyboard(request_id: int, *, status: str = "pending") -> In
             IKB(text="📎 رسید (اختیاری)", callback_data=f"wd:receipt:{rid}"),
             IKB(text="💬 پیام", callback_data=f"wd:message:{rid}"),
         ],
-        [IKB(text="🔄 بروزرسانی", callback_data=f"wd:refresh:{rid}")],
+        [
+            IKB(text="🔄 بروزرسانی", callback_data=f"wd:refresh:{rid}"),
+            IKB(text="📜 کارت‌های قبلی", callback_data=f"wd:cards:{rid}"),
+        ],
     ])
+
+
+def _norm_card(value) -> str:
+    return str(value or "").strip().translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
+
+
+def collect_withdrawal_cards_sync(chat_id, user_id, *, extra_card=None, extra_name=None) -> list[dict]:
+    """فقط کارت‌های یکتا از درخواست‌های تسویه (قدیمی → جدید)."""
+    from account.models import WithdrawalRequest
+
+    cards: list[dict] = []
+    seen: set[str] = set()
+
+    def _add(num, name):
+        n = _norm_card(num)
+        if not n or n in seen:
+            return
+        seen.add(n)
+        cards.append({"card": n, "name": str(name or "").strip() or "—"})
+
+    rows = (
+        WithdrawalRequest.objects.filter(
+            telegram_chat_id=int(chat_id),
+            telegram_user_id=int(user_id),
+        )
+        .order_by("created_at", "id")
+        .values_list("card_number", "card_name")
+    )
+    for num, name in rows:
+        _add(num, name)
+
+    if extra_card:
+        _add(extra_card, extra_name)
+    return cards
+
+
+def collect_user_cards_sync(chat_id, user_id, *, extra_card=None, extra_name=None) -> list[dict]:
+    """کارت‌های یکتا: درخواست‌های تسویه + کارت‌های پروفایل عضو."""
+    from account.models import TelegramGroupMember
+
+    cards = collect_withdrawal_cards_sync(
+        chat_id, user_id, extra_card=extra_card, extra_name=extra_name,
+    )
+    seen = {c["card"] for c in cards}
+
+    def _add(num, name):
+        n = _norm_card(num)
+        if not n or n in seen:
+            return
+        seen.add(n)
+        cards.append({"card": n, "name": str(name or "").strip() or "—"})
+
+    m = TelegramGroupMember.objects.filter(
+        telegram_chat_id=int(chat_id),
+        telegram_user_id=int(user_id),
+    ).first()
+    if m:
+        name = getattr(m, "card_name", "")
+        _add(getattr(m, "card_number", ""), name)
+        _add(getattr(m, "card_number2", ""), name)
+        _add(getattr(m, "card_number3", ""), name)
+    return cards
+
+
+def format_card_change_warning(cards: list[dict], *, current_card: str = "") -> str:
+    n = len(cards or [])
+    if n < 2:
+        return ""
+    changes = n - 1
+    cur = _norm_card(current_card)
+    changed_now = bool(cur and cur != cards[0]["card"])
+    head = "⚠️ این کاربر کارت را عوض کرده است." if changed_now else "⚠️ این کاربر سابقه تعویض کارت دارد."
+    return (
+        f"{head}\n"
+        f"🔁 تا به حال {changes} بار کارت را عوض کرده\n"
+        f"📇 تعداد کل کارت‌های ثبت‌شده: {n}"
+    )
+
+
+def format_user_cards_history(cards: list[dict], *, user_name: str = "", html: bool = True) -> str:
+    title = "📜 تاریخچه کارت‌های کاربر"
+    if user_name:
+        title += f"\n👤 {user_name}"
+    lines = [title, "━━━━━━━━━━━━━━━━━━"]
+    if not cards:
+        lines.append("هنوز کارتی ثبت نشده است.")
+        return "\n".join(lines)
+
+    def _code(value: str) -> str:
+        return f"<code>{value}</code>" if html else f"`{value}`"
+
+    for i, item in enumerate(cards, 1):
+        lines.append(f"{i}) {_code(item['card'])}")
+        lines.append(f"   👤 {item.get('name') or '—'}")
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append(f"📇 مجموع: {len(cards)} کارت")
+    if len(cards) >= 2:
+        lines.append(f"🔁 تعویض کارت: {len(cards) - 1} بار")
+    return "\n".join(lines)
+
+
+@sync_to_async
+def get_user_card_history(chat_id, user_id, *, extra_card=None, extra_name=None) -> list[dict]:
+    return collect_user_cards_sync(
+        chat_id, user_id, extra_card=extra_card, extra_name=extra_name,
+    )
+
+
+@sync_to_async
+def get_card_warning_for_request(chat_id, user_id, card, card_name="") -> str:
+    cards = collect_withdrawal_cards_sync(
+        chat_id, user_id, extra_card=card, extra_name=card_name,
+    )
+    return format_card_change_warning(cards, current_card=card)
 
 
 @sync_to_async
@@ -305,7 +431,37 @@ async def begin(bot: Bot, group_id: int, user_id: int) -> str:
         if not ok:
             return BEGIN_NO_PV
         return BEGIN_PENDING
+    if int(user_id) in _flow:
+        data = _flow[int(user_id)]
+        total, available, pending = await get_playable_balance(group_id, user_id)
+        data["balance"] = available
+        data["chat_id"] = int(group_id)
+        if available <= 0:
+            _flow.pop(int(user_id), None)
+            await send_private(bot, user_id, "❌ موجودی قابل تسویه ندارید.")
+            return BEGIN_NO_BALANCE
+        card = data.get("card") or ""
+        name = data.get("name") or ""
+        if card and name:
+            data["step"] = "amount"
+            pending_line = f"\n⏳ در انتظار تسویه: {pending:,}" if pending > 0 else ""
+            text = (
+                f"🧾 درخواست تسویه قبلی شما هنوز باز است.\n"
+                f"💰 موجودی قابل تسویه: {available:,}{pending_line}\n"
+                f"💳 کارت: <code>{card}</code>\n👤 نام: {name}\n\nمبلغ تسویه را وارد کنید."
+            )
+            await send_private(bot, user_id, text, reply_markup=_kb(True, True))
+        else:
+            await send_private(
+                bot, user_id,
+                "🧾 درخواست تسویه قبلی شما هنوز باز است.\nادامه دهید.",
+                reply_markup=_kb(bool(card), bool(name)),
+            )
+        return BEGIN_OK
     total, available, pending = await get_playable_balance(group_id, user_id)
+    if available <= 0:
+        ok = await send_private(bot, user_id, "❌ موجودی قابل تسویه ندارید.")
+        return BEGIN_NO_PV if not ok else BEGIN_NO_BALANCE
     blocked = await check_min_withdrawal(group_id, available)
     if blocked:
         await bot.send_message(user_id, blocked)
@@ -384,86 +540,119 @@ async def handle_text(bot: Bot, user_id: int, text: str) -> bool:
         )
         return True
     if step == "amount":
+        if data.get("submitting"):
+            await bot.send_message(user_id, "⏳ درخواست قبلی در حال ثبت است؛ لطفاً صبر کنید.")
+            return True
         try:
-            amount = int(t.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")))
+            amount = int(t.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")))
         except ValueError:
             amount = 0
-        available = int(data.get("balance", 0))
-        if amount <= 0 or amount > available:
+        if amount <= 0:
             await bot.send_message(
                 user_id,
-                "⚠️ مبلغ نامعتبر است یا از موجودی قابل تسویه بیشتر است.",
+                "⚠️ مبلغ نامعتبر است.",
                 reply_markup=_kb(True, True),
             )
             return True
-        blocked = await check_min_withdrawal(data["chat_id"], available, amount)
-        if blocked:
-            await bot.send_message(user_id, blocked, reply_markup=_kb(True, True))
-            return True
-        open_info = await get_open_withdrawal_info(data["chat_id"], user_id)
-        if open_info:
-            _flow.pop(int(user_id), None)
-            await bot.send_message(user_id, format_open_withdrawal_user_block(open_info))
-            return True
-        from account.models import WithdrawalRequest
-
-        settle_kind = (data.get("settle_kind") or "").strip().lower()
-        if settle_kind != "full":
-            settle_kind = "full" if amount == available else "custom"
-        req = await sync_to_async(WithdrawalRequest.objects.create)(
-            telegram_chat_id=data["chat_id"],
-            telegram_user_id=int(user_id),
-            amount=amount,
-            card_number=data["card"],
-            card_name=data["name"],
-            status="pending",
-            settle_kind=settle_kind,
-        )
-        _flow.pop(int(user_id), None)
+        data["submitting"] = True
         try:
-            u = await bot.get_chat(int(user_id))
-            user_name = (u.full_name or u.first_name or "").strip() or str(user_id)
-        except Exception:
-            user_name = str(user_id)
-        kind_fa = "کامل" if settle_kind == "full" else "دلخواه"
-        msg = format_withdrawal_admin_text(
-            user_name=user_name,
-            amount=amount,
-            card=data["card"],
-            card_name=data["name"],
-            status="pending",
-            settle_kind=settle_kind,
-        )
-        kb = withdrawal_admin_keyboard(req.id, status="pending")
-        delivered = 0
-        from bot.wallet_helpers import collect_manager_ids
-
-        manager_ids = await collect_manager_ids(bot, data["chat_id"])
-        for mid in manager_ids:
-            try:
-                sent = await bot.send_message(mid, msg, reply_markup=kb, parse_mode="HTML")
-                remember_wd_delivery(req.id, mid, sent.message_id)
-                delivered += 1
-            except Exception:
-                pass
-        if delivered == 0:
-            try:
-                sent = await bot.send_message(
-                    data["chat_id"],
-                    msg + "\n\n⚠️ پیوی مدیران در دسترس نبود؛ تأیید از داخل گروه انجام شود.",
-                    reply_markup=kb,
-                    parse_mode="HTML",
+            open_info = await get_open_withdrawal_info(data["chat_id"], user_id)
+            if open_info:
+                _flow.pop(int(user_id), None)
+                await bot.send_message(user_id, format_open_withdrawal_user_block(open_info))
+                return True
+            _, live_available, _ = await get_playable_balance(data["chat_id"], user_id)
+            blocked = await check_min_withdrawal(data["chat_id"], live_available, amount)
+            if blocked:
+                data["submitting"] = False
+                data["balance"] = live_available
+                await bot.send_message(user_id, blocked, reply_markup=_kb(True, True))
+                return True
+            settle_kind = (data.get("settle_kind") or "").strip().lower()
+            req, err, available = await create_withdrawal_atomic(
+                data["chat_id"],
+                user_id,
+                amount,
+                data.get("card") or "",
+                data.get("name") or "",
+                settle_kind,
+            )
+            if err == "open":
+                info = await get_open_withdrawal_info(data["chat_id"], user_id)
+                _flow.pop(int(user_id), None)
+                await bot.send_message(
+                    user_id,
+                    format_open_withdrawal_user_block(info) if info else "⚠️ شما درخواست تسویه باز دارید.",
                 )
-                remember_wd_delivery(req.id, data["chat_id"], sent.message_id)
+                return True
+            if err in ("balance", "zero") or not req:
+                data["submitting"] = False
+                data["balance"] = int(available or 0)
+                msg = (
+                    "❌ موجودی قابل تسویه ندارید."
+                    if err == "zero" or int(available or 0) <= 0
+                    else f"⚠️ مبلغ نامعتبر است یا از موجودی قابل تسویه ({int(available or 0):,}) بیشتر است."
+                )
+                await bot.send_message(user_id, msg, reply_markup=_kb(True, True))
+                return True
+
+            settle_kind = getattr(req, "settle_kind", None) or (
+                "full" if amount == available else "custom"
+            )
+            _flow.pop(int(user_id), None)
+            try:
+                u = await bot.get_chat(int(user_id))
+                user_name = (u.full_name or u.first_name or "").strip() or str(user_id)
             except Exception:
-                pass
-        await bot.send_message(
-            user_id,
-            "✅ درخواست تسویه برای مدیران ارسال شد.\n"
-            f"📌 نوع تسویه: {kind_fa}\n"
-            f"💸 مبلغ تسویه: {amount:,}",
-        )
-        return True
+                user_name = str(user_id)
+            kind_fa = "کامل" if settle_kind == "full" else "دلخواه"
+            card_warning = await get_card_warning_for_request(
+                data["chat_id"], user_id, data["card"], data["name"],
+            )
+            msg = format_withdrawal_admin_text(
+                user_name=user_name,
+                amount=amount,
+                card=data["card"],
+                card_name=data["name"],
+                status="pending",
+                settle_kind=settle_kind,
+                card_warning=card_warning,
+            )
+            kb = withdrawal_admin_keyboard(req.id, status="pending")
+            delivered = 0
+            from bot.wallet_helpers import collect_manager_ids
+
+            manager_ids = await collect_manager_ids(bot, data["chat_id"])
+            for mid in manager_ids:
+                try:
+                    sent = await bot.send_message(mid, msg, reply_markup=kb, parse_mode="HTML")
+                    remember_wd_delivery(req.id, mid, sent.message_id)
+                    delivered += 1
+                except Exception:
+                    pass
+            if delivered == 0:
+                try:
+                    sent = await bot.send_message(
+                        data["chat_id"],
+                        msg + "\n\n⚠️ پیوی مدیران در دسترس نبود؛ تأیید از داخل گروه انجام شود.",
+                        reply_markup=kb,
+                        parse_mode="HTML",
+                    )
+                    remember_wd_delivery(req.id, data["chat_id"], sent.message_id)
+                except Exception:
+                    pass
+            await bot.send_message(
+                user_id,
+                "✅ درخواست تسویه برای مدیران ارسال شد.\n"
+                f"📌 نوع تسویه: {kind_fa}\n"
+                f"💸 مبلغ تسویه: {amount:,}",
+            )
+            return True
+        except Exception:
+            if int(user_id) in _flow:
+                _flow[int(user_id)]["submitting"] = False
+            raise
+
     return True
 
 
@@ -490,6 +679,52 @@ def get_open_withdrawal_info(chat_id: int, user_id: int) -> dict | None:
         "card_name": (latest.card_name or "").strip(),
         "status": latest.status,
     }
+
+
+@sync_to_async
+def create_withdrawal_atomic(chat_id, user_id, amount: int, card: str, name: str, settle_kind: str):
+    """ایجاد اتمیک — جلوی اسپم و موجودی کهنه."""
+    from django.db import transaction
+    from account.models import WithdrawalRequest, TelegramGroupMember
+
+    amount = int(amount or 0)
+    sk = (settle_kind or "").strip().lower()
+    with transaction.atomic():
+        m = (
+            TelegramGroupMember.objects.select_for_update()
+            .filter(telegram_chat_id=int(chat_id), telegram_user_id=int(user_id))
+            .first()
+        )
+        open_rows = list(
+            WithdrawalRequest.objects.select_for_update()
+            .filter(
+                telegram_chat_id=int(chat_id),
+                telegram_user_id=int(user_id),
+                status__in=("pending", "receipt"),
+            )
+            .order_by("-created_at")
+        )
+        if open_rows:
+            return None, "open", 0
+        total = int(getattr(m, "point", 0) or 0) if m else 0
+        available = max(0, total)
+        if available <= 0:
+            return None, "zero", 0
+        if amount <= 0 or amount > available:
+            return None, "balance", available
+        if sk != "full":
+            sk = "full" if amount == available else "custom"
+        req = WithdrawalRequest.objects.create(
+            telegram_chat_id=int(chat_id),
+            telegram_user_id=int(user_id),
+            amount=amount,
+            card_number=str(card or ""),
+            card_name=str(name or ""),
+            status="pending",
+            settle_kind=sk,
+        )
+        return req, None, available
+
 
 
 def format_pending_pv_withdrawal_block(*, user_display: str = "", info: dict) -> str:
@@ -538,20 +773,88 @@ def _cancel_pending_withdrawals(chat_id: int, user_id: int, *, cancelled_by: int
         )
     )
     if not rows:
-        return {"cancelled_count": 0, "total_amount": 0, "user_id": int(user_id)}
+        return {
+            "cancelled_count": 0,
+            "total_amount": 0,
+            "user_id": int(user_id),
+            "request_ids": [],
+            "rows": [],
+        }
 
     total = sum(int(r.amount) for r in rows)
     now = timezone.now()
-    WithdrawalRequest.objects.filter(
-        id__in=[r.id for r in rows],
-    ).update(status="cancelled", approved_by=cancelled_by, approved_at=now)
-    return {"cancelled_count": len(rows), "total_amount": total, "user_id": int(user_id)}
+    ids = [r.id for r in rows]
+    WithdrawalRequest.objects.filter(id__in=ids).update(
+        status="cancelled", approved_by=cancelled_by, approved_at=now,
+    )
+    snap = [
+        {
+            "id": r.id,
+            "amount": int(r.amount),
+            "card": (r.card_number or "").strip(),
+            "card_name": (r.card_name or "").strip(),
+            "settle_kind": getattr(r, "settle_kind", None) or None,
+            "chat_id": int(r.telegram_chat_id),
+            "user_id": int(r.telegram_user_id),
+        }
+        for r in rows
+    ]
+    return {
+        "cancelled_count": len(rows),
+        "total_amount": total,
+        "user_id": int(user_id),
+        "request_ids": ids,
+        "rows": snap,
+    }
+
+
+async def _broadcast_cancelled_withdrawals(bot: Bot, result: dict) -> None:
+    rows = result.get("rows") or []
+    if not rows:
+        return
+    from bot.finance import get_playable_balance
+
+    for row in rows:
+        try:
+            u = await bot.get_chat(int(row["user_id"]))
+            user_name = (u.full_name or u.first_name or "").strip() or str(row["user_id"])
+        except Exception:
+            user_name = str(row["user_id"])
+        try:
+            _t, bal, _p = await get_playable_balance(row["chat_id"], row["user_id"])
+        except Exception:
+            bal = None
+        try:
+            card_warning = await get_card_warning_for_request(
+                row["chat_id"], row["user_id"], row["card"], row["card_name"],
+            )
+        except Exception:
+            card_warning = ""
+        msg = format_withdrawal_admin_text(
+            user_name=user_name,
+            amount=int(row["amount"]),
+            card=row["card"],
+            card_name=row["card_name"],
+            status="cancelled",
+            refreshed=True,
+            balance=bal,
+            settle_kind=row.get("settle_kind"),
+            card_warning=card_warning,
+        )
+        kb = withdrawal_admin_keyboard(row["id"], status="cancelled")
+        try:
+            await broadcast_wd_admin_update(bot, row["id"], msg, kb)
+        except Exception:
+            pass
 
 
 async def admin_cancel_pending_withdrawals(
     bot: Bot, chat_id: int, user_id: int, *, cancelled_by: int | None = None, notify: bool = True,
 ) -> dict:
     result = await _cancel_pending_withdrawals(chat_id, user_id, cancelled_by=cancelled_by)
+    if result["cancelled_count"] > 0:
+        _flow.pop(int(user_id), None)
+        await _broadcast_cancelled_withdrawals(bot, result)
     if notify and result["cancelled_count"] > 0:
         try:
             await bot.send_message(
@@ -566,6 +869,9 @@ async def admin_cancel_pending_withdrawals(
 
 async def self_cancel_pending_withdrawals(bot: Bot, chat_id: int, user_id: int) -> dict:
     result = await _cancel_pending_withdrawals(chat_id, user_id, cancelled_by=user_id)
+    if result["cancelled_count"] > 0:
+        _flow.pop(int(user_id), None)
+        await _broadcast_cancelled_withdrawals(bot, result)
     if result["cancelled_count"] > 0:
         try:
             await bot.send_message(
@@ -618,6 +924,15 @@ async def handle_callback(call, bot: Bot) -> bool:
         )
         return True
     if data == "wd:amount":
+        if state.get("submitting"):
+            await call.answer("در حال ثبت…", show_alert=True)
+            return True
+        open_info = await get_open_withdrawal_info(state["chat_id"], call.from_user.id)
+        if open_info:
+            _flow.pop(call.from_user.id, None)
+            await call.answer()
+            await call.message.answer(format_open_withdrawal_user_block(open_info))
+            return True
         if not state.get("card"):
             state["step"] = "card"
             await call.answer()
@@ -638,6 +953,11 @@ async def handle_callback(call, bot: Bot) -> bool:
         state["settle_kind"] = "custom"
         _, available, pending = await get_playable_balance(state["chat_id"], call.from_user.id)
         state["balance"] = available
+        if available <= 0:
+            _flow.pop(call.from_user.id, None)
+            await call.answer()
+            await call.message.answer("❌ موجودی قابل تسویه ندارید.")
+            return True
         minimum = await get_min_withdrawal(state["chat_id"])
         min_line = min_withdrawal_hint(minimum)
         pending_line = f"\n⏳ در انتظار تسویه: {pending:,}" if pending > 0 else ""
@@ -649,6 +969,15 @@ async def handle_callback(call, bot: Bot) -> bool:
         )
         return True
     if data == "wd:full":
+        if state.get("submitting"):
+            await call.answer("در حال ثبت…", show_alert=True)
+            return True
+        open_info = await get_open_withdrawal_info(state["chat_id"], call.from_user.id)
+        if open_info:
+            _flow.pop(call.from_user.id, None)
+            await call.answer()
+            await call.message.answer(format_open_withdrawal_user_block(open_info))
+            return True
         if not state.get("card"):
             state["step"] = "card"
             await call.answer()
@@ -669,6 +998,15 @@ async def handle_callback(call, bot: Bot) -> bool:
         state["settle_kind"] = "full"
         _, available, _ = await get_playable_balance(state["chat_id"], call.from_user.id)
         state["balance"] = available
+        if available <= 0:
+            _flow.pop(call.from_user.id, None)
+            await call.answer()
+            await call.message.answer("❌ موجودی قابل تسویه ندارید.")
+            return True
         await call.answer()
+        try:
+            await call.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
         return await handle_text(bot, call.from_user.id, str(available))
     return False

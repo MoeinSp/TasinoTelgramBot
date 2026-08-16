@@ -6,16 +6,59 @@ from django.db import transaction as db_transaction
 from django.utils import timezone
 
 
-def _get_or_create_member(chat_id: int, user_id: int):
+def _idemp_tag(description: str | None) -> str | None:
+    if not description or "#idemp:" not in description:
+        return None
+    i = description.find("#idemp:")
+    return description[i:].split()[0]
+
+
+def _idemp_exists(chat_id: int, user_id: int, description: str | None) -> bool:
+    from account.models import WalletTransaction
+
+    tag = _idemp_tag(description)
+    if not tag:
+        return False
+    return WalletTransaction.objects.filter(
+        telegram_chat_id=int(chat_id),
+        telegram_user_id=int(user_id),
+        description__contains=tag,
+    ).exists()
+
+
+def _get_or_create_member(chat_id: int, user_id: int, *, for_update: bool = False):
     from account.models import TelegramGroup, TelegramGroupMember
+    cid, uid = int(chat_id), int(user_id)
     grp, _ = TelegramGroup.objects.get_or_create(
-        telegram_chat_id=chat_id, defaults={"name": ""},
+        telegram_chat_id=cid, defaults={"name": ""},
     )
+    qs = TelegramGroupMember.objects.filter(
+        telegram_chat_id=cid,
+        telegram_user_id=uid,
+    ).order_by("id")
+    if for_update:
+        qs = qs.select_for_update()
+    rows = list(qs[:8])
+    if rows:
+        m = rows[0]
+        if for_update and len(rows) > 1:
+            extra = 0
+            for dup in rows[1:]:
+                extra += int(dup.point or 0)
+                if int(dup.point or 0) != 0:
+                    dup.point = 0
+                    dup.save(update_fields=["point"])
+            if extra:
+                m.point = int(m.point or 0) + extra
+                m.save(update_fields=["point"])
+        return m
     m, _ = TelegramGroupMember.objects.get_or_create(
-        telegram_chat_id=chat_id,
-        telegram_user_id=user_id,
+        telegram_chat_id=cid,
+        telegram_user_id=uid,
         defaults={"group": grp, "role": "member"},
     )
+    if for_update:
+        return TelegramGroupMember.objects.select_for_update().get(pk=m.pk)
     return m
 
 
@@ -97,7 +140,7 @@ def get_balance(chat_id: int, user_id: int) -> int:
     from account.models import TelegramGroupMember
     m = TelegramGroupMember.objects.filter(
         telegram_chat_id=chat_id, telegram_user_id=user_id,
-    ).first()
+    ).order_by("-id").first()
     return (m.point or 0) if m else 0
 
 
@@ -117,17 +160,29 @@ def get_pending_withdrawal_sum(chat_id: int, user_id: int) -> int:
 
 
 async def get_playable_balance(chat_id: int, user_id: int) -> tuple[int, int, int]:
-    """(موجودی کل، قابل استفاده، در انتظار تسویه)"""
+    """(موجودی کل، موجودی مجاز/آزاد، در انتظار تسویه)
+
+    موجودی مجاز = کل − معلق (برای نمایش و تسویه).
+    بازی با درخواست تسویه باز ممنوع است — از spendable_for_games استفاده کنید.
+    """
     total = await get_balance(chat_id, user_id)
     pending = await get_pending_withdrawal_sum(chat_id, user_id)
-    playable = max(0, total - pending)
-    return total, playable, pending
+    playable = max(0, int(total) - int(pending or 0))
+    return int(total), playable, int(pending or 0)
+
+
+def spendable_for_games(playable: int, pending: int) -> int:
+    """مبلغ قابل‌خرج برای ورود به بازی — با تسویه باز همیشه ۰."""
+    if int(pending or 0) > 0:
+        return 0
+    return max(0, int(playable or 0))
 
 
 def format_balance_card(
     *,
     playable: int,
     pending: int = 0,
+    total: int | None = None,
     time_str: str = "",
     viewer_name: str = "",
     viewing_other: bool = False,
@@ -138,12 +193,15 @@ def format_balance_card(
     if viewing_other and viewer_name:
         name = viewer_name if not html else viewer_name  # caller escapes if needed
         lines.append(f"👤 {name}")
+    if int(pending or 0) > 0 and total is not None:
+        lines.append(f"💰 موجودی کل: {int(total):,} واحد")
     if playable < 0:
         lines.append(f"✅ موجودی مجاز: 🔻 {abs(playable):,} بدهکار")
     else:
         lines.append(f"✅ موجودی مجاز: {playable:,} واحد")
     if int(pending or 0) > 0:
         lines.append(f"⏳ در حال تسویه: {int(pending):,} واحد")
+        lines.append("🔒 تا تأیید/لغو تسویه نمی‌توانید بازی کنید")
     lines.append("━━━━━━━━━━━━━━━━━━")
     if time_str:
         lines.append(f"🕒 {time_str}")
@@ -162,21 +220,26 @@ def format_insufficient_balance_message(
     fee_line: str = "",
 ) -> str:
     if pending > 0:
+        free = max(0, int(total_balance) - int(pending))
         balance_lines = (
-            f"💰 موجودی: {playable:,} واحد\n"
-            f"⏳ موجودی در انتظار تسویه: {pending:,} واحد"
+            f"💰 موجودی کل: {total_balance:,} واحد\n"
+            f"✅ موجودی مجاز: {free:,} واحد\n"
+            f"⏳ در انتظار تسویه: {pending:,} واحد\n"
+            f"🔒 قابل بازی: ۰ (تا پایان/لغو درخواست تسویه)"
         )
-        shortfall = entry_cost - playable
+        tip = "💡 اول درخواست تسویه را لغو یا تأیید کنید، بعد بازی کنید."
+        shortfall = entry_cost  # games locked while pending
     else:
         balance_lines = f"💰 موجودی فعلی شما: {total_balance:,} واحد"
+        tip = "💡 برای افزایش موجودی با ادمین تماس بگیرید."
         shortfall = entry_cost - total_balance
 
     return (
         f"❌ موجودی ناکافی!\n\n"
         f"💳 هزینه ورودی: {entry_cost:,} واحد{fee_line}\n\n"
         f"{balance_lines}\n"
-        f"🔻 کمبود: {shortfall:,} واحد\n\n"
-        f"💡 برای افزایش موجودی با ادمین تماس بگیرید."
+        f"🔻 کمبود: {max(0, shortfall):,} واحد\n\n"
+        f"{tip}"
     )
 
 
@@ -186,8 +249,11 @@ def increase_wallet(
     admin_id: int | None = None, description: str | None = None,
     receipt_file_id: str | None = None, receipt_note: str | None = None,
 ) -> int:
+    amount = abs(int(amount or 0))
     with db_transaction.atomic():
-        m = _get_or_create_member(chat_id, user_id)
+        m = _get_or_create_member(chat_id, user_id, for_update=True)
+        if _idemp_exists(chat_id, user_id, description):
+            return int(m.point or 0)
         m.point = (m.point or 0) + amount
         m.save(update_fields=["point"])
         _log_tx(chat_id, user_id, "admin_increase", amount, m.point, admin_id, description, receipt_file_id, receipt_note)
@@ -201,13 +267,19 @@ def increase_wallet(
 
 
 @sync_to_async
+def wallet_idemp_paid(chat_id: int, user_id: int, description: str) -> bool:
+    return _idemp_exists(chat_id, user_id, description)
+
+
+@sync_to_async
 def decrease_wallet(
     chat_id: int, user_id: int, amount: int,
     admin_id: int | None = None, description: str | None = None,
     receipt_file_id: str | None = None, receipt_note: str | None = None,
 ) -> int:
+    amount = abs(int(amount or 0))
     with db_transaction.atomic():
-        m = _get_or_create_member(chat_id, user_id)
+        m = _get_or_create_member(chat_id, user_id, for_update=True)
         m.point = (m.point or 0) - amount
         m.save(update_fields=["point"])
         _log_tx(chat_id, user_id, "admin_decrease", amount, m.point, admin_id, description, receipt_file_id, receipt_note)
@@ -217,7 +289,7 @@ def decrease_wallet(
 @sync_to_async
 def clear_wallet(chat_id: int, user_id: int, admin_id: int | None = None, receipt_file_id: str | None = None, receipt_note: str | None = None) -> int:
     with db_transaction.atomic():
-        m = _get_or_create_member(chat_id, user_id)
+        m = _get_or_create_member(chat_id, user_id, for_update=True)
         old = m.point or 0
         m.point = 0
         m.save(update_fields=["point"])
@@ -269,10 +341,13 @@ def charge_pv_invite_bets(
             )
 
         for uid, opp_name in players:
-            m = _get_or_create_member(cid, uid)
-            from account.models import TelegramGroupMember
-            m = TelegramGroupMember.objects.select_for_update().get(pk=m.pk)
-            m.point = (m.point or 0) - amount
+            m = _get_or_create_member(cid, uid, for_update=True)
+            bal = int(m.point or 0)
+            if bal < amount:
+                raise RuntimeError(
+                    f"insufficient pv entry {uid}: {bal} < {amount}"
+                )
+            m.point = bal - amount
             m.save(update_fields=["point"])
             _log_tx(
                 cid, uid, "bet", amount, m.point,
@@ -285,7 +360,8 @@ def charge_pv_invite_bets(
     for uid, _ in players:
         try:
             from bot.challenges import record_bet_silent
-            record_bet_silent(cid, uid, amount)
+            # لیگ بعد از نتیجه قطعی بازی پیوی ثبت می‌شود (نه موقع کسر ورودی)
+            record_bet_silent(cid, uid, amount, for_league=False)
         except Exception:
             pass
     return "charged"
@@ -321,7 +397,7 @@ def refund_pv_invite_bets(chat_id: int, user_ids, amount: int, *, invite_id: str
             m.save(update_fields=["point"])
             _log_tx(
                 cid, uid, "admin_increase", amount, m.point,
-                description=f"بازگشت ورودی بازی پیوی · {refund_tag}",
+                description=f"بازگشت ورودی بازی پیوی (لغو دعوت) · {refund_tag}",
             )
             refunded += 1
     return refunded
@@ -386,16 +462,24 @@ def record_game_win(
     opponent_name: str | None = None,
 ) -> int:
     with db_transaction.atomic():
-        m = _get_or_create_member(chat_id, user_id)
+        desc = with_game_id(
+            description or "برد مسابقه",
+            game_no,
+            opponent_name=opponent_name,
+        )
+        if game_no is not None:
+            desc = (desc[:220] + f" #idemp:win:{int(game_no)}:{int(user_id)}")[:250]
+        if _idemp_exists(chat_id, user_id, desc):
+            m = _get_or_create_member(chat_id, user_id)
+            return int(m.point or 0)
+        m = _get_or_create_member(chat_id, user_id, for_update=True)
+        if _idemp_exists(chat_id, user_id, desc):
+            return int(m.point or 0)
         m.point = (m.point or 0) + amount
         m.save(update_fields=["point"])
         _log_tx(
             chat_id, user_id, "win", amount, m.point,
-            description=with_game_id(
-                description or "برد مسابقه",
-                game_no,
-                opponent_name=opponent_name,
-            ),
+            description=desc,
         )
         return m.point
 
@@ -409,11 +493,15 @@ def settle_dice_game_wallets(
     winner_amount: int,
     *,
     game_no: int | None = None,
+    winner_payouts: dict | None = None,
+    record_league: bool = True,
 ) -> bool:
-    """تسویه اتمیک شرط بازی — بدون ثبت چالش داخل تراکنش کیف."""
+    """تسویه اتمیک شرط بازی — بدون ثبت چالش داخل تراکنش کیف.
+
+    winner_payouts: اختیاری — {user_id: مبلغ} برای چند برندهٔ مساوی.
+    record_league: تساوی → False تا حجم لیگ حساب نشود.
+    """
     entry_amount = int(entry_amount)
-    winner_amount = int(winner_amount)
-    winner_id = int(winner_id)
     players = []
     seen = set()
     for p in player_ids or []:
@@ -421,8 +509,22 @@ def settle_dice_game_wallets(
         if uid not in seen:
             seen.add(uid)
             players.append(uid)
-    if not players or entry_amount <= 0 or winner_amount <= 0 or winner_id not in seen:
+
+    payouts: dict[int, int] = {}
+    if winner_payouts:
+        for uid, amt in winner_payouts.items():
+            payouts[int(uid)] = int(amt)
+    else:
+        winner_id = int(winner_id)
+        winner_amount = int(winner_amount)
+        payouts[winner_id] = winner_amount
+
+    if not players or entry_amount <= 0 or not payouts:
         raise ValueError("invalid settle params")
+    if any(uid not in seen for uid in payouts):
+        raise ValueError("winner not in players")
+    if any(amt <= 0 for amt in payouts.values()):
+        raise ValueError("invalid winner amount")
 
     with db_transaction.atomic():
         for uid in players:
@@ -433,18 +535,22 @@ def settle_dice_game_wallets(
                 chat_id, uid, "bet", entry_amount, m.point,
                 description=with_game_id("ورودی مسابقه گروهی", game_no),
             )
-        wm = _get_or_create_member(chat_id, winner_id)
-        wm.point = (wm.point or 0) + winner_amount
-        wm.save(update_fields=["point"])
-        _log_tx(
-            chat_id, winner_id, "win", winner_amount, wm.point,
-            description=with_game_id("برد مسابقه گروهی", game_no),
-        )
+        for wid, wamt in payouts.items():
+            wm = _get_or_create_member(chat_id, wid)
+            wm.point = (wm.point or 0) + wamt
+            wm.save(update_fields=["point"])
+            _log_tx(
+                chat_id, wid, "win", wamt, wm.point,
+                description=with_game_id(
+                    "برد مسابقه گروهی" if len(payouts) == 1 else "برد اشتراکی مسابقه گروهی",
+                    game_no,
+                ),
+            )
 
     for uid in players:
         try:
             from bot.challenges import record_bet_silent
-            record_bet_silent(chat_id, uid, entry_amount)
+            record_bet_silent(chat_id, uid, entry_amount, for_league=record_league)
         except Exception:
             pass
     return True
@@ -472,8 +578,10 @@ def transfer_wallet(
         return {"ok": False, "error": "self_transfer"}
 
     with db_transaction.atomic():
-        sender = _get_or_create_member(chat_id, from_user_id)
-        receiver = _get_or_create_member(chat_id, to_user_id)
+        for lock_uid in sorted((int(from_user_id), int(to_user_id))):
+            _get_or_create_member(chat_id, lock_uid, for_update=True)
+        sender = _get_or_create_member(chat_id, from_user_id, for_update=True)
+        receiver = _get_or_create_member(chat_id, to_user_id, for_update=True)
         sender_bal = int(sender.point or 0)
         pending = int(
             WithdrawalRequest.objects.filter(
@@ -639,7 +747,8 @@ def clear_all_wallets(chat_id: int, admin_id: int | None = None, receipt_file_id
     results = []
     with db_transaction.atomic():
         members = list(
-            TelegramGroupMember.objects.filter(telegram_chat_id=chat_id)
+            TelegramGroupMember.objects.select_for_update()
+            .filter(telegram_chat_id=chat_id)
             .exclude(point=0).exclude(point__isnull=True)
         )
         for m in members:
@@ -649,6 +758,62 @@ def clear_all_wallets(chat_id: int, admin_id: int | None = None, receipt_file_id
             _log_tx(chat_id, m.telegram_user_id, "admin_clear", abs(old), 0, admin_id, receipt_file_id=receipt_file_id, receipt_note=receipt_note)
             results.append((m.telegram_user_id, old))
     return results
+
+
+@sync_to_async
+def approve_withdrawal_debit(
+    request_id: int,
+    admin_id: int,
+    *,
+    receipt_file_id: str | None = None,
+) -> tuple[object | None, str | None, int]:
+    """تأیید درخواست تسویه + کسر موجودی در یک تراکنش اتمیک.
+
+    خروجی: (row|None, err|None, live_balance)
+    err: missing | insufficient | None
+    """
+    from django.utils import timezone
+    from account.models import WithdrawalRequest
+
+    with db_transaction.atomic():
+        row = (
+            WithdrawalRequest.objects.select_for_update()
+            .filter(id=request_id, status="pending")
+            .first()
+        )
+        if not row:
+            return None, "missing", 0
+
+        m = _get_or_create_member(
+            int(row.telegram_chat_id),
+            int(row.telegram_user_id),
+            for_update=True,
+        )
+        bal = int(m.point or 0)
+        amt = abs(int(row.amount or 0))
+        if bal < amt:
+            return row, "insufficient", bal
+
+        m.point = bal - amt
+        m.save(update_fields=["point"])
+        receipt_ref = (receipt_file_id or getattr(row, "receipt_file_id", "") or "").strip()
+        _log_tx(
+            int(row.telegram_chat_id),
+            int(row.telegram_user_id),
+            "admin_decrease",
+            amt,
+            m.point,
+            admin_id,
+            description="تأیید درخواست تسویه کاربر",
+            receipt_file_id=receipt_ref,
+            receipt_note="withdrawal_receipt" if receipt_ref else "",
+        )
+        row.status = "done"
+        row.approved_by = admin_id
+        row.approved_at = timezone.now()
+        row.completed_at = timezone.now()
+        row.save(update_fields=["status", "approved_by", "approved_at", "completed_at"])
+        return row, None, int(m.point)
 
 
 @sync_to_async
@@ -707,3 +872,36 @@ def get_fee_report(
         "per_day": per_day,
         "per_admin": per_admin,
     }
+
+
+def _transfer_cache_key(chat_id: int) -> str:
+    return f"transfer_enabled:{int(chat_id)}"
+
+
+@sync_to_async
+def get_transfer_enabled(chat_id: int) -> bool:
+    from django.core.cache import cache
+    from account.models import TelegramGroup
+
+    key = _transfer_cache_key(chat_id)
+    cached = cache.get(key)
+    if cached is not None:
+        return bool(int(cached))
+    g = TelegramGroup.objects.filter(telegram_chat_id=int(chat_id)).only("transfer_enabled").first()
+    on = True if g is None else bool(getattr(g, "transfer_enabled", True))
+    cache.set(key, 1 if on else 0, 600)
+    return on
+
+
+@sync_to_async
+def set_transfer_enabled(chat_id: int, enabled: bool) -> bool:
+    from django.core.cache import cache
+    from account.models import TelegramGroup
+
+    g, _ = TelegramGroup.objects.get_or_create(
+        telegram_chat_id=int(chat_id), defaults={"name": str(chat_id)},
+    )
+    g.transfer_enabled = bool(enabled)
+    g.save(update_fields=["transfer_enabled"])
+    cache.set(_transfer_cache_key(chat_id), 1 if enabled else 0, 600)
+    return bool(enabled)

@@ -60,12 +60,15 @@ async def _play_tg_or_text(
     result_text = None
     emoji_mode = telegram_emoji_on(chat_id)
     if emoji_mode:
-        sent = await bot.send_dice(chat_id, emoji=tg_emoji, reply_to_message_id=mid)
-        score = getattr(getattr(sent, "dice", None), "value", None)
-        if score is not None and score_map:
-            score = score_map(score)
-        if game_type and score is not None:
-            result_text = game_text.race_result_caption(game_type, int(score))
+        try:
+            sent = await bot.send_dice(chat_id, emoji=tg_emoji, reply_to_message_id=mid)
+            score = getattr(getattr(sent, "dice", None), "value", None)
+            if score is not None and score_map:
+                score = score_map(score)
+            if game_type and score is not None:
+                result_text = game_text.race_result_caption(game_type, int(score))
+        except Exception:
+            score, result_text = build_fn()
     else:
         score, result_text = build_fn()
     if game_type and score is not None:

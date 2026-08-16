@@ -12,13 +12,14 @@ from bot.handlers.group_lifecycle import router as group_lifecycle_router
 from bot.middleware import (
     MessageTrackingMiddleware, RequiredJoinMiddleware,
     PrivateUserSyncMiddleware, GlobalBotOffMiddleware,
-    GroupRequiredJoinMiddleware,
+    GroupRequiredJoinMiddleware, MuteEnforcementMiddleware,
 )
 
 
 def setup_routers(dp: Dispatcher):
     # outer middleware: دقیقاً یک بار به ازای هر پیام اجرا می‌شه
     # (inner middleware با skip() در روتر فیلتر، دو بار اجرا می‌شد و آمار دوبرابر ثبت می‌شد)
+    dp.message.outer_middleware(MuteEnforcementMiddleware())
     dp.message.outer_middleware(MessageTrackingMiddleware())
     dp.message.outer_middleware(GlobalBotOffMiddleware())
     dp.callback_query.outer_middleware(GlobalBotOffMiddleware())

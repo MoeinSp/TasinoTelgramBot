@@ -3,9 +3,10 @@ document.addEventListener("DOMContentLoaded", () => {
   const customForm = document.getElementById("custom-form");
   if (customForm) {
     const mode = document.getElementById("custom-mode");
-    const joinBox = document.getElementById("custom-join-box");
+    const joinFields = customForm.querySelectorAll(".field-join");
     const sync = () => {
-      if (joinBox) joinBox.style.display = mode && mode.value === "super" ? "" : "none";
+      const show = mode && mode.value === "super";
+      joinFields.forEach((el) => { el.style.display = show ? "" : "none"; });
     };
     if (mode) mode.addEventListener("change", sync);
     sync();

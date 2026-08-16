@@ -1,13 +1,14 @@
 """
 سرویس‌های پنل /ad — فقط CRUD روی ScheduledMessage / JoinMessage.
 هر تبلیغ = دقیقاً یک ارسال یک‌باره (type=fixed).
-جوین اجباری: ۱۲:۰۰ امروز → ۱۲:۰۰ فردا (Asia/Tehran).
+جوین اجباری: بازه قابل انتخاب (الان→فردا همین موقع، فردا ۱۲→پس‌فردا ۱۲، یا ۱۲→۱۲).
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta, time as dtime, date
 
-from django.db import transaction
+from django.core.cache import cache
+from django.db import transaction, models
 from django.utils import timezone
 
 from scheduledmessage.models import ScheduledMessage
@@ -33,6 +34,20 @@ MODE_LABEL = {
     "super": "سوپر بمب",
 }
 JOIN_PREFIX = "[JOIN]"
+JOIN_WINDOW_NOW_24H = "now_24h"
+JOIN_WINDOW_NOON_TODAY = "noon_today"
+JOIN_WINDOW_NOON_TOMORROW = "noon_tomorrow"
+JOIN_WINDOW_FOREVER = "forever"
+JOIN_WINDOW_DEFAULT = JOIN_WINDOW_NOW_24H
+JOIN_WINDOW_CHOICES = (
+    (JOIN_WINDOW_NOW_24H, "از همین الان تا فردا همین موقع"),
+    (JOIN_WINDOW_NOON_TOMORROW, "از فردا ۱۲ ظهر تا فرداش ۱۲ ظهر"),
+    (JOIN_WINDOW_NOON_TODAY, "از ۱۲ امروز تا ۱۲ فردا"),
+    (JOIN_WINDOW_FOREVER, "دائمی — بدون انقضا"),
+)
+JOIN_WINDOW_CAMPAIGN_CHOICES = tuple(
+    item for item in JOIN_WINDOW_CHOICES if item[0] != JOIN_WINDOW_FOREVER
+)
 AD_PREFIX = "[AD]"
 CUSTOM_MARK = "[خارج]"
 # ساعت‌های ۰۰:۰۰ تا ۰۵:۵۹ روی «فردای روز برنامه» می‌نشینند (۱ شب و …)
@@ -195,13 +210,79 @@ def run_at_label(run_at: datetime, plan_day: date | None = None, slot: str | Non
 
 
 def join_window_for_day(day=None) -> tuple[datetime, datetime]:
-    """
-    جوین اجباری: از ۱۲:۰۰ همان روز تا ۱۲:۰۰ فردا (تهران).
-    """
+    """جوین اجباری: از ۱۲:۰۰ همان روز تا ۱۲:۰۰ فردا (تهران)."""
     day = day or today_local()
     start = _aware(datetime.combine(day, dtime(hour=12, minute=0)))
     end = _aware(datetime.combine(day + timedelta(days=1), dtime(hour=12, minute=0)))
     return start, end
+
+
+def normalize_join_window(kind: str | None) -> str:
+    allowed = {key for key, _ in JOIN_WINDOW_CHOICES}
+    value = (kind or JOIN_WINDOW_DEFAULT).strip()
+    return value if value in allowed else JOIN_WINDOW_DEFAULT
+
+
+def join_window_for(kind: str | None = None, now=None) -> tuple[datetime | None, datetime | None]:
+    """بازه جوین بر اساس گزینه پنل. برای دائم (None, None) برمی‌گردد."""
+    now = timezone.localtime(now or timezone.now())
+    kind = normalize_join_window(kind)
+    if kind == JOIN_WINDOW_FOREVER:
+        return None, None
+    if kind == JOIN_WINDOW_NOW_24H:
+        start = now.replace(second=0, microsecond=0)
+        return start, start + timedelta(days=1)
+    if kind == JOIN_WINDOW_NOON_TOMORROW:
+        start = _aware(datetime.combine(now.date() + timedelta(days=1), dtime(hour=12, minute=0)))
+        return start, start + timedelta(days=1)
+    return join_window_for_day(now.date())
+
+
+def _clear_join_cache():
+    try:
+        cache.delete("join_active_message")
+    except Exception:
+        pass
+
+
+def expire_stale_joins() -> int:
+    """جوین موقتِ تمام‌شده را خاموش کن تا در پنل نماند."""
+    n = JoinMessage.objects.filter(
+        is_active=True, is_forever=False, end_datetime__isnull=False,
+        end_datetime__lte=timezone.now(),
+    ).update(is_active=False)
+    if n:
+        _clear_join_cache()
+    return n
+
+
+def latest_campaign_join():
+    """جدیدترین جوین کمپین فعال (حتی اگر بازه‌اش از ظهر شروع شود)."""
+    expire_stale_joins()
+    return (
+        JoinMessage.objects.filter(is_active=True, is_forever=False)
+        .order_by("-id")
+        .first()
+    )
+
+
+def current_join_prefill() -> dict:
+    """فرم تبلیغ خالی را با جوین دیروز پر نکن — فقط اگر همین الان زنده باشد."""
+    expire_stale_joins()
+    now = timezone.localtime()
+    for obj in JoinMessage.objects.filter(is_active=True, is_forever=False).order_by("-id"):
+        if obj.is_active_now(now):
+            return {
+                "join_link": (obj.text or "").strip(),
+                "join_priority": obj.priority or 1,
+            }
+    return {"join_link": "", "join_priority": 1}
+
+
+def list_forever_joins():
+    return list(
+        JoinMessage.objects.filter(is_active=True, is_forever=True).order_by("priority", "id")
+    )
 
 
 def _flags_for_mode(mode: str) -> tuple[bool, bool]:
@@ -256,9 +337,13 @@ def _parse_join_line(line: str) -> tuple[int | None, str]:
 
 
 @transaction.atomic
-def apply_join_only(links: list[str], day=None, replace: bool = True) -> dict:
-    """لینک‌ها با اولویت ۱…۵ (یا اولویت صریح در هر خط)."""
-    day = day or today_local()
+def apply_join_only(
+    links: list[str],
+    day=None,
+    replace: bool = False,
+    window_kind: str | None = None,
+) -> dict:
+    """جوین را فعال کن؛ لینک تکراری همان ردیف را با بازه جدید به‌روز می‌کند."""
     parsed: list[tuple[int | None, str]] = []
     for raw in links:
         if isinstance(raw, (list, tuple)) and len(raw) == 2:
@@ -274,17 +359,46 @@ def apply_join_only(links: list[str], day=None, replace: bool = True) -> dict:
     if not parsed:
         raise ValueError("حداقل یک لینک لازم است.")
 
-    start, end = join_window_for_day(day)
-    if replace:
-        # همه جوین‌های فعال پنل (و در صورت نیاز همه فعال‌ها را اولویت‌بندی می‌کنیم بعداً)
-        JoinMessage.objects.filter(title__startswith=JOIN_PREFIX, is_active=True).update(is_active=False)
+    forever = normalize_join_window(window_kind) == JOIN_WINDOW_FOREVER
+    start, end = (None, None) if forever else join_window_for(window_kind)
+    title_day = timezone.localdate() if forever else timezone.localtime(start).date()
+    expired = JoinMessage.objects.filter(
+        is_active=True, is_forever=False, end_datetime__lte=timezone.now()
+    ).update(is_active=False)
+    if expired:
+        _clear_join_cache()
+    if replace and not forever:
+        keep_texts = [link for _, link in parsed]
+        JoinMessage.objects.filter(
+            title__startswith=JOIN_PREFIX,
+            is_active=True,
+            is_forever=False,
+        ).exclude(text__in=keep_texts).update(is_active=False)
+        _clear_join_cache()
 
-    # اولویت: صریح از خط، وگرنه به ترتیب ۱،۲،۳…
-    used = set()
+    if forever:
+        used = set(JoinMessage.objects.filter(is_active=True).values_list("priority", flat=True))
+    else:
+        used = set(JoinMessage.objects.filter(
+            models.Q(is_forever=True) | models.Q(start_datetime__lt=end, end_datetime__gt=start),
+            is_active=True,
+        ).values_list("priority", flat=True))
     normalized: list[tuple[int, str]] = []
     auto = 1
     for pr, link in parsed:
-        if pr is None or pr in used:
+        existing = JoinMessage.objects.filter(is_active=True, text=link).first()
+        if pr is None:
+            if existing:
+                normalized.append((existing.priority, link))
+                continue
+            while auto in used:
+                auto += 1
+            pr = auto
+            auto += 1
+        elif pr in used:
+            if existing:
+                normalized.append((existing.priority, link))
+                continue
             while auto in used:
                 auto += 1
             pr = auto
@@ -294,22 +408,51 @@ def apply_join_only(links: list[str], day=None, replace: bool = True) -> dict:
 
     created = []
     for pr, link in normalized:
+        existing = JoinMessage.objects.filter(is_active=True, text=link).first()
+        if existing:
+            if existing.is_forever and not forever:
+                created.append(existing)
+                continue
+            fields = ["is_active", "is_forever", "start_datetime", "end_datetime"]
+            existing.is_active = True
+            existing.is_forever = forever
+            existing.start_datetime = start
+            existing.end_datetime = end
+            if forever:
+                existing.title = f"{JOIN_PREFIX} p{existing.priority} forever"
+                fields.append("title")
+            if pr and pr != existing.priority:
+                clash = JoinMessage.objects.filter(
+                    is_active=True, priority=pr,
+                ).exclude(pk=existing.pk).exists()
+                if not clash:
+                    existing.priority = pr
+                    fields.append("priority")
+            existing.save(update_fields=fields)
+            created.append(existing)
+            continue
         created.append(JoinMessage.objects.create(
-            title=f"{JOIN_PREFIX} p{pr} {day.isoformat()}",
+            title=f"{JOIN_PREFIX} p{pr} {'forever' if forever else title_day.isoformat()}",
             text=link,
             is_active=True,
-            is_forever=False,
+            is_forever=forever,
             priority=pr,
             start_datetime=start,
             end_datetime=end,
         ))
+    if forever:
+        start_label, end_label = "دائمی", "بدون انقضا"
+    else:
+        start_label = timezone.localtime(start).strftime("%Y/%m/%d %H:%M")
+        end_label = timezone.localtime(end).strftime("%Y/%m/%d %H:%M")
     return {
         "joins": len(created),
         "start": start,
         "end": end,
-        "start_label": timezone.localtime(start).strftime("%Y/%m/%d %H:%M"),
-        "end_label": timezone.localtime(end).strftime("%Y/%m/%d %H:%M"),
-        "priorities": [p for p, _ in normalized],
+        "start_label": start_label,
+        "end_label": end_label,
+        "forever": forever,
+        "priorities": [obj.priority for obj in created],
     }
 
 
@@ -344,6 +487,7 @@ def apply_single_ad(
     queue_ad_until_message: bool = False,
     ignore_group_ad_setting: bool = False,
     source: str = "schedule",
+    join_window: str | None = None,
 ) -> dict:
     """یک تبلیغ یک‌باره در یک ساعت مشخص. source=custom → خارج از برنامه."""
     day = day or today_local()
@@ -431,7 +575,9 @@ def apply_single_ad(
 
     join_result = None
     if mode == "super" and join_links:
-        join_result = apply_join_only(join_links, day=day, replace=True)
+        join_result = apply_join_only(
+            join_links, day=day, replace=True, window_kind=join_window,
+        )
 
     return {
         "ad": ad,
@@ -495,6 +641,7 @@ def apply_ads(
     queue_ad_until_message: bool = False,
     ignore_group_ad_setting: bool = False,
     replace_today: bool = False,
+    join_window: str | None = None,
 ) -> dict:
     """سازگاری با API قبلی — هر ساعت یک‌بار، type=fixed."""
     day = day or today_local()
@@ -514,6 +661,7 @@ def apply_ads(
                 day=day,
                 queue_ad_until_message=queue_ad_until_message,
                 ignore_group_ad_setting=ignore_group_ad_setting,
+                join_window=join_window if mode == "super" else None,
             )
             created.append(r["slot"])
             joins_total = r.get("joins") or joins_total
@@ -605,6 +753,7 @@ def dashboard_stats() -> dict:
     now = timezone.localtime()
     day = now.date()
     start, end = campaign_window(day)
+    expire_stale_joins()
 
     today_ads = ScheduledMessage.objects.filter(
         type="fixed", run_at__gte=start, run_at__lt=end, title__startswith=AD_PREFIX,
@@ -712,6 +861,7 @@ def list_extra_ads(schedule=None, day=None):
 
 
 def list_active_joins():
+    expire_stale_joins()
     return list(JoinMessage.objects.filter(is_active=True).order_by("priority", "id"))
 
 

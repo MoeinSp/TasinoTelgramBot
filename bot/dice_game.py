@@ -23,6 +23,40 @@ from bot.dice_themes import (
 ACTIVE_GAMES: dict = {}
 GAME_PROGRESS: dict = {}
 LAST_DICE: dict = {}
+_LAST_DICE_UID: dict = {}
+
+
+def clear_last_dice(chat_id) -> None:
+    keys = {chat_id}
+    try:
+        keys.add(int(chat_id))
+    except (TypeError, ValueError):
+        pass
+    keys.add(str(chat_id).strip())
+    for k in keys:
+        LAST_DICE.pop(k, None)
+        _LAST_DICE_UID.pop(k, None)
+
+
+def isolate_match_dice(chat_id, user_id) -> None:
+    """اگر بازیکن عوض شد، زنجیره تاس‌متوالی را قطع کن تا شانس برابر بماند."""
+    uid = int(user_id)
+    keys = [chat_id]
+    try:
+        keys.append(int(chat_id))
+    except (TypeError, ValueError):
+        pass
+    prev = None
+    for k in keys:
+        if k in _LAST_DICE_UID:
+            prev = _LAST_DICE_UID.get(k)
+            break
+    if prev is not None and int(prev) != uid:
+        clear_last_dice(chat_id)
+    for k in keys:
+        _LAST_DICE_UID[k] = uid
+
+
 WAITING_ROUNDS: dict = {}  # chat_id → winner_id (منتظر انتخاب راند)
 
 GAME_TTL = 600        # ۱۰ دقیقه — ثبت‌نام
@@ -43,32 +77,6 @@ def _game_lock(chat_id) -> threading.Lock:
 
 BET_MODE_FIXED = "fixed"    # شروع 2 50 — ورودی ثابت، حق واسطه از جایزه
 BET_MODE_EXTRA = "extra"    # شروع 2 50 اضافه — ورودی = شرط + حق واسطه
-
-
-def create_game(chat_id, total_players, bet_amount=0, fee_percent=0, has_bet=False,
-                bet_mode: str = BET_MODE_FIXED, starter_admin_id: int | None = None):
-    import time
-    game = {
-        "chat_id": chat_id,
-        "total_players": total_players,
-        "players": [],
-        "players_dice": {},
-        "status": "waiting",
-        "has_bet": has_bet,
-        "bet_amount": bet_amount,
-        "fee_percent": fee_percent,
-        "bet_mode": bet_mode,
-        "starter_admin_id": starter_admin_id,
-        "fixed_entry": bet_mode == BET_MODE_FIXED,
-        "rounds": 0,
-        "total_rounds": 0,
-        "is_turn_based": False,
-        "turn": None,
-        "players_rolls": {},
-        "expires_at": time.time() + GAME_TTL,
-    }
-    ACTIVE_GAMES[chat_id] = game
-    return game
 
 
 def calc_bet_costs(bet_amount: int, fee_percent: int, bet_mode: str = BET_MODE_FIXED,
@@ -173,15 +181,44 @@ def get_remaining_players(chat_id) -> int:
     return game["total_players"] - len(game["players"])
 
 
+def _qual_targets(game: dict) -> list:
+    """بازیکنانی که باید تاس تعیین بزنند (همه، یا فقط مساوی‌ها در راند مجدد)."""
+    if not game:
+        return []
+    contenders = game.get("qual_contenders")
+    if contenders:
+        return list(contenders)
+    total = int(game.get("total_players") or 0)
+    return list(game.get("players") or [])[:total]
+
+
 def registration_complete(game: dict) -> bool:
     if not game:
         return False
-    total = int(game.get("total_players") or 0)
-    players = list(game.get("players") or [])[:total]
-    if not total or len(players) < total:
+    targets = _qual_targets(game)
+    if not targets:
         return False
+    # راند اول: باید همه اسلات‌ها پر شده باشند
+    if not game.get("qual_contenders"):
+        total = int(game.get("total_players") or 0)
+        players = list(game.get("players") or [])[:total]
+        if not total or len(players) < total:
+            return False
     dice = game.get("players_dice") or {}
-    return all(p in dice for p in players)
+    return all(p in dice for p in targets)
+
+
+def split_prize_shares(total: int, winner_count: int) -> list[int]:
+    """تقسیم جایزه بین برنده‌های مساوی (باقی‌مانده به نفرات اول)."""
+    n = int(winner_count or 0)
+    total = int(total or 0)
+    if n <= 0:
+        return []
+    if n == 1:
+        return [total]
+    base = total // n
+    rem = total % n
+    return [base + (1 if i < rem else 0) for i in range(n)]
 
 
 def is_user_in_game(chat_id, user_id) -> bool:
@@ -218,19 +255,75 @@ def is_user_involved_in_group_game(chat_id, user_id) -> bool:
         return False
 
 
+def is_user_involved_in_any_group_game(user_id) -> bool:
+    """در هر گپی لابی/بازی گروهی فعال دارد؟"""
+    for chat_id in list(ACTIVE_GAMES.keys()):
+        try:
+            if is_user_involved_in_group_game(chat_id, user_id):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _pv_blocks_group_play(user_id) -> str | None:
     try:
-        from bot.pv_dice import user_busy_label, format_pv_busy_message
+        from bot.pv_dice import (
+            find_user_live_pv_game,
+            find_user_pending_invite,
+            user_busy_label,
+            format_pv_busy_message,
+        )
     except Exception:
         return None
+    if find_user_live_pv_game(user_id):
+        return format_pv_busy_message(user_busy_label(user_id) or "playing", user_id=user_id)
     code = user_busy_label(user_id)
-    if not code:
-        return None
-    return format_pv_busy_message(code)
+    if code:
+        return format_pv_busy_message(code, user_id=user_id)
+    if find_user_pending_invite(user_id):
+        return format_pv_busy_message("invite", user_id=user_id)
+    return None
+
+
+def create_game(chat_id, total_players, bet_amount=0, fee_percent=0, has_bet=False,
+                bet_mode: str = BET_MODE_FIXED, starter_admin_id: int | None = None):
+    import time
+    with _game_lock(chat_id):
+        cur = ACTIVE_GAMES.get(chat_id)
+        if cur and cur.get("status") not in ("finished", "cancelled", None):
+            # بازی فعال همین گپ — بازنویسی نکن
+            return None
+        if starter_admin_id is not None:
+            if _pv_blocks_group_play(starter_admin_id):
+                return None
+        game = {
+            "chat_id": chat_id,
+            "total_players": total_players,
+            "players": [],
+            "players_dice": {},
+            "status": "waiting",
+            "has_bet": has_bet,
+            "bet_amount": bet_amount,
+            "fee_percent": fee_percent,
+            "bet_mode": bet_mode,
+            "starter_admin_id": starter_admin_id,
+            "fixed_entry": bet_mode == BET_MODE_FIXED,
+            "rounds": 0,
+            "total_rounds": 0,
+            "is_turn_based": False,
+            "turn": None,
+            "players_rolls": {},
+            "expires_at": time.time() + GAME_TTL,
+        }
+        ACTIVE_GAMES[chat_id] = game
+        return game
 
 
 def add_player_to_game(chat_id, user_id):
     with _game_lock(chat_id):
+        if _pv_blocks_group_play(user_id):
+            return False, "شما در بازی/دعوت پیوی هستید؛ اول آن را تمام کنید"
         game = get_game(chat_id)
         if not game:
             return False, "بازی فعالی وجود ندارد"
@@ -263,7 +356,7 @@ def remove_player_from_game(chat_id, user_id):
 
 def finish_game_cleanup(chat_id):
     delete_game(chat_id)
-    LAST_DICE.pop(chat_id, None)
+    clear_last_dice(chat_id)
     from django.core.cache import cache as django_cache
     django_cache.delete(f"dice_finalizing_{chat_id}")
     django_cache.delete(f"dice_waiting_finalize_{chat_id}")
@@ -351,41 +444,93 @@ def can_player_roll(chat_id, user_id, dice_count=1):
     return True, remaining, f"🎯 {remaining} راند باقی مانده"
 
 
-def save_roll_result(chat_id, user_id, dice_count, total):
+def claim_roll_slots(chat_id, user_id, dice_count):
+    """رزرو اتمی راند قبل از تولید/ارسال تاس. (ok, rem_after, err)"""
+    game = get_game(chat_id)
+    if not game or game.get("status") != "playing":
+        return False, 0, "بازی فعال نیست."
+    n = max(1, int(dice_count or 1))
+    with _game_lock(chat_id):
+        allowed, remaining, err = can_player_roll(chat_id, user_id, n)
+        if not allowed:
+            return False, remaining, err
+        progress = GAME_PROGRESS.get(chat_id, {})
+        if user_id not in progress:
+            return False, 0, "❌ خطا در اطلاعات بازی!"
+        rem_before = int(progress[user_id].get("remaining") or 0)
+        if n > rem_before:
+            return False, rem_before, f"❌ شما فقط {rem_before} راند باقی دارید!"
+        progress[user_id]["remaining"] = rem_before - n
+        progress[user_id]["dice_rolled"] = int(progress[user_id].get("dice_rolled") or 0) + n
+        if progress[user_id].get("actions_left") is not None:
+            progress[user_id]["actions_left"] = max(0, int(progress[user_id]["actions_left"]) - 1)
+        return True, rem_before - n, ""
+
+
+def release_roll_slots(chat_id, user_id, dice_count):
+    """برگرداندن اسلات اگر ارسال تاس شکست بخورد."""
+    n = max(1, int(dice_count or 1))
+    with _game_lock(chat_id):
+        progress = GAME_PROGRESS.get(chat_id, {})
+        if user_id not in progress:
+            return False
+        progress[user_id]["remaining"] = int(progress[user_id].get("remaining") or 0) + n
+        rolled = int(progress[user_id].get("dice_rolled") or 0)
+        progress[user_id]["dice_rolled"] = max(0, rolled - n)
+        if progress[user_id].get("actions_left") is not None:
+            progress[user_id]["actions_left"] = int(progress[user_id]["actions_left"]) + 1
+        return True
+
+
+def save_roll_result(chat_id, user_id, dice_count, total, *, slots_claimed: bool = False):
     game = get_game(chat_id)
     if not game or game.get("status") != "playing":
         return False, 0, 0
 
-    progress = GAME_PROGRESS.get(chat_id, {})
-    if user_id not in progress:
-        return False, 0, 0
+    with _game_lock(chat_id):
+        progress = GAME_PROGRESS.get(chat_id, {})
+        if user_id not in progress:
+            return False, 0, 0
 
-    remaining_before = progress[user_id]["remaining"]
-    if dice_count > remaining_before:
-        return False, 0, remaining_before
+        remaining_before = progress[user_id]["remaining"]
+        if not slots_claimed:
+            if dice_count > remaining_before:
+                return False, 0, remaining_before
 
-    progress[user_id]["total"] += total
-    progress[user_id]["remaining"] -= dice_count
-    if progress[user_id].get("actions_left") is not None:
-        progress[user_id]["actions_left"] = max(0, progress[user_id]["actions_left"] - 1)
-    remaining = progress[user_id]["remaining"]
-    current_total = progress[user_id]["total"]
+            n = max(1, int(dice_count or 1))
+            t = int(total or 0)
+            t = max(n, min(6 * n, t))
 
-    if game.get("is_turn_based") and game.get("turn") == user_id and remaining == 0:
-        players_list = game.get("players", [])
-        if len(players_list) == 2:
-            for player in players_list:
-                if player != user_id:
-                    other_rem = progress.get(player, {}).get("remaining", 0)
-                    game["turn"] = player if other_rem > 0 else None
-                    break
+            progress[user_id]["total"] += t
+            progress[user_id]["remaining"] -= dice_count
+            progress[user_id]["dice_rolled"] = int(progress[user_id].get("dice_rolled") or 0) + n
+            if progress[user_id].get("actions_left") is not None:
+                progress[user_id]["actions_left"] = max(0, progress[user_id]["actions_left"] - 1)
+        else:
+            n = max(1, int(dice_count or 1))
+            t = int(total or 0)
+            t = max(n, min(6 * n, t))
+            progress[user_id]["total"] += t
+        remaining = progress[user_id]["remaining"]
+        current_total = progress[user_id]["total"]
 
-    all_remaining = [p["remaining"] for p in progress.values()]
-    finished = all(r <= 0 for r in all_remaining)
-    import time
-    game["expires_at"] = time.time() + PLAYING_TTL
+        if game.get("is_turn_based") and game.get("turn") == user_id and remaining == 0:
+            players_list = game.get("players", [])
+            if len(players_list) == 2:
+                for player in players_list:
+                    if player != user_id:
+                        other_rem = progress.get(player, {}).get("remaining", 0)
+                        game["turn"] = player if other_rem > 0 else None
+                        if game["turn"] is not None:
+                            clear_last_dice(chat_id)
+                        break
 
-    return finished, current_total, remaining
+        all_remaining = [p["remaining"] for p in progress.values()]
+        finished = all(r <= 0 for r in all_remaining)
+        import time
+        game["expires_at"] = time.time() + PLAYING_TTL
+
+        return finished, current_total, remaining
 
 
 # ─── should_continue برای ثبت‌نام ────────────────────────────────────────────
@@ -420,6 +565,30 @@ async def should_continue(chat_id, user_id, bot, message_id, text):
             return 0, None
         if game and game.get("status") == "waiting":
             dice = game.get("players_dice") or {}
+            contenders = game.get("qual_contenders")
+            if contenders:
+                if user_id not in contenders:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text="⚖️ تساوی در تاس تعیین است؛ فقط نفرات مساوی باید دوباره «تاس» بزنند.",
+                        reply_to_message_id=message_id,
+                    )
+                    return 0, None
+                if user_id not in dice:
+                    if text != "تاس":
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text="⚠️ لطفا برای تعیین فقط از دستور تاس استفاده کنید بدون عدد !",
+                            reply_to_message_id=message_id,
+                        )
+                        return 0, None
+                    return 2, None
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="✅ تاس تعیین شما ثبت شد. منتظر بقیه نفرات مساوی…",
+                    reply_to_message_id=message_id,
+                )
+                return 0, None
             # جوین شده ولی تاس تعیین ثبت نشده (خطا بین جوین و register) → اجازهٔ ادامه
             if user_id not in dice:
                 if text != "تاس":
@@ -477,7 +646,7 @@ async def should_continue(chat_id, user_id, bot, message_id, text):
 # ─── ثبت تاس در مرحله waiting (تعیین برنده برای راند) ───────────────────────
 
 async def register_and_save_dice(chat_id, user_id, dice_value, bot, message_id):
-    from bot.finance import get_playable_balance, format_insufficient_balance_message
+    from bot.finance import get_playable_balance, format_insufficient_balance_message, spendable_for_games
 
     game = get_game(chat_id)
     if not game:
@@ -491,7 +660,7 @@ async def register_and_save_dice(chat_id, user_id, dice_value, bot, message_id):
         entry_cost = costs["entry"]
         fee_per = costs["fee_per"]
         total_balance, playable, pending = await get_playable_balance(chat_id, user_id)
-        if playable < entry_cost:
+        if spendable_for_games(playable, pending) < entry_cost:
             if bet_mode == BET_MODE_FIXED and fee_per > 0:
                 fee_line = f"\n   └ حق واسطه ({fee_percent}٪): {fee_per:,} واحد (از جایزه)"
             elif fee_per > 0:
@@ -517,6 +686,7 @@ async def register_and_save_dice(chat_id, user_id, dice_value, bot, message_id):
     complete = False
     players: list = []
     players_dice: dict = {}
+    contenders: list = []
 
     with _game_lock(chat_id):
         game = ACTIVE_GAMES.get(chat_id)
@@ -527,9 +697,14 @@ async def register_and_save_dice(chat_id, user_id, dice_value, bot, message_id):
         total = int(game.get("total_players") or 0)
         players = list(game.get("players") or [])[:total]
         game["players"] = players
+        contenders = list(game.get("qual_contenders") or [])
+        if not contenders:
+            contenders = players
 
         if user_id not in players:
             err = "not_in_game"
+        elif game.get("qual_contenders") and user_id not in contenders:
+            err = "not_contender"
         else:
             if "players_dice" not in game:
                 game["players_dice"] = {}
@@ -542,8 +717,14 @@ async def register_and_save_dice(chat_id, user_id, dice_value, bot, message_id):
             }
             ACTIVE_GAMES[chat_id] = game
             players_dice = dict(game["players_dice"])
-            rolled_count = sum(1 for pid in players if pid in players_dice)
-            complete = rolled_count >= total
+            if game.get("qual_contenders"):
+                # راند مجدد تساوی: فقط مساوی‌ها
+                rolled_count = sum(1 for pid in contenders if pid in players_dice)
+                complete = len(contenders) > 0 and rolled_count >= len(contenders)
+            else:
+                # راند اول: باید همه صندلی‌ها پر و همه تاس زده باشند
+                rolled_count = sum(1 for pid in players if pid in players_dice)
+                complete = total > 0 and len(players) >= total and rolled_count >= total
 
     if err == "not_in_game":
         from bot.helpers import quiet_extra_on
@@ -553,6 +734,14 @@ async def register_and_save_dice(chat_id, user_id, dice_value, bot, message_id):
                 text="⚠️ توی این بازی نیستی؛ تاس نریز!",
                 reply_to_message_id=message_id,
             )
+        return False
+
+    if err == "not_contender":
+        await bot.send_message(
+            chat_id=chat_id,
+            text="⚖️ تساوی در تاس تعیین است؛ فقط نفرات مساوی باید دوباره «تاس» بزنند.",
+            reply_to_message_id=message_id,
+        )
         return False
 
     if not complete:
@@ -565,8 +754,12 @@ async def register_and_save_dice(chat_id, user_id, dice_value, bot, message_id):
         return True
 
     try:
-        max_dice = max(players_dice.values())
-        winners = [uid for uid, val in players_dice.items() if val == max_dice]
+        subset = {uid: players_dice[uid] for uid in contenders if uid in players_dice}
+        if not subset:
+            django_cache.delete(finalize_key)
+            return True
+        max_dice = max(subset.values())
+        winners = [uid for uid, val in subset.items() if val == max_dice]
 
         user_ids = players
         mention_map = await _bulk_mentions(user_ids, bot, chat_id)
@@ -575,13 +768,32 @@ async def register_and_save_dice(chat_id, user_id, dice_value, bot, message_id):
             return mention_map.get(uid) or f'<a href="tg://user?id={uid}">بازیکن</a>'
 
         if len(winners) > 1:
+            with _game_lock(chat_id):
+                g = ACTIVE_GAMES.get(chat_id)
+                if g:
+                    g = dict(g)
+                    dice = dict(g.get("players_dice") or {})
+                    for uid in winners:
+                        dice.pop(uid, None)
+                    g["players_dice"] = dice
+                    g["qual_contenders"] = list(winners)
+                    ACTIVE_GAMES[chat_id] = g
+            django_cache.delete(finalize_key)
+            names = "\n".join(f"• {safe_name(uid)}" for uid in winners)
             await bot.send_message(
                 chat_id=chat_id,
-                text=f"⚠️ تساوی! {len(winners)} نفر امتیاز برابر آوردند.\nلطفاً دوباره بازی را شروع کنید.",
+                text=(
+                    "⚖️ تساوی در تاس تعیین!\n"
+                    "━━━━━━━━━━━━━━━━\n"
+                    f"🎲 بیشترین تاس: <b>{max_dice}</b>\n"
+                    f"👥 {len(winners)} نفر مساوی شدند:\n"
+                    f"{names}\n\n"
+                    "🔁 فقط همین نفرها دوباره «تاس» بزنند.\n"
+                    "تا مشخص شدن یک نفر، بازی ادامه پیدا می‌کند."
+                ),
                 reply_to_message_id=message_id,
-                parse_mode="HTML"
+                parse_mode="HTML",
             )
-            finish_game_cleanup(chat_id)
             return True
 
         winner_id = winners[0]
@@ -592,6 +804,7 @@ async def register_and_save_dice(chat_id, user_id, dice_value, bot, message_id):
             if g:
                 g = dict(g)
                 g["awaiting_rounds"] = True
+                g.pop("qual_contenders", None)
                 g["expires_at"] = time.time() + max(WAITING_TTL + 60, 180)
                 ACTIVE_GAMES[chat_id] = g
 
@@ -645,16 +858,16 @@ async def recover_stuck_registration(chat_id, bot, message_id) -> bool:
         return False
     if chat_id in WAITING_ROUNDS:
         return False
-    total = int(game.get("total_players") or 0)
-    players = list(game.get("players") or [])[:total]
+    targets = _qual_targets(game)
     dice = game.get("players_dice") or {}
-    if not players or players[0] not in dice:
+    seed = next((p for p in targets if p in dice), None)
+    if seed is None:
         return False
     # اگر قفل finalize هنوز فعال است، finalize در حال اجراست — دخالت نکن
     from django.core.cache import cache as django_cache
     if django_cache.get(f"dice_waiting_finalize_{chat_id}"):
         return False
-    await register_and_save_dice(chat_id, players[0], dice[players[0]], bot, message_id)
+    await register_and_save_dice(chat_id, seed, dice[seed], bot, message_id)
     return True
 
 
@@ -682,6 +895,15 @@ async def handle_round_selection(chat_id, user_id, text, bot, message_id):
     except ValueError:
         return False
 
+    with _game_lock(chat_id):
+        if WAITING_ROUNDS.get(chat_id) != user_id:
+            return True
+        game = get_game(chat_id)
+        if not game:
+            WAITING_ROUNDS.pop(chat_id, None)
+            return False
+        WAITING_ROUNDS.pop(chat_id, None)
+
     game = get_game(chat_id)
     if not game:
         return False
@@ -702,6 +924,7 @@ async def handle_round_selection(chat_id, user_id, text, bot, message_id):
             if player != user_id:
                 game["turn"] = player
                 break
+        clear_last_dice(chat_id)
     else:
         game["turn"] = None
 
@@ -711,7 +934,7 @@ async def handle_round_selection(chat_id, user_id, text, bot, message_id):
 
     progress = {}
     for uid in players_list:
-        entry = {"total": 0, "remaining": rounds_count}
+        entry = {"total": 0, "remaining": rounds_count, "dice_rolled": 0}
         if turn_limit > 0:
             entry["actions_left"] = min(turn_limit, rounds_count)
         progress[uid] = entry
@@ -791,9 +1014,12 @@ async def send_final_results(chat_id, bot, message_id):
         total_rounds = game_snap.get("total_rounds", game_snap.get("rounds", 0))
         results = []
         for uid, data in progress.items():
-            total = data.get("total", 0)
-            remaining = data.get("remaining", 0)
-            count = total_rounds - remaining
+            total = int(data.get("total", 0) or 0)
+            remaining = int(data.get("remaining", 0) or 0)
+            tracked = int(data.get("dice_rolled", 0) or 0)
+            count = tracked if tracked > 0 else max(0, int(total_rounds or 0) - remaining)
+            if total > 6 * max(count, 1):
+                count = max(count, (total + 5) // 6)
             results.append((uid, total, count))
 
         if not results:
@@ -820,6 +1046,9 @@ async def send_final_results(chat_id, bot, message_id):
         winner_id = None
         winner_display = None
         is_tie = False
+        is_full_tie = False
+        winner_ids: list = []
+        winner_payouts: dict = {}
         bets_recorded = False
         entry_amount = winner_amount = fee_amount = gross_prize = 0
         bet_mode = _game_bet_mode(game_snap)
@@ -828,12 +1057,15 @@ async def send_final_results(chat_id, bot, message_id):
 
         top_score = results[0][1]
         winners_list = [(uid, safe_name(uid)) for uid, total, _ in results if total == top_score]
+        winner_ids = [uid for uid, _ in winners_list]
         if len(winners_list) == 1:
             winner_id, winner_display = winners_list[0]
         else:
             winner_display = " و ".join(d for _, d in winners_list)
             is_tie = True
             winner_id = None
+            # تساوی کامل: همه بازیکنان امتیاز برابر دارند → بدون حق‌واسطه، بدون کسر
+            is_full_tie = len(winner_ids) >= max(1, len(players_list))
 
         lines = []
         if winner_display and not is_tie:
@@ -842,19 +1074,33 @@ async def send_final_results(chat_id, bot, message_id):
         else:
             lines.append("🏁 مسابقه تاس به پایان رسید!")
             if is_tie:
-                lines.append("⚠️ بازی با تساوی به پایان رسید")
-                if _game_has_money_bet(game_snap):
-                    lines.append("💰 هیچ مبلغی از کیف پول کسر نشد.")
+                lines.append(f"⚖️ تساوی بین {len(winner_ids)} نفر با امتیاز {top_score}")
+                if is_full_tie:
+                    lines.append("🤝 تساوی کامل — همه امتیاز برابر آوردند")
+                    if _game_has_money_bet(game_snap):
+                        lines.append("💰 هیچ مبلغی کسر نشد؛ ورودی‌ها در کیف پول ماند.")
+                        lines.append("💸 حق واسطه گرفته نشد.")
+                else:
+                    lines.append(f"🏅 برنده‌ها: {winner_display}")
+                    if _game_has_money_bet(game_snap):
+                        lines.append("💰 جایزه بین برنده‌های مساوی تقسیم می‌شود.")
 
         lines.append("━━━━━━━━━━━━━━━━━━━━")
         lines.append("🏆 نتایج نهایی")
         lines.append("━━━━━━━━━━━━━━━━━━━━")
         lines.append("")
 
+        winner_id_set = set(winner_ids)
         for i, (uid, total, count) in enumerate(results, start=1):
             display = safe_name(uid)
-            medal = "🥇" if i == 1 and not is_tie else ("⭐" if i == 1 else "📌")
-            avg = total / count if count > 0 else 0
+            if uid in winner_id_set:
+                medal = "🥇" if not is_tie else "⭐"
+            else:
+                medal = "📌"
+            avg = (total / count) if count > 0 else 0
+            if avg > 6 and total > 0:
+                count = max(count, (total + 5) // 6)
+                avg = total / count
             lines.append(f"{medal} {i:02}. {display}")
             lines.append(f"   📊 مجموع: {total}")
             lines.append(f"   🎲 تاس: {count}")
@@ -864,13 +1110,18 @@ async def send_final_results(chat_id, bot, message_id):
         lines.append("━━━━━━━━━━━━━━━━━━━━")
 
         # پرداخت قبل از اعلام — تا متن موجودی قطعی باشد
+        # تساوی کامل: هیچ تسویه‌ای انجام نشود (نه کسر ورودی، نه حق‌واسطه)
         pay_error = None
-        if _game_has_money_bet(game_snap) and not is_tie and winner_id:
+        if _game_has_money_bet(game_snap) and winner_ids and not is_full_tie:
             costs = calc_bet_costs(bet_amount, fee_percent, bet_mode, len(players_list))
             entry_amount = costs["entry"]
             winner_amount = costs["winner_total"]
             fee_amount = costs["total_fee"]
             gross_prize = costs["gross_prize"]
+            shares = split_prize_shares(winner_amount, len(winner_ids))
+            winner_payouts = {
+                wid: shares[i] for i, wid in enumerate(winner_ids) if shares[i] > 0
+            }
             mode_label = "فیکس" if bet_mode == BET_MODE_FIXED else "اضافه"
             lines.append("")
             lines.append("💰 جایزه نقدی")
@@ -881,18 +1132,26 @@ async def send_final_results(chat_id, bot, message_id):
                     lines.append(f"💸 حق واسطه ({fee_percent}% از مجموع برد): {fee_amount:,} واحد")
                 else:
                     lines.append(f"💸 حق واسطه ({fee_percent}% اضافه): {fee_amount:,} واحد")
-            lines.append(f"🏆 مبلغ برد: {winner_amount:,} واحد")
+            if is_tie:
+                lines.append(f"🏆 مجموع جایزه: {winner_amount:,} واحد")
+                lines.append(f"➗ سهم هر برندهٔ مساوی: حدود {shares[0]:,} واحد")
+            else:
+                lines.append(f"🏆 مبلغ برد: {winner_amount:,} واحد")
 
             try:
                 pay_err = None
                 from bot.finance import allocate_game_no
                 game_no = await allocate_game_no(chat_id)
+                settle_winner = winner_ids[0]
+                settle_amount = winner_payouts.get(settle_winner, winner_amount)
                 for attempt in range(1, 4):
                     try:
                         await asyncio.wait_for(
                             settle_dice_game_wallets(
-                                chat_id, players_list, entry_amount, winner_id, winner_amount,
+                                chat_id, players_list, entry_amount, settle_winner, settle_amount,
                                 game_no=game_no,
+                                winner_payouts=winner_payouts if is_tie else None,
+                                record_league=not is_tie,
                             ),
                             timeout=30,
                         )
@@ -947,8 +1206,8 @@ async def send_final_results(chat_id, bot, message_id):
                 lines.append("📊 تغییرات موجودی:")
                 for uid in players_list:
                     display = safe_name(uid)
-                    if uid == winner_id:
-                        lines.append(f"   ✅ {display}: +{winner_amount:,} واحد")
+                    if uid in winner_payouts:
+                        lines.append(f"   ✅ {display}: +{winner_payouts[uid]:,} واحد")
                     else:
                         lines.append(f"   ❌ {display}: -{entry_amount:,} واحد")
             except Exception as e:
@@ -958,6 +1217,15 @@ async def send_final_results(chat_id, bot, message_id):
                 traceback.print_exc()
                 lines.append("")
                 lines.append("⚠️ پرداخت کیف پول با خطا روبه‌رو شد؛ لطفاً موجودی را بررسی کنید.")
+        elif _game_has_money_bet(game_snap) and is_full_tie:
+            costs = calc_bet_costs(bet_amount, fee_percent, bet_mode, len(players_list))
+            entry_amount = costs["entry"]
+            lines.append("")
+            lines.append("💰 نتیجه مالی")
+            lines.append("────────────────────")
+            lines.append(f"💳 ورودی هر نفر: {entry_amount:,} واحد")
+            lines.append("✅ به خاطر تساوی کامل، هیچ مبلغی کسر نشد.")
+            lines.append("💸 حق واسطه گرفته نشد.")
 
         # دکمه‌های افزایش روی نتیجه حذف شد — درخواست افزایش جداگانه در پیوی پس از بازی پیوی
         await bot.send_message(
@@ -985,6 +1253,7 @@ async def send_final_results(chat_id, bot, message_id):
             has_bet = _game_has_money_bet(game_snap)
             ba = int(game_snap.get("bet_amount") or 0) if has_bet else 0
             ea = wa = 0
+            payouts = dict(winner_payouts or {})
             if has_bet:
                 costs = calc_bet_costs(
                     ba,
@@ -993,15 +1262,27 @@ async def send_final_results(chat_id, bot, message_id):
                     len(players_list),
                 )
                 ea = int(costs["entry"])
-                if not is_tie and winner_id:
-                    wa = int(costs["winner_total"])
+                wa = int(costs["winner_total"])
+                if not payouts and winner_ids:
+                    shares = split_prize_shares(wa, len(winner_ids))
+                    payouts = {wid: shares[i] for i, wid in enumerate(winner_ids) if shares[i] > 0}
             for uid, total_score, roll_count in results:
-                is_w = (uid == winner_id) and not is_tie
-                if has_bet and not is_tie and winner_id:
-                    amt = (wa - ea) if uid == winner_id else -ea
-                else:
+                # تساوی کامل: بدون برنده مالی و بدون تغییر مبلغ
+                if is_full_tie:
+                    is_w = False
                     amt = 0
+                else:
+                    is_w = uid in (winner_ids or [])
+                    if has_bet and uid in payouts:
+                        amt = int(payouts[uid]) - ea
+                    elif has_bet:
+                        amt = -ea
+                    else:
+                        amt = 0
                 avg_val = total_score / roll_count if roll_count > 0 else 0.0
+                if avg_val > 6 and total_score > 0:
+                    roll_count = max(roll_count, (total_score + 5) // 6)
+                    avg_val = total_score / roll_count
                 DiceGameHistory.objects.create(
                     telegram_chat_id=chat_id,
                     telegram_user_id=int(uid),
@@ -1131,7 +1412,7 @@ async def handle_dice(text, chat_id, message_id, bot, user_id, dice_option_off, 
 
     # چک موجودی برای بازی شرطی در مرحله waiting
     if game and game.get("status") == "waiting" and _game_has_money_bet(game):
-        from bot.finance import get_playable_balance, format_insufficient_balance_message
+        from bot.finance import get_playable_balance, format_insufficient_balance_message, spendable_for_games
 
         bet_mode = _game_bet_mode(game)
         fee_percent = game.get("fee_percent", 0)
@@ -1140,7 +1421,7 @@ async def handle_dice(text, chat_id, message_id, bot, user_id, dice_option_off, 
         entry_cost = costs["entry"]
         fee_per = costs["fee_per"]
         total_balance, playable, pending = await get_playable_balance(chat_id, user_id)
-        if playable < entry_cost:
+        if spendable_for_games(playable, pending) < entry_cost:
             if bet_mode == BET_MODE_FIXED and fee_per > 0:
                 fee_line = f"\n   └ حق واسطه ({fee_percent}٪): {fee_per:,} واحد (از جایزه)"
             elif fee_per > 0:
@@ -1166,34 +1447,44 @@ async def handle_dice(text, chat_id, message_id, bot, user_id, dice_option_off, 
     if should_cont == 0:
         return
 
-    # بررسی نوبت در بازی playing
+    # بررسی نوبت در بازی playing — رزرو اتمی قبل از تولید تاس
+    claimed_slots = False
     game = get_game(chat_id)
+    roll_off = dice_option_off
     if game and game.get("status") == "playing":
-        allowed, remaining, error_msg = can_player_roll(chat_id, user_id, dice_count)
-        if not allowed:
+        claimed, _remaining, error_msg = claim_roll_slots(chat_id, user_id, dice_count)
+        if not claimed:
             await bot.send_message(chat_id=chat_id, text=error_msg, reply_to_message_id=message_id)
             return
+        claimed_slots = True
+        isolate_match_dice(chat_id, user_id)
+        if int(game.get("total_rounds") or game.get("rounds") or 0) <= 2:
+            roll_off = False
 
     # ─── تاس تکی ─────────────────────────────────────────────────────────────
     if dice_count == 1:
-        from bot.helpers import db_record_dice_roll, safe_send
+        from bot.helpers import db_record_dice_roll
+        display_ok = False
         r = None
         if telegram_emoji_on and should_cont != 2:
             try:
                 sent = await bot.send_dice(chat_id, emoji="🎲", reply_to_message_id=message_id)
                 r = sent.dice.value
+                display_ok = r is not None
             except Exception:
                 r = None
         if r is None:
-            r = roll_dice(chat_id, dice_option_off)
+            r = roll_dice(chat_id, roll_off)
             msg = build_single_dice_message(r, theme)
             if join_note:
                 msg += join_note
             try:
-                await safe_send(bot, chat_id, msg, reply_to=message_id)
+                await bot.send_message(
+                    chat_id=chat_id, text=msg, reply_to_message_id=message_id, parse_mode="HTML",
+                )
+                display_ok = True
             except Exception:
-                # ارسال نمایشی fail شد؛ ثبت تاس تعیین نباید متوقف شود
-                pass
+                display_ok = False
         LAST_DICE[chat_id] = r
         try:
             await db_record_dice_roll(chat_id, user_id, r)
@@ -1213,7 +1504,13 @@ async def handle_dice(text, chat_id, message_id, bot, user_id, dice_option_off, 
 
         game = get_game(chat_id)
         if game and game.get("status") == "playing":
-            await _handle_game_roll_silent(chat_id, user_id, 1, r, message_id, bot)
+            if not display_ok:
+                if claimed_slots:
+                    release_roll_slots(chat_id, user_id, 1)
+                return
+            await _handle_game_roll_silent(
+                chat_id, user_id, 1, r, message_id, bot, slots_claimed=claimed_slots,
+            )
             return
 
         if should_cont == 2:
@@ -1231,16 +1528,34 @@ async def handle_dice(text, chat_id, message_id, bot, user_id, dice_option_off, 
 
     # ─── تاس چندتایی ────────────────────────────────────────────────────────
     game = get_game(chat_id)
+    roll_off = dice_option_off
+    if game and game.get("status") == "playing":
+        isolate_match_dice(chat_id, user_id)
+        if int(game.get("total_rounds") or game.get("rounds") or 0) <= 2:
+            roll_off = False
 
     if dice_count <= 30:
-        results, total = _generate_dice_numbers(dice_count, chat_id, dice_option_off)
+        results, total = _generate_dice_numbers(dice_count, chat_id, roll_off)
         msg = build_multi_dice_message(results, total, dice_count, theme)
 
         if game and game.get("status") == "playing":
-            await _handle_game_roll(chat_id, user_id, dice_count, total, msg, message_id, bot)
+            await _handle_game_roll(
+                chat_id, user_id, dice_count, total, msg, message_id, bot,
+                slots_claimed=claimed_slots,
+            )
             return
 
         await bot.send_message(chat_id=chat_id, text=msg, reply_to_message_id=message_id, parse_mode="HTML")
+        # ثبت بهترین تاس در چالش race
+        try:
+            from bot.challenges import notify_fun_game
+            best = max(results)
+            await notify_fun_game(
+                bot, chat_id, user_id, "dice", int(best),
+                reply_to=message_id,
+            )
+        except Exception:
+            pass
 
     else:
         # تاس آماری برای تعداد زیاد (> 30)
@@ -1266,23 +1581,61 @@ async def handle_dice(text, chat_id, message_id, bot, user_id, dice_option_off, 
         ))
 
         if game and game.get("status") == "playing":
-            await _handle_game_roll(chat_id, user_id, dice_count, total, msg, message_id, bot)
+            await _handle_game_roll(
+                chat_id, user_id, dice_count, total, msg, message_id, bot,
+                slots_claimed=claimed_slots,
+            )
             return
 
         await bot.send_message(chat_id=chat_id, text=msg, reply_to_message_id=message_id, parse_mode="HTML")
+        # ثبت بهترین تاس در چالش race
+        try:
+            from bot.challenges import notify_fun_game
+            best = 6 if freq[6] > 0 else max(f for f in range(1, 7) if freq[f] > 0)
+            await notify_fun_game(
+                bot, chat_id, user_id, "dice", int(best),
+                reply_to=message_id,
+            )
+        except Exception:
+            pass
 
 
-async def _handle_game_roll(chat_id, user_id, dice_count, total, msg, message_id, bot):
-    finished, total_score, rem = save_roll_result(chat_id, user_id, dice_count, total)
+async def _handle_game_roll(chat_id, user_id, dice_count, total, msg, message_id, bot, *, slots_claimed: bool = False):
+    """اول پیام را بفرست؛ اگر نرفت امتیاز ثبت نشود."""
+    progress = GAME_PROGRESS.get(chat_id, {})
+    p = progress.get(user_id) or {}
+    if slots_claimed:
+        rem_after = int(p.get("remaining") or 0)
+        total_score = int(p.get("total") or 0) + int(total or 0)
+    else:
+        rem_after = int(p.get("remaining") or 0) - int(dice_count or 1)
+        total_score = int(p.get("total") or 0) + int(total or 0)
+    others_done = all(
+        (int(row.get("remaining") or 0) <= 0) if uid != user_id else rem_after <= 0
+        for uid, row in progress.items()
+    )
+    finished = rem_after <= 0 and others_done
 
     if finished:
         msg += f"\n\n━━━━━━━━━━━━━━━━\n✅ راندهای شما تمام شد!\n📊 امتیاز نهایی شما: {total_score}\n⏳ منتظر پایان بازی بازیکنان دیگر..."
-    elif rem > 0:
-        msg += f"\n\n━━━━━━━━━━━━━━━━\n🎯 {rem} راند دیگر باقی مانده\n📊 امتیاز فعلی: {total_score}"
+    elif rem_after > 0:
+        msg += f"\n\n━━━━━━━━━━━━━━━━\n🎯 {rem_after} راند دیگر باقی مانده\n📊 امتیاز فعلی: {total_score}"
     else:
         msg += f"\n\n━━━━━━━━━━━━━━━━\n✅ راندهای شما تمام شد!\n📊 امتیاز نهایی شما: {total_score}\n⏳ منتظر پایان بازی بازیکنان دیگر..."
 
-    await bot.send_message(chat_id=chat_id, text=msg, reply_to_message_id=message_id, parse_mode="HTML")
+    try:
+        await bot.send_message(
+            chat_id=chat_id, text=msg, reply_to_message_id=message_id, parse_mode="HTML",
+        )
+    except Exception as e:
+        print(f"group dice send failed — roll discarded chat={chat_id} user={user_id}: {e}")
+        if slots_claimed:
+            release_roll_slots(chat_id, user_id, dice_count)
+        return
+
+    finished, total_score, rem = save_roll_result(
+        chat_id, user_id, dice_count, total, slots_claimed=slots_claimed,
+    )
 
     if finished:
         await asyncio.sleep(1)
@@ -1293,17 +1646,22 @@ async def _handle_game_roll(chat_id, user_id, dice_count, total, msg, message_id
     if game and game.get("is_turn_based") and game.get("turn") and game["turn"] != user_id:
         mention_map = await _bulk_mentions([game["turn"]], bot, chat_id)
         next_player = mention_map.get(game["turn"]) or f'<a href="tg://user?id={game["turn"]}">بازیکن بعدی</a>'
-        await bot.send_message(
-            chat_id=chat_id,
-            text=f"🔁 نوبت {next_player} است!\n🎲 لطفاً «تاس» بیندازید.",
-            reply_to_message_id=message_id,
-            parse_mode="HTML"
-        )
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"🔁 نوبت {next_player} است!\n🎲 لطفاً «تاس» بیندازید.",
+                reply_to_message_id=message_id,
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
 
 
-async def _handle_game_roll_silent(chat_id, user_id, dice_count, total, message_id, bot):
+async def _handle_game_roll_silent(chat_id, user_id, dice_count, total, message_id, bot, *, slots_claimed: bool = False):
     """مثل _handle_game_roll ولی بدون ارسال متن تاس — فقط نتیجه ثبت و اعلام وضعیت"""
-    finished, total_score, rem = save_roll_result(chat_id, user_id, dice_count, total)
+    finished, total_score, rem = save_roll_result(
+        chat_id, user_id, dice_count, total, slots_claimed=slots_claimed,
+    )
 
     if finished:
         status = f"✅ راندهای شما تمام شد!\n📊 امتیاز نهایی شما: {total_score}\n⏳ منتظر پایان بازی بازیکنان دیگر..."

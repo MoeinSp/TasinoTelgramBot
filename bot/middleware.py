@@ -105,6 +105,44 @@ def _enqueue_track(chat_id: int, user_id: int, name: str, bot: Bot | None) -> No
         entry["bot"] = bot
     if _FLUSH_TASK is None or _FLUSH_TASK.done():
         _FLUSH_TASK = asyncio.create_task(_do_flush_tracks())
+    try:
+        from bot.pv_search import mark_group_chat_activity
+        mark_group_chat_activity(chat_id, user_id)
+    except Exception:
+        pass
+
+
+class MuteEnforcementMiddleware(BaseMiddleware):
+    """کاربر سکوت‌شده در گروه: پیام پاک شود و هیچ دستوری اجرا نشود."""
+
+    async def __call__(
+        self,
+        handler: Callable[[Message, Dict[str, Any]], Awaitable[Any]],
+        event: Message,
+        data: Dict[str, Any],
+    ) -> Any:
+        if (
+            not isinstance(event, Message)
+            or not event.chat
+            or event.chat.type not in ("group", "supergroup")
+            or not event.from_user
+            or event.from_user.is_bot
+        ):
+            return await handler(event, data)
+
+        chat_id = event.chat.id
+        user_id = event.from_user.id
+        muted = cache.MUTED_USERS.get(chat_id) or set()
+        if user_id not in muted:
+            return await handler(event, data)
+
+        bot: Bot | None = data.get("bot")
+        if bot and event.message_id:
+            try:
+                await bot.delete_message(chat_id, event.message_id)
+            except Exception:
+                pass
+        return None
 
 
 class MessageTrackingMiddleware(BaseMiddleware):
@@ -129,6 +167,17 @@ class MessageTrackingMiddleware(BaseMiddleware):
                 name,
                 data.get("bot"),
             )
+        elif (
+            event.chat
+            and event.chat.type == "private"
+            and event.from_user
+            and not event.from_user.is_bot
+        ):
+            try:
+                from bot.pv_search import mark_pm_chat_activity
+                mark_pm_chat_activity(event.from_user.id)
+            except Exception:
+                pass
 
         return await handler(event, data)
 

@@ -28,6 +28,18 @@
   <div class="stat"><span>ارسال‌شده</span><b>{{ stats.sent_today }}</b></div>
   <div class="stat"><span>جوین زنده</span><b>{{ stats.live_joins }}</b></div>
 </section>
+{% if forever_joins %}
+<p class="muted small">جوین دائم (جدا از سوپر بمب):
+  {% for j in forever_joins %}<b class="ltr">{{ j.text }}</b>{% if not forloop.last %} · {% endif %}{% endfor %}
+  · <a href="{% url 'ad_panel:join' %}">مدیریت جوین</a>
+</p>
+{% endif %}
+{% if latest_join %}
+<p class="muted small">جوین کمپین: <b class="ltr">{{ latest_join.text }}</b>
+  {% if latest_join.start_datetime %}· {{ latest_join.start_datetime|date:"Y/m/d H:i" }} → {{ latest_join.end_datetime|date:"Y/m/d H:i" }}{% endif %}
+  · <a href="{% url 'ad_panel:join' %}">مدیریت جوین</a>
+</p>
+{% endif %}
 <section class="stats stats-2">
   <div class="stat"><span>ارسال موفق گروه (امروز)</span><b>{{ stats.ok_groups_today }}</b></div>
   <div class="stat"><span>ارسال موفق پیوی (امروز)</span><b>{{ stats.ok_pv_today }}</b></div>
@@ -113,9 +125,10 @@
         </label>
         {% if row.is_super %}
         <label>لینک جوین اجباری
-          <input type="text" name="join_link" dir="ltr" placeholder="https://… از ۱۲ امروز تا ۱۲ فردا">
-          <small class="help">با ثبت این ردیف (اگر متن داشته باشد)، جوین از ۱۲ امروز تا ۱۲ فردا فعال می‌شود</small>
+          <input type="text" name="join_link" dir="ltr" value="" placeholder="https://…">
+          <small class="help">خالی = جوین این تبلیغ عوض نمی‌شود. اگر لینک بگذاری، جوین کمپین قبلی خاموش و این یکی جایگزین می‌شود.</small>
         </label>
+        {% include "ad_panel/_join_window.html" %}
         {% endif %}
         <button class="btn btn-primary" type="submit">{% if row.status == 'queued' %}به‌روزرسانی{% else %}ثبت{% endif %}</button>
       </form>
@@ -232,9 +245,10 @@
     <label>متن تبلیغ
       <textarea name="text" rows="3" placeholder="متن تبلیغ…" required></textarea>
     </label>
-    <label id="custom-join-box" class="field-join">لینک جوین (سوپر بمب — ۱۲ امروز تا ۱۲ فردا)
-      <input type="text" name="join_link" dir="ltr" placeholder="https://…">
+    <label id="custom-join-box" class="field-join">لینک جوین (سوپر بمب)
+      <input type="text" name="join_link" dir="ltr" value="" placeholder="https://…">
     </label>
+    <div id="custom-join-window" class="field-join">{% include "ad_panel/_join_window.html" %}</div>
     <div class="form-actions">
       <button class="btn btn-primary" type="submit">ثبت تبلیغ خارج از برنامه</button>
     </div>

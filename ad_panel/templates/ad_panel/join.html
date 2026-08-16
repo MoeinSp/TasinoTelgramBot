@@ -4,7 +4,7 @@
 <header class="page-head">
   <div>
     <h1>جوین اجباری</h1>
-    <p class="muted">بازه: <b class="ltr">{{ window_start|date:"Y/m/d H:i" }}</b> → <b class="ltr">{{ window_end|date:"Y/m/d H:i" }}</b> · اولویت کمتر = بالاتر در لیست ربات</p>
+    <p class="muted">بازه را از لیست انتخاب کن · اولویت کمتر = بالاتر در لیست ربات</p>
   </div>
   <form method="post" action="{% url 'ad_panel:join_renumber' %}">
     {% csrf_token %}
@@ -18,8 +18,11 @@
     <label>لینک‌ها (تا ۵ خط — ترتیب خط = اولویت ۱،۲،۳…)
       {{ form.join_links }}
     </label>
+    <label>بازه جوین
+      {{ form.join_window }}
+    </label>
     <div class="form-actions">
-      <button class="btn btn-primary" type="submit">فعال‌سازی ۱۲→۱۲</button>
+      <button class="btn btn-primary" type="submit">افزودن جوین فعال</button>
     </div>
   </form>
 
@@ -33,9 +36,12 @@
           <strong>اولویت {{ j.priority }} · {{ j.title }}</strong>
           <div class="ltr small">{{ j.text }}</div>
           <div class="small muted ltr">
+            {% if j.is_forever %}دائمی — بدون انقضا
+            {% else %}
             {% if j.start_datetime %}{{ j.start_datetime|date:"Y/m/d H:i" }}{% endif %}
             →
             {% if j.end_datetime %}{{ j.end_datetime|date:"Y/m/d H:i" }}{% endif %}
+            {% endif %}
           </div>
         </div>
         <div class="join-actions">

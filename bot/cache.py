@@ -8,6 +8,7 @@ GROUP_LOCK: set[int] = set()               # chat_ids with global lock
 WARNING_ENABLED: set[int] = set()          # chat_ids with auto-warn on
 DICE_OPTION: set[int] = set()              # chat_ids with dice tracking
 QUIET_EXTRA: set[int] = set()              # chat_ids with «کم پیام» on
+GAME_CHAT_LOCK: set[int] = set()           # chat_ids with «قفل بازی» (فقط پیام بازی)
 DICE_TURN_LIMIT: dict[int, int] = {}       # chat_id → max roll turns (0 = off)
 LEARNED_RESPONSES: dict[int, dict[str, str]] = {}  # chat_id → {trigger: response}
 WORD_FILTERS: dict[int, list[str]] = {}    # chat_id → words list

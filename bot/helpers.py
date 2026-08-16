@@ -191,14 +191,22 @@ async def get_target_from_reply(message: Message, bot: Bot) -> Optional[int]:
                         reply_to=message.message_id)
         return None
 
-    target = message.reply_to_message.from_user
-    if target is None or target.is_bot:
+    reply = message.reply_to_message
+    target = reply.from_user
+    if target is not None and not target.is_bot:
+        return target.id
+
+    # پیام کانال / فرستنده ناشناس ادمین — از sender_chat استفاده نمی‌کنیم برای کیک کاربر
+    if target is not None and target.is_bot:
         await safe_send(bot, message.chat.id,
-                        "❌ این کاربر معتبر نیست.",
+                        "❌ روی پیام ربات نمی‌شود این دستور را زد.",
                         reply_to=message.message_id)
         return None
 
-    return target.id
+    await safe_send(bot, message.chat.id,
+                    "❌ این کاربر معتبر نیست (مثلاً پیام کانال یا فرستنده ناشناس).",
+                    reply_to=message.message_id)
+    return None
 
 
 _UNBAN_TARGET_RE = re.compile(
@@ -211,10 +219,13 @@ def parse_unban_target(text: str) -> str | None:
     """شناسه یا یوزرنیم بعد از دستور آنبن — مثلاً انبن ucski33233"""
     if not text:
         return None
-    m = _UNBAN_TARGET_RE.match(text.strip())
+    from bot.silent_cmd import apply_silent_suffix
+    clean, _ = apply_silent_suffix(text)
+    raw = (clean or text or "").strip()
+    m = _UNBAN_TARGET_RE.match(raw)
     if not m:
         return None
-    return m.group(1).strip().lstrip("@")
+    return m.group(1).strip().lstrip("@").rstrip(".….۔")
 
 
 @sync_to_async
@@ -394,6 +405,67 @@ def db_disable_quiet_extra(chat_id: int):
 
 def quiet_extra_on(chat_id) -> bool:
     return int(chat_id) in cache.QUIET_EXTRA or chat_id in cache.QUIET_EXTRA
+
+
+@sync_to_async
+def db_enable_game_chat_lock(chat_id: int):
+    from account.models import TelegramGroup
+    TelegramGroup.objects.filter(telegram_chat_id=chat_id).update(game_chat_lock=True)
+    cache.GAME_CHAT_LOCK.add(int(chat_id))
+
+
+@sync_to_async
+def db_disable_game_chat_lock(chat_id: int):
+    from account.models import TelegramGroup
+    TelegramGroup.objects.filter(telegram_chat_id=chat_id).update(game_chat_lock=False)
+    cache.GAME_CHAT_LOCK.discard(int(chat_id))
+
+
+def game_chat_lock_on(chat_id) -> bool:
+    try:
+        cid = int(chat_id)
+    except (TypeError, ValueError):
+        return chat_id in cache.GAME_CHAT_LOCK
+    return cid in cache.GAME_CHAT_LOCK or chat_id in cache.GAME_CHAT_LOCK
+
+
+def game_chat_lock_enabled_text() -> str:
+    return (
+        "🔒 قفل بازی فعال شد\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "فقط می‌تونین مبلغ شرط رو به صورت عدد بنویسین تا حریف پیدا شه.\n"
+        "همچنین می‌تونین با دستور <code>شروع 2 200 پیوی</code> هم درخواست بازی بدین.\n\n"
+        "بقیه پیام‌های نامرتبط پاک می‌شود.\n\n"
+        "⭐ ادمین و عضو ویژه از قفل معاف‌اند.\n"
+        "خاموش کردن: <code>قفل بازی خاموش</code>"
+    )
+
+
+def is_allowed_under_game_chat_lock(text: str | None, *, has_dice: bool = False, has_game: bool = False) -> bool:
+    """پیام‌های مجاز وقتی قفل بازی روشن است."""
+    if has_dice or has_game:
+        return True
+    if not text:
+        return False
+    from bot.utils import normalize_numbers
+    import re
+
+    raw = normalize_numbers(text).strip()
+    if not raw:
+        return False
+    # مبلغ شرط به صورت عدد خالص
+    if re.fullmatch(r"\d+", raw):
+        return True
+    # شروع بازی گروهی / پیوی
+    if raw.startswith("شروع"):
+        return True
+    # لغو بازی / دعوت
+    if raw in ("لغو", "لغو بازی", "لغو مسابقه") or re.fullmatch(r"لغو\s*پیوی", raw):
+        return True
+    # پرتاب تاس متنی
+    if raw == "تاس" or raw.startswith("تاس"):
+        return True
+    return False
 
 
 @sync_to_async
@@ -1212,7 +1284,7 @@ LOCK_MAP = {
     "موقعیت": "location",
     "نظرسنجی": "poll",
     "اینلاین": "via_bot",
-    "بازی": "game",
+    "مدیا بازی": "game",
 }
 
 # نام نمایشی هر قفل (کلید انگلیسی ← برچسب فارسی)
@@ -1236,7 +1308,7 @@ LOCK_NAMES = {
     "location": "لوکیشن",
     "poll": "نظرسنجی",
     "via_bot": "اینلاین",
-    "game": "بازی",
+    "game": "مدیا بازی",
 }
 
 # ترتیب اولویت نمایش و پنل (مهم‌ترین‌ها بالاتر)
@@ -1341,6 +1413,29 @@ def db_fetch_dice_game_history(chat_id: int, period: str) -> list:
     elif period == "weekly":
         qs = qs.filter(created_at__gte=now - datetime.timedelta(weeks=1))
     return list(qs)
+
+
+@sync_to_async
+def db_fetch_user_dice_game_history(chat_id: int, user_id: int, period: str) -> list:
+    """period: daily | yesterday"""
+    import datetime
+    from django.utils import timezone
+    from account.models import DiceGameHistory
+
+    qs = DiceGameHistory.objects.filter(
+        telegram_chat_id=int(chat_id),
+        telegram_user_id=int(user_id),
+    )
+    now = timezone.now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if period == "daily":
+        qs = qs.filter(created_at__gte=today_start)
+    elif period == "yesterday":
+        qs = qs.filter(
+            created_at__gte=today_start - datetime.timedelta(days=1),
+            created_at__lt=today_start,
+        )
+    return list(qs.order_by("-created_at"))
 
 
 # ─── کارت بانکی ──────────────────────────────────────────────────────────────

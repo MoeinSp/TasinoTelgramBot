@@ -1,9 +1,22 @@
 from django import forms
 from .models import AdLoadout
-from .services import parse_time, parse_entries
+from .services import parse_time, parse_entries, JOIN_WINDOW_CHOICES, JOIN_WINDOW_DEFAULT
 
 
 MODE_CHOICES = AdLoadout.MODE_CHOICES
+
+
+class JoinWindowMixin(forms.Form):
+    join_window = forms.ChoiceField(
+        required=False,
+        choices=JOIN_WINDOW_CHOICES,
+        initial=JOIN_WINDOW_DEFAULT,
+        label="بازه جوین",
+    )
+
+    def clean_join_window(self):
+        from .services import normalize_join_window
+        return normalize_join_window(self.cleaned_data.get("join_window"))
 
 
 class ScheduleForm(forms.ModelForm):
@@ -31,7 +44,7 @@ class ScheduleForm(forms.ModelForm):
 LoadoutForm = ScheduleForm
 
 
-class SlotPostForm(forms.Form):
+class SlotPostForm(JoinWindowMixin):
     time = forms.CharField()
     mode = forms.ChoiceField(choices=MODE_CHOICES)
     text = forms.CharField(required=False, widget=forms.Textarea)
@@ -66,7 +79,7 @@ class SlotPostForm(forms.Form):
         return cleaned
 
 
-class CustomAdForm(forms.Form):
+class CustomAdForm(JoinWindowMixin):
     schedule_type = forms.ChoiceField(
         label="نوع زمان‌بندی",
         choices=(("fixed", "یک‌باره در ساعت مشخص"), ("interval", "دوره‌ای")),
@@ -147,7 +160,7 @@ class PeriodicAdForm(forms.Form):
         return (self.cleaned_data.get("text") or "").strip()
 
 
-class JoinOnlyForm(forms.Form):
+class JoinOnlyForm(JoinWindowMixin):
     join_links = forms.CharField(
         label="لینک‌ها (تا ۵ تا)",
         widget=forms.Textarea(attrs={

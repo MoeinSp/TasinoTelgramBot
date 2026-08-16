@@ -63,6 +63,11 @@ def _board_context(request, schedule=None):
         "today_ads": today_ads,
         "extra_ads": extra_ads,
         "joins": services.list_active_joins(),
+        "latest_join": services.latest_campaign_join(),
+        "forever_joins": services.list_forever_joins(),
+        "join_prefill": services.current_join_prefill(),
+        "join_window_choices": services.JOIN_WINDOW_CAMPAIGN_CHOICES,
+        "join_window_default": services.JOIN_WINDOW_DEFAULT,
         "custom_form": CustomAdForm(),
         "periodic_form": PeriodicAdForm(),
         "periodic_ads": services.list_periodic_ads(),
@@ -101,6 +106,7 @@ def post_slot(request):
             text=cd["text"],
             join_links=cd.get("join_links") or [],
             day_mode=cd.get("day_mode") or "auto",
+            join_window=cd.get("join_window"),
         )
         if result.get("skipped"):
             messages.success(
@@ -143,6 +149,7 @@ def post_custom(request):
             join_links=cd.get("join_links") or [],
             day_mode=cd.get("day_mode") or "auto",
             source="custom",
+            join_window=cd.get("join_window"),
         )
         if result.get("skipped"):
             messages.success(
@@ -199,7 +206,10 @@ def join_page(request):
         form = JoinOnlyForm(request.POST)
         if form.is_valid():
             try:
-                result = services.apply_join_only(form.cleaned_data["join_links"])
+                result = services.apply_join_only(
+                    form.cleaned_data["join_links"],
+                    window_kind=form.cleaned_data.get("join_window"),
+                )
                 pr = "،".join(str(p) for p in result.get("priorities") or [])
                 messages.success(
                     request,
@@ -212,12 +222,13 @@ def join_page(request):
     else:
         form = JoinOnlyForm()
 
-    start, end = services.join_window_for_day()
+    start, end = services.join_window_for()
     return render(request, "ad_panel/join.html", {
         "form": form,
         "joins": services.list_active_joins(),
         "window_start": start,
         "window_end": end,
+        "join_window_choices": services.JOIN_WINDOW_CHOICES,
         "page": "join",
     })
 

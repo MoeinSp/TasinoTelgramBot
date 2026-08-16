@@ -9,11 +9,32 @@ from datetime import timedelta
 import jdatetime
 from asgiref.sync import sync_to_async
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
 _precise_settle_tasks: set[int] = set()
+_lifecycle_tasks: dict[int, asyncio.Task] = {}
+# announce_message_id:
+#   None = pending (زمان‌بندی‌شده، هنوز کانت‌داون نخورده)
+#   -1   = countdown sent  (۰ قدیمی هم به‌عنوان countdown قبول می‌شود)
+#   2    = در حال ارسال پیام «شروع شد» (امتیاز هنوز شمرده نمی‌شود)
+#   1    = started — فقط از این لحظه نتایج شمرده می‌شوند
+_ANN_PENDING = None  # use isnull for pending
+_ANN_COUNTDOWN = -1
+_ANN_SENDING = 2
+_ANN_STARTED = 1
+_ANN_COUNTDOWN_LEGACY = 0  # مقدار قبلی؛ هنوز در DBهای قدیمی ممکن است باشد
+COUNTDOWN_LEAD_SEC = 10
+
+
+def _is_countdown_ann(value) -> bool:
+    return value in (_ANN_COUNTDOWN, _ANN_COUNTDOWN_LEGACY)
+
+
+def _countdown_q():
+    return Q(announce_message_id__in=[_ANN_COUNTDOWN, _ANN_COUNTDOWN_LEGACY])
 
 TYPE_LABELS = {
     "dice": "🎲 چالش تاس",
@@ -98,7 +119,7 @@ def race_type_for_command(cmd: str) -> str | None:
 
 
 def has_active_race_challenge_sync(chat_id, game_type: str) -> bool:
-    """آیا چالش race فعال (شروع‌شده، تسویه‌نشده) برای این بازی در گروه هست؟"""
+    """آیا چالش race فعال (شروع‌شده و اعلام‌شده، تسویه‌نشده) برای این بازی در گروه هست؟"""
     if game_type not in FUN_TYPES:
         return False
     from account.models import GroupChallenge
@@ -110,6 +131,7 @@ def has_active_race_challenge_sync(chat_id, game_type: str) -> bool:
         status="active",
         settled=False,
         start_at__lte=now,
+        announce_message_id=_ANN_STARTED,
     ).exists()
 
 
@@ -529,6 +551,8 @@ def _record_score_sync(ch, user_id, points: int, *, mode: str):
         )
         if not locked_ch:
             return None, "چالش فعال نیست", None
+        if int(getattr(locked_ch, "announce_message_id", 0) or 0) != _ANN_STARTED:
+            return None, "چالش هنوز شروع نشده", None
 
         global_best = 0
         if mode == "best":
@@ -717,6 +741,9 @@ def try_claim_race_win_sync(ch, user_id, score: int):
         now = timezone.now()
         if now < locked.start_at:
             return None, "not_started"
+        # فقط بعد از ارسال موفق پیام «شروع شد»
+        if int(getattr(locked, "announce_message_id", 0) or 0) != _ANN_STARTED:
+            return None, "not_started"
 
         ok, reason = check_eligibility(locked, user_id, exclude_latest_play=False)
         if not ok:
@@ -768,6 +795,7 @@ def log_fun_play(chat_id, user_id, game_type: str, score: int):
             status="active",
             settled=False,
             start_at__lte=now,
+            announce_message_id=_ANN_STARTED,
         )
     )
     messages = []
@@ -804,6 +832,7 @@ def record_increase_silent(chat_id, user_id, amount: int) -> None:
     for ch in GroupChallenge.objects.filter(
         telegram_chat_id=int(chat_id), status="active",
         start_at__lte=now, end_at__gte=now,
+        announce_message_id=_ANN_STARTED,
         challenge_type__in=("max_increase", "sum_increase"),
     ):
         mode = "best" if ch.challenge_type == "max_increase" else "sum"
@@ -815,7 +844,7 @@ def record_increase_silent(chat_id, user_id, amount: int) -> None:
             logger.exception("record_increase_silent failed")
 
 
-def record_bet_silent(chat_id, user_id, bet_amount: int) -> None:
+def record_bet_silent(chat_id, user_id, bet_amount: int, *, for_league: bool = True) -> None:
     """فراخوانی از داخل record_game_bet (sync) — شرط و تعداد بازی."""
     from account.models import GroupChallenge
 
@@ -823,9 +852,18 @@ def record_bet_silent(chat_id, user_id, bet_amount: int) -> None:
     bet_amount = int(bet_amount or 0)
     if bet_amount <= 0:
         return
+
+    if for_league:
+        try:
+            from bot.league import record_league_wager_silent
+            record_league_wager_silent(chat_id, user_id, bet_amount)
+        except Exception:
+            logger.exception("league wager record failed")
+
     for ch in GroupChallenge.objects.filter(
         telegram_chat_id=int(chat_id), challenge_type="max_bet", status="active",
         start_at__lte=now, end_at__gte=now,
+        announce_message_id=_ANN_STARTED,
     ):
         try:
             _entry, _err, break_info = _record_score_sync(ch, user_id, bet_amount, mode="best")
@@ -837,6 +875,7 @@ def record_bet_silent(chat_id, user_id, bet_amount: int) -> None:
     for ch in GroupChallenge.objects.filter(
         telegram_chat_id=int(chat_id), challenge_type="max_count", status="active",
         start_at__lte=now, end_at__gte=now,
+        announce_message_id=_ANN_STARTED,
     ):
         try:
             _entry, _err, break_info = _record_score_sync(ch, user_id, 1, mode="count")
@@ -1037,7 +1076,13 @@ async def announce_record_breaks(bot, chat_id, breaks: list[dict] | None = None)
 
 
 async def flush_challenge_breaks(bot, chat_id) -> int:
-    return await announce_record_breaks(bot, chat_id)
+    n = await announce_record_breaks(bot, chat_id)
+    try:
+        from bot.league import flush_league_unlocks
+        n += await flush_league_unlocks(bot, chat_id)
+    except Exception:
+        logger.exception("flush_league_unlocks failed")
+    return n
 
 
 async def pay_and_announce_challenge(
@@ -1045,7 +1090,7 @@ async def pay_and_announce_challenge(
 ) -> None:
     """پرداخت جایزه + اعلام برنده در گروه (برای race و تسویه زمان‌دار)."""
     from bot import cache
-    from bot.finance import increase_wallet
+    from bot.finance import increase_wallet, wallet_idemp_paid
 
     if is_race_type(ch.challenge_type):
         winner_ids = [int(ch.winner_id)] if ch.winner_id else []
@@ -1054,27 +1099,48 @@ async def pay_and_announce_challenge(
         if not winner_ids and ch.winner_id:
             winner_ids = [int(ch.winner_id)]
 
+    uniq = []
+    seen = set()
+    for uid in winner_ids:
+        try:
+            key = int(uid)
+        except (TypeError, ValueError):
+            continue
+        if key not in seen:
+            seen.add(key)
+            uniq.append(key)
+    winner_ids = uniq
+
     prize_total = int(ch.prize_amount or 0)
     n = len(winner_ids)
     share = (prize_total // n) if n else 0
     remainder = (prize_total - share * n) if n else 0
 
+    paid_new = 0
+    already = 0
     if n and prize_total > 0:
         payer_id = ch.created_by or cache.OWNER_CACHE.get(int(ch.telegram_chat_id))
         for i, uid in enumerate(winner_ids):
             amount = share + (remainder if i == 0 else 0)
             if amount <= 0:
                 continue
+            desc = f"جایزه چالش {type_label(ch.challenge_type)} #idemp:ch:{ch.id}:{uid}"
             try:
+                if await wallet_idemp_paid(ch.telegram_chat_id, uid, desc):
+                    already += 1
+                    continue
                 await increase_wallet(
                     ch.telegram_chat_id,
                     uid,
                     amount,
                     admin_id=payer_id,
-                    description=f"جایزه چالش {type_label(ch.challenge_type)}",
+                    description=desc,
                 )
+                paid_new += 1
             except Exception:
                 logger.exception("challenge prize pay failed")
+    if already and not paid_new:
+        return
     try:
         if winner_ids:
             names = [await _mention(bot, uid) for uid in winner_ids]
@@ -1121,6 +1187,31 @@ def due_start_challenge_ids(limit: int = 50):
             status="active",
             settled=False,
             start_at__lte=now,
+        )
+        .filter(
+            Q(announce_message_id__isnull=True)
+            | _countdown_q()
+            | Q(announce_message_id=_ANN_SENDING)
+        )
+        .order_by("start_at")
+        .values_list("id", flat=True)[:limit]
+    )
+
+
+@sync_to_async
+def due_countdown_challenge_ids(limit: int = 50):
+    """چالش‌هایی که تا COUNTDOWN_LEAD_SEC ثانیه تا شروع مانده و countdown نخورده‌اند."""
+    from account.models import GroupChallenge
+
+    now = timezone.now()
+    # پنجره کمی بازتر تا اگر کرون دیر آمد، کانت‌داون از دست نرود
+    window_end = now + timedelta(seconds=COUNTDOWN_LEAD_SEC + 15)
+    return list(
+        GroupChallenge.objects.filter(
+            status="active",
+            settled=False,
+            start_at__gt=now,
+            start_at__lte=window_end,
             announce_message_id__isnull=True,
         )
         .order_by("start_at")
@@ -1129,15 +1220,146 @@ def due_start_challenge_ids(limit: int = 50):
 
 
 @sync_to_async
-def mark_challenge_start_notified(challenge_id: int) -> None:
+def mark_challenge_countdown(challenge_id: int) -> bool:
+    """علامت countdown؛ فقط اگر هنوز pending باشد."""
     from account.models import GroupChallenge
 
-    GroupChallenge.objects.filter(id=int(challenge_id)).update(announce_message_id=1)
+    updated = GroupChallenge.objects.filter(
+        id=int(challenge_id),
+        status="active",
+        settled=False,
+        announce_message_id__isnull=True,
+    ).update(announce_message_id=_ANN_COUNTDOWN)
+    return bool(updated)
 
 
-async def notify_due_challenge_starts(bot) -> int:
-    """وقتی زمان شروع برسد، پیام «چالش شروع شد» + توضیحات را می‌فرستد."""
-    ids = await due_start_challenge_ids()
+@sync_to_async
+def mark_challenge_start_notified(challenge_id: int) -> bool:
+    """علامت شروع اعلام‌شده؛ فقط بعد از ارسال موفق پیام."""
+    return finalize_challenge_started_sync(challenge_id)
+
+
+def claim_challenge_start_sending_sync(challenge_id: int) -> bool:
+    """قفل ارسال «شروع شد» — امتیاز هنوز شمرده نمی‌شود تا finalize."""
+    from account.models import GroupChallenge
+
+    updated = GroupChallenge.objects.filter(
+        id=int(challenge_id),
+        status="active",
+        settled=False,
+    ).filter(
+        Q(announce_message_id__isnull=True) | _countdown_q()
+    ).update(announce_message_id=_ANN_SENDING)
+    return bool(updated)
+
+
+def finalize_challenge_started_sync(challenge_id: int) -> bool:
+    """بعد از ارسال موفق پیام شروع — از این لحظه نتایج شمرده می‌شوند."""
+    from account.models import GroupChallenge
+
+    updated = GroupChallenge.objects.filter(
+        id=int(challenge_id),
+        status="active",
+        settled=False,
+        announce_message_id=_ANN_SENDING,
+    ).update(announce_message_id=_ANN_STARTED)
+    return bool(updated)
+
+
+@sync_to_async
+def claim_challenge_start_sending(challenge_id: int) -> bool:
+    return claim_challenge_start_sending_sync(challenge_id)
+
+
+@sync_to_async
+def finalize_challenge_started(challenge_id: int) -> bool:
+    return finalize_challenge_started_sync(challenge_id)
+
+
+@sync_to_async
+def rollback_challenge_start_announce(challenge_id: int, previous) -> None:
+    from account.models import GroupChallenge
+
+    GroupChallenge.objects.filter(
+        id=int(challenge_id),
+        status="active",
+        settled=False,
+        announce_message_id=_ANN_SENDING,
+    ).update(announce_message_id=previous)
+
+
+def _countdown_text(ch) -> str:
+    return (
+        "⏱ ۱۰ ثانیه تا شروع چالش!\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"{type_label(ch.challenge_type)}\n"
+        f"🎁 جایزه: {int(ch.prize_amount):,} واحد\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "🔔 آماده باشید!"
+    )
+
+
+@sync_to_async
+def _rollback_countdown_mark(challenge_id: int) -> None:
+    from account.models import GroupChallenge
+
+    GroupChallenge.objects.filter(
+        id=int(challenge_id),
+        announce_message_id=_ANN_COUNTDOWN,
+    ).update(announce_message_id=None)
+
+
+async def _send_countdown_once(bot, ch) -> bool:
+    marked = await mark_challenge_countdown(ch.id)
+    if not marked:
+        return False
+    try:
+        await bot.send_message(int(ch.telegram_chat_id), _countdown_text(ch))
+        return True
+    except Exception:
+        logger.exception("challenge countdown failed id=%s", ch.id)
+        try:
+            await _rollback_countdown_mark(ch.id)
+        except Exception:
+            pass
+        return False
+
+
+async def _send_start_once(bot, ch) -> bool:
+    """ارسال «شروع شد»؛ امتیاز فقط بعد از finalize (موفقیت ارسال) شمرده می‌شود."""
+    prev_ann = getattr(ch, "announce_message_id", None)
+    if prev_ann == _ANN_STARTED:
+        return False
+
+    # ارسال گیرکرده: اگر بیش از ۱۵ثانیه در SENDING مانده، دوباره تلاش کن
+    if prev_ann == _ANN_SENDING:
+        age = (timezone.now() - ch.start_at).total_seconds()
+        if age < 15:
+            return False
+    elif not await claim_challenge_start_sending(ch.id):
+        return False
+
+    try:
+        text = format_challenge_announce(ch, started=True)
+        await bot.send_message(int(ch.telegram_chat_id), text, parse_mode="HTML")
+        await finalize_challenge_started(ch.id)
+        return True
+    except Exception:
+        logger.exception("challenge start announce failed id=%s", ch.id)
+        try:
+            # برگرد به countdown/pending تا دوباره تلاش شود
+            rollback_to = prev_ann
+            if rollback_to == _ANN_SENDING:
+                rollback_to = _ANN_COUNTDOWN
+            await rollback_challenge_start_announce(ch.id, rollback_to)
+        except Exception:
+            pass
+        return False
+
+
+async def send_countdown_warnings(bot) -> int:
+    """پیام «۱۰ ثانیه تا شروع» برای همه انواع چالش‌های زمان‌بندی‌شده."""
+    ids = await due_countdown_challenge_ids()
     done = 0
     for cid in ids:
         ch = await get_challenge(cid)
@@ -1145,14 +1367,85 @@ async def notify_due_challenge_starts(bot) -> int:
             continue
         if ch.announce_message_id is not None:
             continue
-        try:
-            text = format_challenge_announce(ch, started=True)
-            await bot.send_message(int(ch.telegram_chat_id), text, parse_mode="HTML")
-            await mark_challenge_start_notified(cid)
+        if await _send_countdown_once(bot, ch):
             done += 1
-        except Exception:
-            logger.exception("challenge start announce failed id=%s", cid)
     return done
+
+
+async def notify_due_challenge_starts(bot) -> int:
+    """کانت‌داون + پیام شروع؛ بعد از ارسال موفق پیام، چالش فعال می‌شود."""
+    try:
+        await send_countdown_warnings(bot)
+    except Exception:
+        logger.exception("countdown warnings failed")
+
+    ids = await due_start_challenge_ids()
+    done = 0
+    for cid in ids:
+        ch = await get_challenge(cid)
+        if not ch or ch.settled or ch.status != "active":
+            continue
+        if ch.announce_message_id == _ANN_STARTED:
+            continue
+        # اگر کانت‌داون از دست رفته، مستقیم شروع را اعلام کن
+        if await _send_start_once(bot, ch):
+            done += 1
+    return done
+
+
+async def _challenge_lifecycle_job(bot, challenge_id: int) -> None:
+    """تسک دقیق: ۱۰ثانیه قبل countdown، در لحظهٔ start_at پیام شروع."""
+    try:
+        ch = await get_challenge(challenge_id)
+        if not ch or ch.settled or ch.status != "active":
+            return
+        ann = getattr(ch, "announce_message_id", None)
+        if ann == _ANN_STARTED:
+            return
+
+        start = ch.start_at
+        cd_at = start - timedelta(seconds=COUNTDOWN_LEAD_SEC)
+
+        if ann is None:
+            wait_cd = (cd_at - timezone.now()).total_seconds()
+            if wait_cd > 0:
+                await asyncio.sleep(wait_cd)
+            ch = await get_challenge(challenge_id)
+            if not ch or ch.settled or ch.status != "active":
+                return
+            if ch.announce_message_id is None:
+                # حتی اگر کمتر از ۱۰ثانیه مانده، تا وقتی شروع نشده کانت‌داون بفرست
+                if (ch.start_at - timezone.now()).total_seconds() > 0.3:
+                    await _send_countdown_once(bot, ch)
+
+        wait_start = (start - timezone.now()).total_seconds()
+        if wait_start > 0:
+            await asyncio.sleep(wait_start)
+
+        ch = await get_challenge(challenge_id)
+        if not ch or ch.settled or ch.status != "active":
+            return
+        if ch.announce_message_id != _ANN_STARTED:
+            await _send_start_once(bot, ch)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("challenge lifecycle failed id=%s", challenge_id)
+    finally:
+        _lifecycle_tasks.pop(int(challenge_id), None)
+
+
+def schedule_challenge_lifecycle(bot, challenge_id: int) -> None:
+    """زمان‌بندی دقیق countdown + شروع برای چالش زمان‌بندی‌شده."""
+    cid = int(challenge_id)
+    old = _lifecycle_tasks.pop(cid, None)
+    if old and not old.done():
+        old.cancel()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _lifecycle_tasks[cid] = loop.create_task(_challenge_lifecycle_job(bot, cid))
 
 
 @sync_to_async
@@ -1342,6 +1635,7 @@ def challenge_fun_block_reason(chat_id, user_id, game_type: str) -> str:
             status="active",
             settled=False,
             start_at__lte=now,
+            announce_message_id=_ANN_STARTED,
         )
     )
     if not challenges:

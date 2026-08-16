@@ -1,149 +1,203 @@
+"""ارسال تبلیغ زمان‌بندی‌شده بدون قفل کردن event loop ربات."""
+from __future__ import annotations
+
 import asyncio
 import logging
 from datetime import timedelta
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from asgiref.sync import sync_to_async
 from django.core.cache import cache
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
+GROUP_CONCURRENCY = 12
+PV_CONCURRENCY = 6
+CHUNK = 16
+SEND_PAUSE = 0.02
+SEND_TIMEOUT = 8.0
 
-# ─── کمکی‌ها ──────────────────────────────────────────────────────────────────
+_group_sem: asyncio.Semaphore | None = None
+_pv_sem: asyncio.Semaphore | None = None
+_bg_tasks: set[asyncio.Task] = set()
+_sending: set[int] = set()
 
-@sync_to_async
-def _get_active_tasks():
+
+def _sems() -> tuple[asyncio.Semaphore, asyncio.Semaphore]:
+    global _group_sem, _pv_sem
+    if _group_sem is None:
+        _group_sem = asyncio.Semaphore(GROUP_CONCURRENCY)
+        _pv_sem = asyncio.Semaphore(PV_CONCURRENCY)
+    return _group_sem, _pv_sem
+
+
+def _spawn(coro) -> None:
+    task = asyncio.create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+
+
+def _load_due(now):
+    from account.models import TelegramGroup, TelegramUser
     from scheduledmessage.models import ScheduledMessage
-    return list(ScheduledMessage.objects.filter(is_active=True))
+
+    TelegramGroup.objects.filter(
+        ad_enabled=False,
+        ad_disabled_until__isnull=False,
+        ad_disabled_until__lte=now,
+    ).update(ad_enabled=True, ad_disabled_until=None)
+
+    fixed = list(
+        ScheduledMessage.objects.filter(
+            is_active=True,
+            type="fixed",
+            last_sent__isnull=True,
+            run_at__lte=now,
+        ).order_by("run_at", "id")
+    )
+    intervals = []
+    for task in ScheduledMessage.objects.filter(
+        is_active=True, type="interval", interval_minutes__isnull=False,
+    ):
+        if not task.last_sent or now >= task.last_sent + timedelta(minutes=task.interval_minutes):
+            intervals.append(task)
+    tasks = fixed + intervals
+    if not tasks:
+        return [], [], {}
+
+    group_meta = {
+        int(row["telegram_chat_id"]): row
+        for row in TelegramGroup.objects.filter(is_active=True).values(
+            "telegram_chat_id", "ad_enabled", "ad_disabled_until",
+        )
+        if row.get("telegram_chat_id")
+    }
+    pv_ids = []
+    if any(t.send_to_pv for t in tasks):
+        pv_ids = [
+            int(cid)
+            for cid in TelegramUser.objects.exclude(telegram_chat_id__isnull=True)
+            .values_list("telegram_chat_id", flat=True)
+            if cid
+        ]
+    return tasks, pv_ids, group_meta
 
 
-@sync_to_async
-def _get_all_group_ids():
-    from account.models import TelegramGroup
-    return list(TelegramGroup.objects.filter(is_active=True).values_list("telegram_chat_id", flat=True))
-
-
-@sync_to_async
-def _get_group(chat_id):
-    from account.models import TelegramGroup
-    try:
-        return TelegramGroup.objects.get(telegram_chat_id=chat_id)
-    except TelegramGroup.DoesNotExist:
-        return None
-
-
-@sync_to_async
-def _mark_task(task_id, last_sent, is_active):
+def _mark_sent(task, now):
     from scheduledmessage.models import ScheduledMessage
-    ScheduledMessage.objects.filter(id=task_id).update(last_sent=last_sent, is_active=is_active)
+
+    qs = ScheduledMessage.objects.filter(id=task.id)
+    if task.type == "interval":
+        qs.update(last_sent=now)
+        return
+    qs.filter(last_sent__isnull=True).update(last_sent=now, is_active=False)
 
 
-async def _safe_send(bot: Bot, chat_id: int, text: str, parse_mode: str = None):
+def _eligible_groups(task, group_meta, now) -> tuple[list[int], int]:
+    if task.send_to_all:
+        candidates = list(group_meta.keys())
+    elif task.chat_id:
+        candidates = [int(task.chat_id)]
+    else:
+        candidates = []
+
+    real = []
+    pending = 0
+    for cid in dict.fromkeys(candidates):
+        meta = group_meta.get(cid)
+        if not task.ignore_group_ad_setting:
+            if not meta:
+                continue
+            until = meta.get("ad_disabled_until")
+            if until and until > now:
+                continue
+            if not meta.get("ad_enabled", True):
+                continue
+        if task.queue_ad_until_message:
+            if cache.get(f"sched_pending:{cid}"):
+                continue
+            if cache.get(f"sched_lastad:{cid}"):
+                cache.set(f"sched_pending:{cid}", task.text, timeout=None)
+                pending += 1
+                continue
+        real.append(cid)
+    return real, pending
+
+
+def _pv_targets(task, all_pv: list[int]) -> list[int]:
+    if not getattr(task, "send_to_pv", False):
+        return []
+    if task.send_to_all or not task.chat_id:
+        return list(dict.fromkeys(all_pv))
+    return [int(task.chat_id)]
+
+
+async def _send_one(bot: Bot, sem, cid, text) -> bool:
+    async with sem:
+        try:
+            await asyncio.wait_for(bot.send_message(cid, text), timeout=SEND_TIMEOUT)
+            return True
+        except TelegramRetryAfter as exc:
+            try:
+                await asyncio.sleep(min(float(exc.retry_after or 1), 5))
+                await asyncio.wait_for(bot.send_message(cid, text), timeout=SEND_TIMEOUT)
+                return True
+            except Exception:
+                return False
+        except (TelegramForbiddenError, TelegramBadRequest):
+            return False
+        except Exception as exc:
+            logger.debug("ارسال به %s ناموفق: %s", cid, exc)
+            return False
+        finally:
+            await asyncio.sleep(SEND_PAUSE)
+
+
+async def _send_chunked(bot, sem, cids, text) -> int:
+    ok = 0
+    for i in range(0, len(cids), CHUNK):
+        chunk = cids[i:i + CHUNK]
+        results = await asyncio.gather(
+            *[_send_one(bot, sem, cid, text) for cid in chunk],
+            return_exceptions=True,
+        )
+        for cid, res in zip(chunk, results):
+            if res is True:
+                ok += 1
+                cache.set(f"sched_lastad:{cid}", True, timeout=86400)
+        await asyncio.sleep(0)
+    return ok
+
+
+async def _dispatch_task(bot, task, pv_ids, group_meta, now):
+    group_sem, pv_sem = _sems()
+    groups, pending = _eligible_groups(task, group_meta, now)
+    pvs = _pv_targets(task, pv_ids)
     try:
-        await bot.send_message(chat_id, text, parse_mode=parse_mode)
-        return True
-    except (TelegramForbiddenError, TelegramBadRequest) as e:
-        logger.debug("ارسال به %s ناموفق: %s", chat_id, e)
-        return False
-    except Exception as e:
-        logger.warning("خطا در ارسال به %s: %s", chat_id, e)
-        return False
+        ok_groups = await _send_chunked(bot, group_sem, groups, task.text)
+        await sync_to_async(_mark_sent)(task, now)
+        ok_pv = 0
+        if pvs:
+            ok_pv = await _send_chunked(bot, pv_sem, pvs, task.text)
+        logger.info(
+            "📅 '%s' → %d/%d گروه | %d/%d پیوی | %d در صف",
+            task.title, ok_groups, len(groups), ok_pv, len(pvs), pending,
+        )
+    except Exception:
+        logger.exception("ad dispatch id=%s", task.id)
+    finally:
+        _sending.discard(task.id)
 
-
-# ─── منطق اصلی ────────────────────────────────────────────────────────────────
 
 async def send_scheduled_logic(bot: Bot):
-    now = timezone.now().replace(second=0, microsecond=0)
-
-    tasks = await _get_active_tasks()
+    now = timezone.now()
+    tasks, pv_ids, group_meta = await sync_to_async(_load_due)(now)
     if not tasks:
         return
-
-    # گروه‌های همه رو یکبار بگیر اگر هر task نیاز داشت
-    all_group_ids = None
-
     for task in tasks:
-        should_send = False
-        remain_active = True
-
-        if task.type == "fixed":
-            if task.run_at and task.run_at <= now and not task.last_sent:
-                should_send = True
-                remain_active = False
-
-        elif task.type == "interval":
-            if task.interval_minutes:
-                if not task.last_sent or now >= task.last_sent + timedelta(minutes=task.interval_minutes):
-                    should_send = True
-
-        if not should_send:
+        if task.id in _sending:
             continue
-
-        # هدف‌ها
-        group_targets = []
-
-        if task.send_to_all:
-            if all_group_ids is None:
-                all_group_ids = await _get_all_group_ids()
-            group_targets = list(all_group_ids)
-        elif task.chat_id:
-            group_targets = [task.chat_id]
-
-        # فیلتر تبلیغاتی
-        final_groups = []
-        pending_count = 0
-
-        for cid in group_targets:
-            if task.ignore_group_ad_setting:
-                final_groups.append(cid)
-                continue
-
-            group = await _get_group(cid)
-            if not group:
-                continue
-
-            # چک خاموشی موقت
-            if group.ad_disabled_until and group.ad_disabled_until > timezone.now():
-                continue
-
-            if not group.ad_enabled:
-                continue
-
-            # صف تبلیغ تا ارسال پیام بعدی
-            if task.queue_ad_until_message:
-                pending_key = f"sched_pending:{cid}"
-                last_ad_key = f"sched_lastad:{cid}"
-
-                if cache.get(pending_key):
-                    continue
-
-                if cache.get(last_ad_key):
-                    cache.set(pending_key, task.text, timeout=None)
-                    pending_count += 1
-                    continue
-
-                final_groups.append(cid)
-            else:
-                final_groups.append(cid)
-
-        # ارسال موازی به گروه‌ها
-        sent_count = 0
-        if final_groups:
-            results = await asyncio.gather(
-                *[_safe_send(bot, cid, task.text, parse_mode=task.parse_mode if hasattr(task, "parse_mode") else None)
-                  for cid in final_groups],
-                return_exceptions=True
-            )
-            sent_count = sum(1 for r in results if r is True)
-
-            for cid in final_groups:
-                cache.set(f"sched_lastad:{cid}", True, timeout=86400)
-
-        await _mark_task(task.id, now, remain_active)
-
-        logger.info(
-            "📅 '%s' → %d گروه ارسال شد | %d در صف | باقی‌مانده فعال: %s",
-            task.title, sent_count, pending_count, remain_active
-        )
+        _sending.add(task.id)
+        _spawn(_dispatch_task(bot, task, pv_ids, group_meta, now))

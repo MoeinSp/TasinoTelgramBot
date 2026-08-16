@@ -46,6 +46,7 @@ from bot.helpers import (
     db_ban_user, db_unban_user, db_mute_user, db_unmute_user,
     db_get_dice_stats, db_record_dice_roll,
     db_fetch_dice_game_history,
+    db_fetch_user_dice_game_history,
     db_update_card, db_get_card, db_delete_card,
     LOCK_MAP, LOCK_NAMES, LOCK_ORDER,
     db_set_welcome, db_set_anti_flood,
@@ -58,9 +59,10 @@ from bot.helpers import (
     parse_balance_command,
     parse_unban_target, resolve_unban_target_id,
 )
-from bot.utils import normalize_numbers, safe_calc as utils_safe_calc
+from bot.utils import normalize_numbers, safe_calc as utils_safe_calc, is_pure_calc_expr
 from bot.finance import (
     get_balance, increase_wallet, decrease_wallet, clear_wallet, transfer_wallet,
+    get_transfer_enabled, set_transfer_enabled,
     get_active_accounts, get_transactions, get_transactions_count,
     clear_all_wallets,
     is_balance_hidden,
@@ -100,7 +102,7 @@ from bot.constants import (
 from bot.dice_game import (
     has_active_game, get_game, create_game, delete_game, finish_game_cleanup,
     handle_dice, handle_round_selection, WAITING_ROUNDS, ACTIVE_GAMES as DICE_ACTIVE_GAMES,
-    is_user_in_game, can_player_roll, save_roll_result, register_and_save_dice,
+    is_user_in_game, can_player_roll, claim_roll_slots, save_roll_result, register_and_save_dice,
     should_continue, LAST_DICE, calc_bet_costs,
     BET_MODE_FIXED, BET_MODE_EXTRA,
     _handle_game_roll_silent,
@@ -226,12 +228,41 @@ def _is_creator(user_id: int) -> bool:
 
 # ─── helpers داخلی ───────────────────────────────────────────────────────────
 
-async def _reply(message: Message, text: str):
+async def _reply(message: Message, text: str, *, silent: int = 0, force: bool = False):
+    # در حالت سایلنت پیام موفقیت مخفی است؛ خطا (force) همیشه نشان داده شود
+    if silent >= 1 and not force:
+        return
     await safe_send(message.bot, message.chat.id, text, reply_to=message.message_id)
+
+
+async def _finish_silent(message: Message, silent: int):
+    if silent < 1:
+        return
+    from bot.silent_cmd import apply_silent_deletes
+    reply_id = message.reply_to_message.message_id if message.reply_to_message else None
+    await apply_silent_deletes(
+        message.bot, message.chat.id, message.message_id, reply_id, silent,
+    )
+
+
+def _silent_of(message: Message) -> tuple[str, int]:
+    from bot.silent_cmd import apply_silent_suffix
+    return apply_silent_suffix(message.text or "")
 
 
 async def _mention(user_id: int, bot: Bot, chat_id: int) -> str:
     return await user_mention_id(user_id, bot, chat_id)
+
+
+def _mention_from_reply(message: Message, user_id: int) -> str:
+    """منشن از خود ریپلای — بدون get_chat_member (بعد از کیک API شکست می‌خورد)."""
+    r = getattr(message, "reply_to_message", None)
+    u = getattr(r, "from_user", None) if r else None
+    if u is not None and u.id == user_id:
+        name = u.full_name or str(user_id)
+    else:
+        name = str(user_id)
+    return f'<a href="tg://user?id={user_id}">{html.escape(name)}</a>'
 
 
 # fee report helpers → bot.fee_reports
@@ -383,6 +414,47 @@ async def cmd_list_disabled(message: Message):
 _LOCK_ON_WORDS = {"روشن", "فعال", "فعالسازی", "فعال‌سازی", "enable", "on"}
 _LOCK_OFF_WORDS = {"خاموش", "غیرفعال", "غیر فعال", "غیرفعالسازی", "غیرفعال‌سازی", "disable", "off"}
 
+_GAME_CHAT_LOCK_ON = {
+    "قفل بازی", "قفل بازی فعال", "قفل بازی روشن",
+    "فعال قفل بازی", "روشن قفل بازی",
+}
+_GAME_CHAT_LOCK_OFF = {
+    "قفل بازی خاموش", "قفل بازی غیرفعال",
+    "خاموش قفل بازی", "غیرفعال قفل بازی", "بازکردن قفل بازی", "باز کردن قفل بازی",
+}
+
+
+@router.message(F.text.in_(_GAME_CHAT_LOCK_ON))
+async def cmd_game_chat_lock_on(message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return
+    from bot.helpers import (
+        game_chat_lock_on, db_enable_game_chat_lock, game_chat_lock_enabled_text,
+    )
+    if game_chat_lock_on(chat_id):
+        return await _reply(message, "🔒 قفل بازی از قبل فعال است.")
+    await db_enable_game_chat_lock(chat_id)
+    return await _reply(message, game_chat_lock_enabled_text())
+
+
+@router.message(F.text.in_(_GAME_CHAT_LOCK_OFF))
+async def cmd_game_chat_lock_off(message: Message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return
+    from bot.helpers import game_chat_lock_on, db_disable_game_chat_lock
+    if not game_chat_lock_on(chat_id):
+        return await _reply(message, "🔓 قفل بازی از قبل خاموش است.")
+    await db_disable_game_chat_lock(chat_id)
+    return await _reply(
+        message,
+        "🔓 قفل بازی خاموش شد.\n"
+        "ارسال پیام عادی در گروه دوباره آزاد است.",
+    )
+
 
 def _resolve_lock_name(raw: str) -> str | None:
     name = (raw or "").strip()
@@ -453,7 +525,7 @@ async def cmd_lock_alias_state_end(message: Message):
     chat_id = message.chat.id
     user_id = message.from_user.id
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
-        return
+        skip()
     text = (message.text or "").strip()
     # نمونه‌ها: «لینک خاموش» / «قفل لینک غیرفعال»
     state = _extract_lock_state(text)
@@ -472,7 +544,7 @@ async def cmd_lock_alias_state_start(message: Message):
     chat_id = message.chat.id
     user_id = message.from_user.id
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
-        return
+        skip()
     text = (message.text or "").strip()
     # نمونه‌ها: «خاموش لینک» / «فعال قفل لینک»
     state = _extract_lock_state(text)
@@ -571,8 +643,9 @@ async def cmd_add_vip(message: Message, bot: Bot):
     return await _reply(message, f"⭐ {mention}\n\n›› به اعضای ویژه اضافه شد.")
 
 
-@router.message(F.text == "حذف ویژه")
+@router.message(F.text.regexp(r"^حذف ویژه[\s.….۔]*$"))
 async def cmd_del_vip(message: Message, bot: Bot):
+    clean, silent = _silent_of(message)
     chat_id = message.chat.id
     user_id = message.from_user.id
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
@@ -582,7 +655,8 @@ async def cmd_del_vip(message: Message, bot: Bot):
         return
     await db_del_vip(chat_id, target_id)
     mention = await _mention(target_id, bot, chat_id)
-    return await _reply(message, f"✅ {mention}\n\n›› از اعضای ویژه حذف شد.")
+    await _reply(message, f"✅ {mention}\n\n›› از اعضای ویژه حذف شد.", silent=silent)
+    await _finish_silent(message, silent)
 
 
 # لیست ویژه و پاکسازی ویژه — هندلر اصلی پایین‌تر (cmd_list_vips_full / cmd_clear_vips_orig)
@@ -603,14 +677,16 @@ async def _check_ban_target(message: Message, bot: Bot):
     own, adm, vip = get_user_status(chat_id, target_id)
     if own or adm or vip:
         rank = "مالک" if own else "ادمین" if adm else "عضو ویژه"
-        mention = await _mention(target_id, bot, chat_id)
+        mention = _mention_from_reply(message, target_id)
         await _reply(message, f"› {mention}\n\n›› در حال حاضر {rank} است!")
         return None
     return target_id
 
 
-@router.message(F.text == "بن")
+@router.message(F.text.regexp(r"^بن[\s.….۔]*$"))
 async def cmd_ban(message: Message, bot: Bot):
+    """بن دائمی — بن / بن. / بن .. / بن ..."""
+    silent = _silent_of(message)[1]
     chat_id = message.chat.id
     target_id = await _check_ban_target(message, bot)
     if not target_id:
@@ -618,38 +694,50 @@ async def cmd_ban(message: Message, bot: Bot):
     try:
         await bot.ban_chat_member(chat_id, target_id)
         await db_ban_user(chat_id, target_id)
-        mention = await _mention(target_id, bot, chat_id)
-        await log_action(bot, chat_id, f"🚫 بن — <code>{target_id}</code> توسط <code>{message.from_user.id}</code>")
-        return await _reply(message, f"🚫 {mention}\n\n›› از گروه اخراج و بن شد.")
     except Exception as e:
-        return await _reply(message, f"❌ خطا در بن کردن: {e}")
+        return await _reply(message, f"❌ خطا در بن کردن: {html.escape(str(e))}", force=True)
+    asyncio.create_task(
+        log_action(bot, chat_id, f"🚫 بن — <code>{target_id}</code> توسط <code>{message.from_user.id}</code>")
+    )
+    if silent:
+        await _finish_silent(message, silent)
+        return
+    mention = _mention_from_reply(message, target_id)
+    await _reply(message, f"🚫 {mention}\n\n›› از گروه اخراج و بن شد.", silent=silent)
 
 
-@router.message(F.text.regexp(r"^بن\s+(\d+)$"))
+@router.message(F.text.regexp(r"^بن\s+(\d+)[\s.….۔]*$"))
 async def cmd_ban_timed(message: Message, bot: Bot):
     """بن موقت — بن [دقیقه]"""
+    clean, silent = _silent_of(message)
     chat_id = message.chat.id
     target_id = await _check_ban_target(message, bot)
     if not target_id:
         return
-    m = re.search(r"\d+", message.text)
+    m = re.search(r"\d+", normalize_numbers(clean or message.text or ""))
+    if not m:
+        return await _reply(message, "❌ مدت بن مشخص نیست.", force=True)
     minutes = int(m.group())
     if not 1 <= minutes <= 525600:
-        return await _reply(message, "❌ مدت بن باید بین ۱ دقیقه تا ۱ سال باشد.")
+        return await _reply(message, "❌ مدت بن باید بین ۱ دقیقه تا ۱ سال باشد.", force=True)
     from datetime import datetime, timezone as _tz, timedelta
     until = datetime.now(tz=_tz.utc) + timedelta(minutes=minutes)
     try:
         await bot.ban_chat_member(chat_id, target_id, until_date=until)
-        mention = await _mention(target_id, bot, chat_id)
-        await log_action(bot, chat_id, f"🚫 بن موقت {minutes} دقیقه — <code>{target_id}</code>")
-        return await _reply(message, f"🚫 {mention}\n\n›› به مدت [ {minutes} دقیقه ] از گروه بن شد.")
     except Exception as e:
-        return await _reply(message, f"❌ خطا: {e}")
+        return await _reply(message, f"❌ خطا: {html.escape(str(e))}", force=True)
+    asyncio.create_task(log_action(bot, chat_id, f"🚫 بن موقت {minutes} دقیقه — <code>{target_id}</code>"))
+    if silent:
+        await _finish_silent(message, silent)
+        return
+    mention = _mention_from_reply(message, target_id)
+    await _reply(message, f"🚫 {mention}\n\n›› به مدت [ {minutes} دقیقه ] از گروه بن شد.", silent=silent)
 
 
-@router.message(F.text.in_(["کیک", "سیک", "ریمو", "اخراج"]))
+@router.message(F.text.regexp(r"^(?:کیک|سیک|ریمو|اخراج)[\s.….۔]*$"))
 async def cmd_kick(message: Message, bot: Bot):
     """اخراج بدون بن — کاربر می‌تونه دوباره با لینک برگرده"""
+    silent = _silent_of(message)[1]
     chat_id = message.chat.id
     target_id = await _check_ban_target(message, bot)
     if not target_id:
@@ -657,11 +745,16 @@ async def cmd_kick(message: Message, bot: Bot):
     try:
         await bot.ban_chat_member(chat_id, target_id)
         await bot.unban_chat_member(chat_id, target_id)
-        mention = await _mention(target_id, bot, chat_id)
-        await log_action(bot, chat_id, f"👢 کیک — <code>{target_id}</code> توسط <code>{message.from_user.id}</code>")
-        return await _reply(message, f"👢 {mention}\n\n›› از گروه اخراج شد (بدون بن).")
     except Exception as e:
-        return await _reply(message, f"❌ خطا در اخراج: {e}")
+        return await _reply(message, f"❌ خطا در اخراج: {html.escape(str(e))}", force=True)
+    asyncio.create_task(
+        log_action(bot, chat_id, f"👢 کیک — <code>{target_id}</code> توسط <code>{message.from_user.id}</code>")
+    )
+    if silent:
+        await _finish_silent(message, silent)
+        return
+    mention = _mention_from_reply(message, target_id)
+    await _reply(message, f"👢 {mention}\n\n›› از گروه اخراج شد (بدون بن).", silent=silent)
 
 
 async def _perform_unban(message: Message, bot: Bot, target_id: int):
@@ -675,7 +768,7 @@ async def _perform_unban(message: Message, bot: Bot, target_id: int):
         return await _reply(message, f"❌ خطا: {e}")
 
 
-@router.message(F.text.regexp(r"^(?:آن\s*بن|ان\s*بن|آنبن|انبن|حذف\s*بن)\s+\S+", re.IGNORECASE))
+@router.message(F.text.regexp(r"(?i)^(?:آن\s*بن|ان\s*بن|آنبن|انبن|حذف\s*بن)\s+\S+"))
 async def cmd_unban_by_id(message: Message, bot: Bot):
     """رفع بن با آیدی یا یوزرنیم — مثلاً انبن ucski33233"""
     chat_id = message.chat.id
@@ -695,7 +788,7 @@ async def cmd_unban_by_id(message: Message, bot: Bot):
     return await _perform_unban(message, bot, target_id)
 
 
-@router.message(F.text.in_(["آن بن", "ان بن", "آنبن", "انبن"]))
+@router.message(F.text.regexp(r"^(?:آن\s*بن|ان\s*بن|آنبن|انبن|حذف\s*بن)[\s.….۔]*$"))
 async def cmd_unban(message: Message, bot: Bot):
     chat_id = message.chat.id
     user_id = message.from_user.id
@@ -734,8 +827,9 @@ async def cmd_finance_unban(message: Message, bot: Bot):
 
 # ─── سکوت ────────────────────────────────────────────────────────────────────
 
-@router.message(F.text.in_(["سکوت", "میوت"]))
+@router.message(F.text.regexp(r"^(?:سکوت|میوت)[\s.….۔]*$"))
 async def cmd_mute(message: Message, bot: Bot):
+    silent = _silent_of(message)[1]
     chat_id = message.chat.id
     user_id = message.from_user.id
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
@@ -757,13 +851,15 @@ async def cmd_mute(message: Message, bot: Bot):
         cache.MUTED_USERS.setdefault(chat_id, set()).add(target_id)
         await db_mute_user(chat_id, target_id)
         mention = await _mention(target_id, bot, chat_id)
-        return await _reply(message, f"› {mention}\n\n›› در حالت سکوت قرار گرفت.")
+        await _reply(message, f"› {mention}\n\n›› در حالت سکوت قرار گرفت.", silent=silent)
+        await _finish_silent(message, silent)
     except Exception as e:
         return await _reply(message, f"❌ خطا: {e}")
 
 
-@router.message(F.text.regexp(r"^سکوت\s+(\d+)$"))
+@router.message(F.text.regexp(r"^سکوت\s+(\d+)[\s.….۔]*$"))
 async def cmd_mute_timed(message: Message, bot: Bot):
+    clean, silent = _silent_of(message)
     chat_id = message.chat.id
     user_id = message.from_user.id
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
@@ -778,7 +874,9 @@ async def cmd_mute_timed(message: Message, bot: Bot):
         rank = "مالک" if own else "ادمین" if adm else "عضو ویژه"
         mention = await _mention(target_id, bot, chat_id)
         return await _reply(message, f"› {mention}\n\n›› در حال حاضر {rank} است!")
-    m = re.search(r"\d+", message.text)
+    m = re.search(r"\d+", normalize_numbers(clean or message.text or ""))
+    if not m:
+        return await _reply(message, "❌ مدت سکوت مشخص نیست.", force=True)
     minutes = int(m.group())
     from datetime import datetime, timezone, timedelta
     until = datetime.now(tz=timezone.utc) + timedelta(minutes=minutes)
@@ -792,13 +890,75 @@ async def cmd_mute_timed(message: Message, bot: Bot):
         cache.MUTED_USERS.setdefault(chat_id, set()).add(target_id)
         await db_mute_user(chat_id, target_id)
         mention = await _mention(target_id, bot, chat_id)
-        return await _reply(message, f"› {mention}\n\n›› به مدت [ {minutes} دقیقه ] سکوت شد !")
+        await _reply(message, f"› {mention}\n\n›› به مدت [ {minutes} دقیقه ] سکوت شد !", silent=silent)
+        await _finish_silent(message, silent)
     except Exception as e:
         return await _reply(message, f"❌ خطا: {e}")
 
 
-@router.message(F.text.in_(["حذف سکوت", "آن سکوت", "ان سکوت", "آنسکوت", "انسکوت"]))
+@router.message(F.text.regexp(r"^سکوت\s+\S+"))
+async def cmd_mute_reason(message: Message, bot: Bot):
+    """سکوت علت‌دار: سکوت فحش → ۳۰ دقیقه، تکرار ۶ ساعت، بعد ۲۴ ساعت."""
+    clean, silent = _silent_of(message)
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return
+    if not message.reply_to_message:
+        return
+    # اگر فقط عدد بود، هندلر قبلی گرفته؛ اینجا برای اطمینان رد می‌کنیم
+    raw = normalize_numbers(clean.strip())
+    parts = raw.split(maxsplit=1)
+    if len(parts) < 2:
+        return
+    arg = parts[1].strip()
+    if arg.isdigit():        return
+    target_id = await get_target_from_reply(message, bot)
+    if not target_id:
+        return
+    own, adm, vip = get_user_status(chat_id, target_id)
+    if own or adm or vip:
+        rank = "مالک" if own else "ادمین" if adm else "عضو ویژه"
+        mention = await _mention(target_id, bot, chat_id)
+        return await _reply(message, f"› {mention}\n\n›› در حال حاضر {rank} است!")
+
+    from bot.mute_reason import apply_reason_mute, format_reason_mute_group_text
+
+    result = apply_reason_mute(chat_id, target_id, arg)
+    minutes = int(result["minutes"])
+    from datetime import datetime, timezone, timedelta
+    until = datetime.now(tz=timezone.utc) + timedelta(minutes=minutes)
+    try:
+        from aiogram.types import ChatPermissions
+        await bot.restrict_chat_member(
+            chat_id, target_id,
+            permissions=ChatPermissions(can_send_messages=False),
+            until_date=until,
+        )
+        cache.MUTED_USERS.setdefault(chat_id, set()).add(target_id)
+        await db_mute_user(chat_id, target_id)
+        mention = await _mention(target_id, bot, chat_id)
+        await _reply(
+            message,
+            format_reason_mute_group_text(
+                mention, result["reason"], minutes, result["level"],
+            ),
+            silent=silent,
+        )
+        await _finish_silent(message, silent)
+        try:
+            await bot.send_message(target_id, result["user_text"])
+        except Exception:
+            pass
+    except Exception as e:
+        return await _reply(message, f"❌ خطا: {e}")
+
+
+@router.message(F.text.regexp(
+    r"^(?:حذف سکوت|آن سکوت|ان سکوت|آنسکوت|انسکوت)[\s.….۔]*$"
+))
 async def cmd_unmute(message: Message, bot: Bot):
+    silent = _silent_of(message)[1]
     chat_id = message.chat.id
     user_id = message.from_user.id
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
@@ -814,7 +974,8 @@ async def cmd_unmute(message: Message, bot: Bot):
         cache.MUTED_USERS.setdefault(chat_id, set()).discard(target_id)
         await db_unmute_user(chat_id, target_id)
         mention = await _mention(target_id, bot, chat_id)
-        return await _reply(message, f"› {mention}\n\n›› از حالت سکوت خارج شد.")
+        await _reply(message, f"› {mention}\n\n›› از حالت سکوت خارج شد.", silent=silent)
+        await _finish_silent(message, silent)
     except Exception as e:
         return await _reply(message, f"❌ خطا: {e}")
 
@@ -1394,9 +1555,7 @@ async def cmd_time(message: Message):
 
 # ─── ماشین حساب ──────────────────────────────────────────────────────────────
 
-_CALC_OP_RE = re.compile(r"[+\-*/×÷]")
-
-@router.message(F.text.func(lambda t: bool(t and _CALC_OP_RE.search(normalize_numbers(t)))))
+@router.message(F.text.func(lambda t: bool(t and is_pure_calc_expr(t))))
 async def cmd_calc_direct(message: Message):
     chat_id = message.chat.id
     text = normalize_numbers(message.text.strip())
@@ -1404,7 +1563,7 @@ async def cmd_calc_direct(message: Message):
         return
     result = utils_safe_calc(text)
     if result is None:
-        return
+        skip()
     if isinstance(result, float) and result.is_integer():
         result = int(result)
     return await _reply(message, f"محاسبـه شد ↻ : {result}")
@@ -1698,7 +1857,7 @@ async def cmd_locks_inline_panel(message: Message):
     )
 
 
-@router.message(F.text.in_(["وضعیت", "محدودیت"]))
+@router.message(F.text.in_(["محدودیت", "وضعیت قفل"]))
 async def cmd_lock_status_full(message: Message):
     chat_id = message.chat.id
     locks = cache.GROUP_LOCKS.get(chat_id) or await db_get_locks(chat_id)
@@ -2195,19 +2354,200 @@ async def cmd_decrease_wallet(message: Message, bot: Bot):
 
 
 def _parse_transfer_amount(text: str) -> int | None:
+    """فقط دستور خالص: انتقال 5000 / انتقال موجودی 5000 — نه «انتقال 50 بدم؟»."""
     raw = normalize_numbers(text or "").strip()
+    if not re.fullmatch(r"انتقال(?:\s+موجودی)?\s+\d+", raw):
+        return None
     parts = raw.split()
-    if raw.startswith("انتقال موجودی") and len(parts) >= 3:
-        return int(parts[2]) if parts[2].isdigit() else None
-    if raw.startswith("انتقال") and len(parts) >= 2 and parts[1].isdigit():
+    if raw.startswith("انتقال موجودی") and len(parts) == 3 and parts[2].isdigit():
+        return int(parts[2])
+    if len(parts) == 2 and parts[0] == "انتقال" and parts[1].isdigit():
         return int(parts[1])
     return None
 
 
-@router.message(F.text.regexp(r"^انتقال(?:\s+موجودی)?\s+\d+"))
+@router.message(F.text.in_(["انتقال خاموش", "انتقال روشن", "انتقال وضعیت"]))
+async def cmd_transfer_toggle(message: Message, bot: Bot):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return
+    cmd = (message.text or "").strip()
+    if cmd == "انتقال وضعیت":
+        on = await get_transfer_enabled(chat_id)
+        return await _reply(
+            message,
+            "💸 وضعیت انتقال موجودی\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"{'✅ روشن' if on else '⛔️ خاموش'}\n\n"
+            "روشن: انتقال روشن\n"
+            "خاموش: انتقال خاموش",
+        )
+    turn_on = cmd == "انتقال روشن"
+    await set_transfer_enabled(chat_id, turn_on)
+    return await _reply(
+        message,
+        "✅ انتقال موجودی روشن شد." if turn_on else "⛔️ انتقال موجودی خاموش شد.",
+    )
+
+
+@router.message(F.text.regexp(r"^تنظیم\s*جایزه"))
+async def cmd_prize_setting(message: Message, bot: Bot):
+    from bot.stat_prizes import (
+        parse_prize_setting_command, get_group_prizes, set_group_prize,
+        format_prizes_status,
+    )
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return await _reply(message, ADMIN_DENY_TEXT)
+
+    parsed = parse_prize_setting_command(message.text or "")
+    if parsed is None:
+        return
+    kind, payload = parsed
+    if kind == "status":
+        cfg = await get_group_prizes(chat_id)
+        return await _reply(message, format_prizes_status(cfg))
+    if kind == "help":
+        return await _reply(
+            message,
+            "📖 تنظیم جایزه\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "• <code>تنظیم جایزه تعداد ۵۰۰</code>\n"
+            "• <code>تنظیم جایزه بیشترین شرط ۵۰۰</code>\n"
+            "• <code>تنظیم جایزه اول ۵۰۰۰</code>\n"
+            "• <code>تنظیم جایزه دوم ۲۰۰۰</code>\n"
+            "• <code>تنظیم جایزه سوم ۱۰۰۰</code>\n"
+            "• <code>تنظیم جایزه وضعیت</code>\n\n"
+            "عدد ۰ یعنی بدون جایزه.",
+        )
+    field, amount, title = payload
+    val = await set_group_prize(chat_id, field, amount)
+    if val <= 0:
+        return await _reply(message, f"🌙 {title} خاموش شد (جایزه ۰).")
+    return await _reply(message, f"✅ {title} روی <b>{val:,}</b> واحد تنظیم شد.")
+
+
+@router.message(F.text.in_(["لیگ روشن", "لیگ خاموش", "لیگ وضعیت"]))
+async def cmd_league_toggle(message: Message, bot: Bot):
+    from bot.league import (
+        is_league_allowed_user, is_league_enabled, set_league_enabled,
+        format_tiers_help, format_season_deadline,
+    )
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_league_allowed_user(user_id):
+        return
+    cmd = (message.text or "").strip()
+    if cmd == "لیگ وضعیت":
+        on = await is_league_enabled(chat_id)
+        from bot.stat_prizes import get_group_prizes, format_week_prizes_line
+        cfg = await get_group_prizes(chat_id)
+        wp = format_week_prizes_line(cfg, html=True)
+        extra = f"\n{wp}\n" if wp else "\n"
+        return await _reply(
+            message,
+            "🏅 وضعیت لیگ\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"{'✅ روشن' if on else '⛔️ خاموش'}\n\n"
+            f"{format_season_deadline()}"
+            f"{extra}\n"
+            "روشن: لیگ روشن\n"
+            "خاموش: لیگ خاموش\n\n"
+            + format_tiers_help(),
+        )
+    turn_on = cmd == "لیگ روشن"
+    await set_league_enabled(chat_id, turn_on)
+    if turn_on:
+        return await _reply(
+            message,
+            "✅ لیگ روشن شد.\n\n"
+            f"{format_season_deadline()}\n\n"
+            "دستورات:\n"
+            "• لیگ من — وضعیت شما\n"
+            "• لیگ / رتبه‌بندی — جدول برترین‌ها\n"
+            "• تم لیگ 1 تا 10 — ظاهر جدول\n\n"
+            + format_tiers_help(),
+        )
+    return await _reply(message, "⛔️ لیگ خاموش شد.")
+
+
+@router.message(F.text.regexp(r"^(?:لیگ\s*نمونه|نمونه\s*لیگ)(?:\s+\d+)?$"))
+async def cmd_league_sample(message: Message, bot: Bot):
+    from bot.league import handle_league_sample_command
+    await handle_league_sample_command(message, bot)
+
+
+@router.message(F.text.regexp(r"^تم\s*لیگ(\s|$)"))
+async def cmd_league_theme(message: Message, bot: Bot):
+    from bot.league import handle_league_theme_command
+    handled = await handle_league_theme_command(message, bot)
+    if not handled:
+        return
+
+
+@router.message(F.text.in_(["لیگ من", "لیگمن"]))
+async def cmd_league_me(message: Message, bot: Bot):
+    from bot.league import is_league_enabled, get_my_league, format_my_league
+    chat_id = message.chat.id
+    if not await is_league_enabled(chat_id):
+        return await _reply(message, "⛔️ لیگ در این گپ خاموش است.")
+    data = await get_my_league(chat_id, message.from_user.id)
+    return await _reply(message, format_my_league(data))
+
+
+_LEAGUE_BOARD_RE = re.compile(
+    r"^(?:لیگ|لیگ برترها|جدول لیگ|برترین لیگ|"
+    r"رتبه بندی|رتبه‌بندی|رتبه بندی لیگ|رتبه‌بندی لیگ|"
+    r"لیگ رتبه|لیگ رتبه‌بندی)"
+    r"(?:\s+(\d+))?$"
+)
+
+
+@router.message(F.text.regexp(_LEAGUE_BOARD_RE))
+async def cmd_league_board(message: Message, bot: Bot):
+    from bot.league import (
+        is_league_enabled, parse_league_board_page, build_league_board_page,
+    )
+    # لیگ من / روشن و ... را رد کن
+    page = parse_league_board_page(message.text or "")
+    if page is None:
+        return
+    chat_id = message.chat.id
+    if not await is_league_enabled(chat_id):
+        return await _reply(message, "⛔️ لیگ در این گپ خاموش است.")
+    text, kb = await build_league_board_page(
+        bot, chat_id, page, viewer_id=message.from_user.id,
+    )
+    await safe_send(
+        message.bot, message.chat.id, text,
+        reply_to=message.message_id, reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data.startswith("lgb:"))
+async def cb_league_board_page(call: CallbackQuery, bot: Bot):
+    from bot.league import handle_league_board_callback
+    await handle_league_board_callback(call, bot)
+
+
+@router.message(F.text.in_(["لیگ راهنما", "راهنما لیگ"]))
+async def cmd_league_help(message: Message, bot: Bot):
+    from bot.league import format_tiers_help, format_season_deadline
+    return await _reply(message, format_season_deadline() + "\n\n" + format_tiers_help())
+
+
+@router.message(F.text.regexp(r"^انتقال(?:\s+موجودی)?\s+\d+$"))
 async def cmd_transfer_balance(message: Message, bot: Bot):
     chat_id = message.chat.id
     user_id = message.from_user.id
+    if not await get_transfer_enabled(chat_id):
+        return await _reply(
+            message,
+            "⛔️ انتقال موجودی در این گروه خاموش است.\n"
+            "ادمین می‌تواند با «انتقال روشن» فعال کند.",
+        )
     amount = _parse_transfer_amount(message.text)
     if not amount or amount <= 0:
         return await _reply(
@@ -2301,6 +2641,7 @@ async def cmd_balance(message: Message, bot: Bot):
     text = format_balance_card(
         playable=playable,
         pending=pending,
+        total=_total,
         time_str=j_time_str,
         viewer_name=html.escape(plain_name),
         viewing_other=not viewing_self,
@@ -2426,6 +2767,190 @@ async def cmd_min_pv_off(message: Message):
     )
 
 
+@router.message(F.text.in_(["ارسال جستجو", "ارسال جستجوی حریف"]))
+async def cmd_broadcast_pv_search(message: Message, bot: Bot):
+    """ارسال دعوت جستجوی حریف به کسانی که حداقل یک‌بار در این گپ بازی کرده‌اند."""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return await _reply(message, ADMIN_DENY_TEXT)
+
+    from asgiref.sync import sync_to_async
+    from account.models import DiceGameHistory
+    from bot.pv_search import search_opponent_kb
+    from bot.helpers import send_private
+
+    @sync_to_async
+    def _player_ids():
+        return list(
+            DiceGameHistory.objects.filter(telegram_chat_id=int(chat_id))
+            .values_list("telegram_user_id", flat=True)
+            .distinct()[:500]
+        )
+
+    players = await _player_ids()
+    if not players:
+        return await _reply(message, "📭 هنوز کسی در این گپ بازی ثبت‌شده ندارد.")
+
+    gname = message.chat.title or "گروه"
+    text = (
+        "⚔️ حریف جدید منتظرته!\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📍 {gname}\n\n"
+        "می‌تونی مستقیم از پیوی ربات حریف پیدا کنی و مسابقه تاس بسازی — "
+        "بدون نیاز به ریپلای داخل گپ.\n\n"
+        "روی دکمه زیر بزن و شروع کن 👇"
+    )
+    kb = search_opponent_kb()
+    await _reply(message, f"📤 در حال ارسال به {len(players)} نفر…")
+
+    ok = 0
+    fail = 0
+    for uid in players:
+        try:
+            if await send_private(bot, int(uid), text, reply_markup=kb):
+                ok += 1
+            else:
+                fail += 1
+        except Exception:
+            fail += 1
+        await asyncio.sleep(0.05)
+
+    return await _reply(
+        message,
+        "✅ ارسال جستجو تمام شد\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📬 موفق: {ok}\n"
+        f"⚠️ ناموفق/بدون پیوی: {fail}",
+    )
+
+
+@router.message(F.text.func(lambda t: t and (
+    t.strip() == "تنظیم گپ اعلام نتایج خاموش"
+    or t.strip() == "گپ اعلام نتایج خاموش"
+    or t.startswith("تنظیم گپ اعلام نتایج")
+    or t.startswith("گپ اعلام نتایج")
+)))
+async def cmd_pv_results_chat(message: Message, bot: Bot):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return await _reply(message, ADMIN_DENY_TEXT)
+    from bot.pv_dice import (
+        get_pv_results_chat_id, set_pv_results_chat_id, parse_pv_results_chat_command,
+    )
+    parsed = parse_pv_results_chat_command(message.text or "")
+    if not parsed:
+        return await _reply(
+            message,
+            "❌ فرمت نامعتبر.\n"
+            "مثال: <code>تنظیم گپ اعلام نتایج -1001234567890</code>",
+        )
+    action, dest = parsed
+    if action == "off":
+        await set_pv_results_chat_id(chat_id, None)
+        return await _reply(message, "✅ گپ اعلام نتایج پیوی خاموش شد.")
+    if action == "show":
+        current = await get_pv_results_chat_id(chat_id)
+        if current:
+            return await _reply(
+                message,
+                "📌 گپ اعلام نتایج پیوی\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                f"✅ فعال: <code>{current}</code>\n\n"
+                "نتیجه بازی‌های پیوی + شناسه بازیکنان در آن گپ اعلام می‌شود.\n\n"
+                "تغییر:\n<code>تنظیم گپ اعلام نتایج -100...</code>\n"
+                "خاموش:\n<code>تنظیم گپ اعلام نتایج خاموش</code>",
+            )
+        return await _reply(
+            message,
+            "📌 گپ اعلام نتایج پیوی\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "❌ تنظیم نشده\n\n"
+            "فعال‌سازی:\n"
+            "<code>تنظیم گپ اعلام نتایج -1001234567890</code>\n\n"
+            "خاموش:\n"
+            "<code>تنظیم گپ اعلام نتایج خاموش</code>\n\n"
+            "⚠️ فقط گپی قابل تنظیم است که ربات داخلش باشد و شما آنجا هم ادمین/مالک باشید.",
+        )
+
+    dest_id = int(dest)
+    # جلوگیری از سوءاستفاده: فقط اگر ادمین مقصد هم باشد و ربات آنجا بتواند بفرستد
+    if dest_id != int(chat_id):
+        from asgiref.sync import sync_to_async
+        from account.models import TelegramGroup
+
+        exists = await sync_to_async(
+            lambda: TelegramGroup.objects.filter(telegram_chat_id=dest_id).exists()
+        )()
+        if not exists:
+            return await _reply(
+                message,
+                "❌ این شناسه در ربات ثبت نشده.\n"
+                "اول ربات را به آن گپ اضافه کنید و یک‌بار آنجا فعال شود.",
+            )
+        if not is_admin(dest_id, user_id) and not is_owner(dest_id, user_id):
+            return await _reply(
+                message,
+                "❌ شما ادمین/مالک گپ مقصد نیستید.\n"
+                "نمی‌توان گپ دیگران را برای اعلام نتایج تنظیم کرد.",
+            )
+        try:
+            me = await bot.get_me()
+            member = await bot.get_chat_member(dest_id, me.id)
+            status = getattr(member, "status", "") or ""
+            if status in ("left", "kicked"):
+                return await _reply(message, "❌ ربات در گپ مقصد عضو نیست.")
+        except Exception:
+            return await _reply(
+                message,
+                "❌ ربات به گپ مقصد دسترسی ندارد یا شناسه اشتباه است.",
+            )
+
+    await set_pv_results_chat_id(chat_id, dest_id)
+    return await _reply(
+        message,
+        f"✅ گپ اعلام نتایج پیوی تنظیم شد.\n"
+        f"📍 مقصد: <code>{dest_id}</code>\n\n"
+        "از این پس نتیجه بازی‌های پیوی این گروه + شناسه دو بازیکن در آن گپ اعلام می‌شود.",
+    )
+
+
+@router.message(F.text.regexp(r"^چت\s*پیوی$"))
+async def cmd_admin_pv_chat(message: Message, bot: Bot):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return await _reply(message, ADMIN_DENY_TEXT)
+    if not message.reply_to_message:
+        return await _reply(
+            message,
+            "↩️ روی پیام کاربر ریپلای کنید و بنویسید:\n<code>چت پیوی</code>\n\n"
+            "لیست بازی‌ها به پیوی شما ارسال می‌شود؛ بعد بازی را انتخاب کنید تا چت همان بازی بیاید.\n\n"
+            "خاموش/روشن کردن چت داخل بازی:\n"
+            "<code>چت پیوی روشن</code> · <code>چت پیوی خاموش</code> · <code>چت پیوی وضعیت</code>",
+        )
+    target_id = await get_target_from_reply(message, bot)
+    if not target_id:
+        return
+    from bot.pv_dice import open_admin_pv_chat_browser
+    tname = ""
+    try:
+        u = message.reply_to_message.from_user
+        if u:
+            tname = (u.full_name or u.username or "").strip()
+    except Exception:
+        pass
+    await open_admin_pv_chat_browser(
+        bot,
+        group_id=chat_id,
+        admin_id=user_id,
+        target_id=target_id,
+        group_msg_id=message.message_id,
+        target_name=tname or str(target_id),
+    )
+
+
 @router.message(F.text.func(lambda t: t and t.startswith("حداقل پیوی") and t.strip() != "حداقل پیوی خاموش"))
 async def cmd_min_pv(message: Message):
     chat_id = message.chat.id
@@ -2458,7 +2983,7 @@ async def cmd_min_pv(message: Message):
                 "━━━━━━━━━━━━━━━━━━\n"
                 f"✅ فعال — {current:,} واحد\n"
                 f"📐 حداقل مؤثر: {eff:,} واحد\n\n"
-                "شروع پیوی با شرط کمتر از این مبلغ قبول نمی‌شود.\n\n"
+                "شروع پیوی با مبلغ بازی کمتر از این مبلغ قبول نمی‌شود.\n\n"
                 "برای تغییر:\n"
                 "   <code>حداقل پیوی 50</code>\n\n"
                 "برای خاموش کردن:\n"
@@ -2523,7 +3048,7 @@ async def cmd_min_withdrawal(message: Message):
 async def cmd_settle(message: Message, bot: Bot):
     chat_id = message.chat.id
     user_id = message.from_user.id
-    text = message.text.strip()
+    text = normalize_numbers(message.text or "").strip()
 
     async def _block_if_pending_pv(target_id: int) -> bool:
         from bot.withdrawal_flow import (
@@ -2623,15 +3148,31 @@ async def cmd_settle(message: Message, bot: Bot):
             f"✅ حساب کاربر به طور کامل تسویه شد.",
         )
 
-    if len(parts) >= 2 and parts[1].isdigit() and not message.reply_to_message:
-        amount = int(parts[1])
+    # تسویه N — کاهش جزئی؛ رقم فارسی هم بعد از normalize_numbers قبول می‌شود
+    partial_amount = None
+    if len(parts) >= 2 and parts[0] == "تسویه" and parts[1].isdigit():
+        partial_amount = int(parts[1])
+    elif (
+        len(parts) >= 2
+        and parts[0] == "تسویه"
+        and parts[1] not in ("حساب", "کاربر", "همه", "تمام")
+    ):
+        # مثلاً «تسویه ده» — هرگز به تسویه کامل سقوط نکند
+        return await _reply(
+            message,
+            "❌ مبلغ تسویه نامعتبر است.\n"
+            "📌 مثال کاهش جزئی: <code>تسویه 10</code>\n"
+            "📌 تسویه کامل: روی پیام کاربر ریپلای کنید و فقط <code>تسویه</code> بفرستید.",
+        )
+
+    if partial_amount is not None and not message.reply_to_message:
         accounts = await get_active_accounts(chat_id)
         return await _reply(
             message,
             f"⚠️ روش صحیح کاهش موجودی\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"شما دستور `تسویه {amount}` را بدون ریپلای ارسال کردید.\n\n"
-            f"📌 برای کاهش موجودی: روی پیام کاربر ریپلای کنید و `تسویه {amount}` بفرستید.\n"
+            f"شما دستور `تسویه {partial_amount}` را بدون ریپلای ارسال کردید.\n\n"
+            f"📌 برای کاهش موجودی: روی پیام کاربر ریپلای کنید و `تسویه {partial_amount}` بفرستید.\n"
             f"📌 برای تسویه کامل: روی پیام کاربر ریپلای کنید و `تسویه` بفرستید.\n"
             f"📌 برای تسویه از روی لیست: `تسویه کاربر 1`\n\n"
             f"📊 تعداد حساب‌های فعال: {len(accounts)} عدد",
@@ -2657,8 +3198,10 @@ async def cmd_settle(message: Message, bot: Bot):
     if await _block_if_pending_pv(target_id):
         return
 
-    if len(parts) >= 2 and parts[1].isdigit():
-        amount = int(parts[1])
+    if partial_amount is not None:
+        amount = partial_amount
+        if amount <= 0:
+            return await _reply(message, "❌ مبلغ باید بزرگتر از صفر باشد.")
         receipt_id, receipt_kind = _receipt_from_message(message)
         new_balance = await decrease_wallet(chat_id, target_id, amount, admin_id=user_id, description=("با رسید" if receipt_id else "بدون رسید"), receipt_file_id=receipt_id, receipt_note=receipt_kind)
         user_tag = await _mention(target_id, bot, chat_id)
@@ -2671,6 +3214,15 @@ async def cmd_settle(message: Message, bot: Bot):
             f"🛡 مدیر اجراکننده: {admin_tag}\n\n"
             f"💳 مبلغ کسر شده: {amount:,} واحد\n"
             f"📊 موجودی فعلی: {new_balance:,} واحد",
+        )
+
+    # فقط «تسویه» / «تسویه حساب» بدون مبلغ → صفر کردن کامل
+    if text not in ("تسویه", "تسویه حساب"):
+        return await _reply(
+            message,
+            "❌ دستور تسویه نامعتبر است.\n"
+            "📌 کاهش جزئی: <code>تسویه 10</code>\n"
+            "📌 تسویه کامل: <code>تسویه</code>",
         )
 
     receipt_id, receipt_kind = _receipt_from_message(message)
@@ -2761,6 +3313,12 @@ async def cb_accounts_panel(call: CallbackQuery, bot: Bot):
     return await handle_accounts_callback(call, bot)
 
 
+@router.callback_query(F.data.startswith("ua:"))
+async def cb_user_admin_group(call: CallbackQuery, bot: Bot):
+    from bot.user_admin import handle_user_admin_callback
+    return await handle_user_admin_callback(call, bot)
+
+
 @router.message(F.text.func(lambda t: parse_report_command(t) is not None))
 async def cmd_report_pm(message: Message, bot: Bot):
     chat_id = message.chat.id
@@ -2832,14 +3390,32 @@ async def cmd_report(message: Message, bot: Bot):
         f"💰 موجودی فعلی: {current_balance:,} واحد\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
     )
-    from bot.tx_reports import _game_report_context, _parse_game_id
+    from bot.tx_reports import (
+        _format_match_tx_lines,
+        _format_wallet_adjust_lines,
+        _format_tx_description,
+        _game_report_context,
+        _parse_game_id,
+        _parse_invite_id,
+        _tx_label,
+    )
     game_ids = [
         g for g in (_parse_game_id(getattr(t, "description", "") or "") for t in transactions) if g
     ]
-    ctx = await _game_report_context(chat_id, target_id, game_ids) if game_ids else {
-        "won": set(), "peers": {},
+    invite_ids = [
+        i for i in (_parse_invite_id(getattr(t, "description", "") or "") for t in transactions) if i
+    ]
+    ctx = await _game_report_context(
+        chat_id, target_id, game_ids, invite_ids=invite_ids,
+    ) if (game_ids or invite_ids) else {
+        "won": set(), "refunded": set(), "refund_kind": {},
+        "refunded_invites": set(), "invite_kind": {}, "peers": {},
     }
     won_games = ctx.get("won") or set()
+    refunded_games = ctx.get("refunded") or set()
+    refund_kind = ctx.get("refund_kind") or {}
+    refunded_invites = ctx.get("refunded_invites") or set()
+    invite_kind = ctx.get("invite_kind") or {}
     peers_by_game = ctx.get("peers") or {}
     name_map: dict[int, str] = {}
     peer_uids = {pid for peers in peers_by_game.values() for pid in peers}
@@ -2852,11 +3428,18 @@ async def cmd_report(message: Message, bot: Bot):
 
     for t in transactions:
         j_time_str = jdatetime.datetime.fromgregorian(datetime=t.created_at).strftime("%Y/%m/%d - %H:%M")
-        if t.type in ("bet", "win"):
-            from bot.tx_reports import _format_match_tx_lines
+        special = _format_wallet_adjust_lines(t, escape_html=True)
+        if special is not None:
+            for line in special:
+                text += f"{line}\n"
+        elif t.type in ("bet", "win"):
             for line in _format_match_tx_lines(
                 t,
                 won_games=won_games,
+                refunded_games=refunded_games,
+                refund_kind=refund_kind,
+                refunded_invites=refunded_invites,
+                invite_kind=invite_kind,
                 peers_by_game=peers_by_game,
                 name_map=name_map,
                 escape_html=True,
@@ -3193,13 +3776,46 @@ async def cmd_pv_start_setting(message: Message, bot: Bot):
     await handle_pv_setting_command(message, bot)
 
 
-@router.message(F.text.regexp(r"^شروع\s+\d+.*پیوی\s*$"))
+@router.message(F.text.regexp(r"^باخت\s*پیوی"))
+async def cmd_pv_forfeit_setting(message: Message, bot: Bot):
+    from bot.pv_dice import handle_pv_forfeit_setting_command, ensure_sweeper
+    await ensure_sweeper(bot)
+    await handle_pv_forfeit_setting_command(message, bot)
+
+
+@router.message(F.text.regexp(r"^چت\s*پیوی\s+\S"))
+async def cmd_pv_chat_setting(message: Message, bot: Bot):
+    """چت پیوی روشن|خاموش|وضعیت — خودِ «چت پیوی» با ریپلای در handler جداست."""
+    from bot.pv_dice import handle_pv_chat_setting_command, ensure_sweeper
+    await ensure_sweeper(bot)
+    await handle_pv_chat_setting_command(message, bot)
+
+
+@router.message(F.text.regexp(r"^لغو\s*پیوی\s*$"))
+async def cmd_admin_cancel_pv(message: Message, bot: Bot):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
+        return await _reply(message, ADMIN_DENY_TEXT)
+    from bot.pv_dice import admin_cancel_pv_in_group, ensure_sweeper
+
+    await ensure_sweeper(bot)
+    player_id = None
+    if message.reply_to_message:
+        player_id = await get_target_from_reply(message, bot)
+        if not player_id:
+            return
+    text = await admin_cancel_pv_in_group(bot, chat_id, player_id=player_id)
+    return await _reply(message, text)
+
+
+@router.message(F.text.regexp(r"^شروع\s+\d+.*پیوی[\s.….۔]*$"))
 async def cmd_start_pv_duel(message: Message, bot: Bot):
     """چالش تاس دونفره در پیوی — برای همه اعضا."""
     from bot.pv_dice import (
         parse_pv_start_command, get_pv_start_settings, format_off_message,
         user_busy_label, format_pv_busy_message, create_invite, ensure_sweeper, MIN_BET,
-        get_min_pv_bet, effective_min_pv_bet, format_min_pv_denial,
+        get_min_pv_bet, effective_min_pv_bet, format_min_pv_denial, format_min_pv_free_denial,
     )
     from bot.dice_game import has_active_game, BET_MODE_FIXED
 
@@ -3214,18 +3830,20 @@ async def cmd_start_pv_duel(message: Message, bot: Bot):
     if parsed.get("error") == "min_bet":
         group_min = await get_min_pv_bet(chat_id)
         eff = effective_min_pv_bet(group_min)
-        return await _reply(message, f"❌ حداقل مبلغ شرط {eff:,} واحد است.")
+        return await _reply(message, f"❌ حداقل مبلغ بازی {eff:,} واحد است.")
     if parsed.get("error") == "bad_bet":
         return await _reply(message, "❌ مبلغ باید عدد باشد.\nمثال: <code>شروع 2 100 پیوی</code>")
 
-    if parsed.get("has_bet"):
-        group_min = await get_min_pv_bet(chat_id)
-        eff = effective_min_pv_bet(group_min)
-        if int(parsed["bet_amount"]) < eff:
-            return await _reply(
-                message,
-                format_min_pv_denial(eff, int(parsed["bet_amount"])),
-            )
+    group_min = await get_min_pv_bet(chat_id)
+    eff = effective_min_pv_bet(group_min)
+    if not parsed.get("has_bet"):
+        if int(group_min or 0) > 0:
+            return await _reply(message, format_min_pv_free_denial(eff))
+    elif int(parsed["bet_amount"]) < eff:
+        return await _reply(
+            message,
+            format_min_pv_denial(eff, int(parsed["bet_amount"])),
+        )
 
     cfg = await get_pv_start_settings(chat_id)
     if not cfg.get("enabled"):
@@ -3245,7 +3863,7 @@ async def cmd_start_pv_duel(message: Message, bot: Bot):
 
     my_busy = user_busy_label(user_id)
     if my_busy:
-        return await _reply(message, format_pv_busy_message(my_busy))
+        return await _reply(message, format_pv_busy_message(my_busy, user_id=user_id))
     if has_active_game(chat_id):
         # اگر خود کاربر در بازی گروهی است — dice game is per-chat not per-user easily
         pass
@@ -3254,7 +3872,9 @@ async def cmd_start_pv_duel(message: Message, bot: Bot):
         tag = await _mention(int(target_id), bot, chat_id)
         return await _reply(
             message,
-            format_pv_busy_message(their_busy, for_other=True, other_name=tag),
+            format_pv_busy_message(
+                their_busy, for_other=True, other_name=tag, user_id=int(target_id),
+            ),
         )
 
     # also block if target/self in group active game (player or lobby starter)
@@ -3278,14 +3898,15 @@ async def cmd_start_pv_duel(message: Message, bot: Bot):
             if bet_mode == BET_MODE_FIXED and fee_per > 0:
                 fee_line = f"\n   └ حق واسطه ({fee_percent}٪): {fee_per:,} واحد (از جایزه)"
             elif fee_per > 0:
-                fee_line = f"\n   ├ شرط: {int(parsed['bet_amount']):,} واحد\n   └ حق واسطه: {fee_per:,} واحد"
+                fee_line = f"\n   ├ مبلغ بازی: {int(parsed['bet_amount']):,} واحد\n   └ حق واسطه: {fee_per:,} واحد"
             else:
                 fee_line = ""
             mode_line = " (فیکس)" if bet_mode == BET_MODE_FIXED else " (اضافه)"
             fee_suffix = f"{mode_line}{fee_line}"
 
             total_bal, playable, pending = await get_playable_balance(chat_id, user_id)
-            if playable < entry:
+            from bot.finance import spendable_for_games
+            if spendable_for_games(playable, pending) < entry:
                 return await _reply(
                     message,
                     format_insufficient_balance_message(
@@ -3298,9 +3919,9 @@ async def cmd_start_pv_duel(message: Message, bot: Bot):
                 )
 
             t_total, t_playable, t_pending = await get_playable_balance(chat_id, int(target_id))
-            if t_playable < entry:
+            if spendable_for_games(t_playable, t_pending) < entry:
                 tag = await _mention(int(target_id), bot, chat_id)
-                shortfall = entry - t_playable
+                shortfall = entry - spendable_for_games(t_playable, t_pending)
                 pending_line = (
                     f"\n⏳ موجودی در انتظار تسویه: {t_pending:,} واحد" if t_pending > 0 else ""
                 )
@@ -3325,7 +3946,7 @@ async def cmd_start_pv_duel(message: Message, bot: Bot):
     ch_plain = _re.sub(r"<[^>]+>", "", challenger_name) or str(user_id)
     tg_plain = _re.sub(r"<[^>]+>", "", target_name) or str(target_id)
 
-    await create_invite(
+    invite_id = await create_invite(
         bot,
         group_id=chat_id,
         challenger_id=user_id,
@@ -3338,19 +3959,26 @@ async def cmd_start_pv_duel(message: Message, bot: Bot):
         challenger_name=ch_plain,
         target_name=tg_plain,
     )
+    if not invite_id:
+        return await _reply(
+            message,
+            "⚠️ الان نمی‌توان چالش فرستاد؛ شما یا حریف مشغول بازی/دعوت دیگری هستید "
+            "یا در بازی گروهی هستید.",
+        )
 
 
 @router.message(F.text.regexp(r"^شروع\s+\d+"))
 async def cmd_start_game(message: Message, bot: Bot):
     # اگر دستور پیوی باشد، هندلر تخصصی باید گرفته باشد؛ اینجا فقط گپ
-    if (message.text or "").strip().endswith("پیوی"):
+    _start_parts = normalize_numbers(message.text or "").split()
+    if _start_parts and _start_parts[-1].rstrip(".….۔") == "پیوی":
         return
     from bot.pv_dice import user_busy_label, format_pv_busy_message
     chat_id = message.chat.id
     user_id = message.from_user.id
     busy = user_busy_label(user_id)
     if busy:
-        return await _reply(message, format_pv_busy_message(busy))
+        return await _reply(message, format_pv_busy_message(busy, user_id=user_id))
     if not is_admin(chat_id, user_id) and not is_owner(chat_id, user_id):
         return await _reply(message, "شما دسترسی مجاز را ندارید")
     parts = normalize_numbers(message.text).split()
@@ -3407,12 +4035,23 @@ async def cmd_start_game(message: Message, bot: Bot):
     else:
         bet_mode = BET_MODE_FIXED
     starter_id = user_id
-    create_game(
+    game = create_game(
         chat_id, total_players,
         bet_amount=bet_amount, fee_percent=fee_percent,
         has_bet=has_bet, bet_mode=bet_mode if has_bet else BET_MODE_FIXED,
         starter_admin_id=starter_id,
     )
+    if not game:
+        from bot.dice_game import _pv_blocks_group_play
+        pv_block = _pv_blocks_group_play(user_id)
+        if pv_block:
+            return await _reply(message, pv_block)
+        return await _reply(message, (
+            "⚠️ یک بازی فعال وجود دارد!\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "📍 لطفاً صبر کنید تا بازی فعلی تمام شود.\n\n"
+            "❌ یا برای توقف، دستور «لغو» را بزنید."
+        ))
     mode_label = _START_MODE_LABELS.get(bet_mode, bet_mode)
     if has_bet:
         costs = calc_bet_costs(bet_amount, fee_percent, bet_mode, total_players)
@@ -3534,6 +4173,7 @@ def _dice_stats_kb() -> InlineKeyboardMarkup:
 
 async def _build_dice_stats_text(chat_id: int, period: str, bot: Bot) -> str:
     from bot.dice_stats_fmt import format_dice_game_stats
+    from bot.stat_prizes import get_group_prizes
 
     labels = {
         "daily": "🎲 آمار تاس · 📅 امروز",
@@ -3555,7 +4195,8 @@ async def _build_dice_stats_text(chat_id: int, period: str, bot: Bot) -> str:
         except Exception:
             name_map[uid] = f'<a href="tg://user?id={uid}">کاربر</a>'
 
-    return format_dice_game_stats(records, title, name_map)
+    prizes = await get_group_prizes(chat_id) if period in ("daily", "yesterday") else {}
+    return format_dice_game_stats(records, title, name_map, prizes=prizes)
 
 
 @router.message(F.text.in_(["آمار تاس", "امار تاس", "آمار بازی", "امار بازی"]))
@@ -3572,6 +4213,19 @@ async def cmd_dice_stats_daily(message: Message, bot: Bot):
     text = await _build_dice_stats_text(chat_id, "daily", bot)
     await safe_send(bot, chat_id, text,
                     reply_markup=_dice_stats_kb(), reply_to=message.message_id)
+
+
+@router.message(F.text.in_(["تست آمار تاس", "امار تاس تست", "آمار تاس تست", "تست امار تاس"]))
+async def cmd_dice_stats_midnight_test(message: Message, bot: Bot):
+    """فرض می‌کند الان ۱۲ شب است — آمار امروز + جوایز برای همین گروه."""
+    chat_id = message.chat.id
+    uid = message.from_user.id
+    if not is_owner(chat_id, uid):
+        return await _reply(message, "❌ این دستور فقط برای مالک گپ است.")
+    from bot.midnight_stats import run_midnight_stats_test
+    await _reply(message, "⏳ در حال اجرای تست آمار نیمه‌شب...")
+    result = await run_midnight_stats_test(bot, chat_id)
+    await _reply(message, result)
 
 
 @router.message(F.text.in_(["آمار تاس دیروز", "امار تاس دیروز", "آمار بازی دیروز", "امار بازی دیروز"]))
@@ -3596,6 +4250,44 @@ async def cmd_dice_stats_total(message: Message, bot: Bot):
     text = await _build_dice_stats_text(chat_id, "total", bot)
     await safe_send(bot, chat_id, text,
                     reply_markup=_dice_stats_kb(), reply_to=message.message_id)
+
+
+async def _build_my_dice_stats_text(chat_id: int, user_id: int, period: str, bot: Bot) -> str:
+    from bot.dice_stats_fmt import format_my_dice_stats
+    import jdatetime
+    from django.utils import timezone
+
+    now = timezone.localtime()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if period == "yesterday":
+        day = today_start - __import__("datetime").timedelta(days=1)
+        date_label = jdatetime.datetime.fromgregorian(datetime=day).strftime("%Y/%m/%d")
+        title = f"🎲 آمار تاس من · 📅 دیروز ({date_label})"
+    else:
+        date_label = jdatetime.datetime.fromgregorian(datetime=today_start).strftime("%Y/%m/%d")
+        title = f"🎲 آمار تاس من · 📅 امروز ({date_label})"
+
+    records = await db_fetch_user_dice_game_history(chat_id, user_id, period)
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+        user_label = html.escape(member.user.full_name or member.user.first_name or str(user_id))
+    except Exception:
+        user_label = f'<a href="tg://user?id={user_id}">شما</a>'
+    return format_my_dice_stats(records, title, user_label)
+
+
+@router.message(F.text.in_(["آمار تاس من", "امار تاس من", "آمار بازی من", "امار بازی من"]))
+async def cmd_dice_stats_me(message: Message, bot: Bot):
+    chat_id = message.chat.id
+    text = await _build_my_dice_stats_text(chat_id, message.from_user.id, "daily", bot)
+    await safe_send(bot, chat_id, text, reply_to=message.message_id)
+
+
+@router.message(F.text.in_(["آمار تاس دیروز من", "امار تاس دیروز من", "آمار بازی دیروز من", "امار بازی دیروز من"]))
+async def cmd_dice_stats_me_yesterday(message: Message, bot: Bot):
+    chat_id = message.chat.id
+    text = await _build_my_dice_stats_text(chat_id, message.from_user.id, "yesterday", bot)
+    await safe_send(bot, chat_id, text, reply_to=message.message_id)
 
 
 @router.callback_query(F.data.startswith("dstat:"))
@@ -3717,11 +4409,13 @@ async def handle_native_dice(message: Message, bot: Bot):
 
         game = get_game(chat_id)
         if game and game.get("status") == "playing":
-            allowed, remaining, err = can_player_roll(chat_id, user_id, 1)
-            if not allowed:
+            claimed, remaining, err = claim_roll_slots(chat_id, user_id, 1)
+            if not claimed:
                 await bot.send_message(chat_id, err, reply_to_message_id=message.message_id)
                 return
-            await _handle_game_roll_silent(chat_id, user_id, 1, value, message.message_id, bot)
+            await _handle_game_roll_silent(
+                chat_id, user_id, 1, value, message.message_id, bot, slots_claimed=True,
+            )
             return
 
         # بازی تعیین (waiting)

@@ -20,6 +20,15 @@ _log = logging.getLogger(__name__)
 _INACTIVE_STATUSES = {"left", "kicked"}
 _ADMIN_STATUSES = {"administrator", "creator"}
 
+INSTALL_DISCLAIMER = (
+    "🎲 تاسینو یک ربات سرگرمی است.\n\n"
+    "این ربات فقط برای بازی و سرگرمی داخل گروه ساخته شده "
+    "و هیچ تضمین سود، فعالیت مالی رسمی یا مسئولیت حقوقی ندارد.\n\n"
+    "هرگونه استفاده نادرست، شرط‌بندی واقعی، اختلاف مالی یا سوءاستفاده "
+    "از امکانات ربات، بر عهدهٔ خودتان و مدیران گروه است.\n\n"
+    "با نصب و ادامهٔ استفاده، این موارد را پذیرفته‌اید."
+)
+
 
 @sync_to_async
 def _ensure_group_exists(chat_id: int) -> None:
@@ -155,3 +164,7 @@ async def _finish_setup(chat_id: int, bot: Bot):
         await bot.send_message(chat_id, text, parse_mode="HTML")
     except Exception as e:
         _log.error("خطا در ارسال پیام تکمیل نصب: %s", e)
+    try:
+        await bot.send_message(chat_id, INSTALL_DISCLAIMER)
+    except Exception as e:
+        _log.error("خطا در ارسال پیام سلب مسئولیت نصب: %s", e)

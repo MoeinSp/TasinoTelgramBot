@@ -67,6 +67,9 @@ CACHES = {
         "BACKEND": "django.core.cache.backends.redis.RedisCache",
         "LOCATION": REDIS_URL,
         "TIMEOUT": 172800,
+        # Keep compatibility with Redis servers/proxies that don't implement
+        # the RESP3 `HELLO 3` handshake.
+        "OPTIONS": {"protocol": 2},
     }
 }
 

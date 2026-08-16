@@ -33,7 +33,21 @@ class JoinMessage(models.Model):
             return True
 
         if self.start_datetime and self.end_datetime:
-            return self.start_datetime <= check <= self.end_datetime
+            start = self.start_datetime
+            end = self.end_datetime
+            if timezone.is_naive(start):
+                start = timezone.make_aware(start, timezone.get_current_timezone())
+            else:
+                start = timezone.localtime(start)
+            if timezone.is_naive(end):
+                end = timezone.make_aware(end, timezone.get_current_timezone())
+            else:
+                end = timezone.localtime(end)
+            if timezone.is_naive(check):
+                check = timezone.make_aware(check, timezone.get_current_timezone())
+            else:
+                check = timezone.localtime(check)
+            return start <= check <= end
 
         return False
 
@@ -70,7 +84,10 @@ class JoinMessage(models.Model):
 
     def save(self, *args, **kwargs):
         super().save(*args, **kwargs)
-        cache.delete('join_active_message')
+        try:
+            cache.delete('join_active_message')
+        except Exception:
+            pass
 
 
 class ForcedJoinConfig(models.Model):

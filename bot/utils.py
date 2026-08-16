@@ -39,6 +39,19 @@ def _eval_ast(node):
     raise ValueError("بیان مجاز نیست")
 
 
+_CALC_ONLY_RE = re.compile(r"^[\d\s.+\-*/×÷()]+$")
+
+
+def is_pure_calc_expr(text: str) -> bool:
+    """فقط عبارت ریاضی خالص — تا دستوراتی مثل «تنظیم کانال لاگ -100» بلعیده نشوند."""
+    expr = normalize_numbers(text or "").strip()
+    if not expr or len(expr) > MAX_EXPR_LEN:
+        return False
+    if not re.search(r"[+\-*/×÷]", expr):
+        return False
+    return bool(_CALC_ONLY_RE.fullmatch(expr))
+
+
 def safe_calc(expr: str) -> float | None:
     expr = normalize_numbers(expr).strip()
     if len(expr) > MAX_EXPR_LEN:

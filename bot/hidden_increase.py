@@ -144,7 +144,12 @@ def increase_request_admin_keyboard(request_id: int, *, status: str = "pending")
     ])
 
 
-def increase_request_user_keyboard() -> InlineKeyboardMarkup:
+def increase_request_user_keyboard(*, phase: str = "receipt") -> InlineKeyboardMarkup:
+    """phase=amount → فقط لغو؛ phase=receipt → عوض کردن مبلغ + لغو."""
+    if phase == "amount":
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ لغو", callback_data="inc_flow:cancel")],
+        ])
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="✏️ عوض کردن مبلغ", callback_data="inc_flow:amount"),
@@ -158,17 +163,74 @@ def increase_request_manual_only_keyboard(request_id: int) -> InlineKeyboardMark
     return increase_request_admin_keyboard(request_id, status="approved")
 
 
-async def start_increase_request_flow(bot: Bot, user_id: int, group_id: int) -> bool:
+async def _receipt_prompt_text(group_id, amount: int, *, html: bool = True) -> str:
+    """متن مرحلهٔ رسید + کارت ادمین فعال (شروع فعالیت)."""
+    from bot.admin_accounting import active_cashier_payment_info
+
+    payment = await active_cashier_payment_info(group_id)
+    if payment and payment.get("card"):
+        holder = payment.get("name") or ("مالک گروه" if payment.get("is_owner") else "ادمین فعال")
+        if html:
+            return (
+                "💰 درخواست افزایش موجودی\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"مبلغ: <b>{amount:,}</b> واحد\n\n"
+                f"💳 شماره کارت واریز:\n<code>{payment['card']}</code>\n"
+                f"👤 به نام: <b>{holder}</b>\n\n"
+                "🧾 مبلغ را به کارت بالا واریز کنید و رسید را به‌صورت عکس یا فایل بفرستید."
+            )
+        return (
+            "💰 درخواست افزایش موجودی\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"مبلغ: **{amount:,}** واحد\n\n"
+            f"💳 شماره کارت واریز: `{payment['card']}`\n"
+            f"👤 به نام: {holder}\n\n"
+            "🧾 مبلغ را به کارت بالا واریز کنید و رسید را به‌صورت عکس بفرستید."
+        )
+    if html:
+        return (
+            "💰 درخواست افزایش موجودی\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"مبلغ: <b>{amount:,}</b> واحد\n\n"
+            "⚠️ فعلاً کارت ادمین فعال ثبت نشده؛ با مدیر هماهنگ کنید.\n\n"
+            "🧾 بعد از واریز، رسید را به‌صورت عکس یا فایل بفرستید."
+        )
+    return (
+        "💰 درخواست افزایش موجودی\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"مبلغ: **{amount:,}** واحد\n\n"
+        "⚠️ فعلاً کارت ادمین فعال ثبت نشده؛ با مدیر هماهنگ کنید.\n\n"
+        "🧾 بعد از واریز، رسید را به‌صورت عکس بفرستید."
+    )
+
+
+async def start_increase_request_flow(
+    bot: Bot, user_id: int, group_id: int, *, suggested_amount: int | None = None,
+) -> bool:
     from bot.finance_ban import is_finance_banned, FINANCE_BAN_USER_TEXT
     if await is_finance_banned(group_id, user_id):
         await send_private(bot, user_id, FINANCE_BAN_USER_TEXT)
         return False
-    _request_wait[int(user_id)] = {"group_id": int(group_id), "phase": "amount"}
-    ok = await send_private(
-        bot, user_id,
-        "💰 درخواست افزایش موجودی\n\nمبلغ موردنظر را به‌صورت عددی بفرستید.",
-        reply_markup=increase_request_user_keyboard(),
-    )
+    suggested = int(suggested_amount or 0)
+    if suggested > 0:
+        _request_wait[int(user_id)] = {
+            "group_id": int(group_id),
+            "phase": "receipt",
+            "amount": suggested,
+        }
+        prompt = await _receipt_prompt_text(group_id, suggested, html=True)
+        ok = await send_private(
+            bot, user_id,
+            prompt,
+            reply_markup=increase_request_user_keyboard(phase="receipt"),
+        )
+    else:
+        _request_wait[int(user_id)] = {"group_id": int(group_id), "phase": "amount"}
+        ok = await send_private(
+            bot, user_id,
+            "💰 درخواست افزایش موجودی\n\nمبلغ موردنظر را به‌صورت عددی بفرستید.",
+            reply_markup=increase_request_user_keyboard(phase="amount"),
+        )
     if not ok:
         _request_wait.pop(int(user_id), None)
     return ok
@@ -209,7 +271,7 @@ async def handle_increase_request_callback(call, bot: Bot) -> bool:
         await call.answer()
         await call.message.answer(
             "✏️ مبلغ جدید را به‌صورت عددی بفرستید.",
-            reply_markup=increase_request_user_keyboard(),
+            reply_markup=increase_request_user_keyboard(phase="amount"),
         )
         return True
     return False
@@ -222,7 +284,7 @@ async def handle_increase_request_message(message: Message, bot: Bot) -> bool:
     if data.get("phase") == "receipt":
         await message.answer(
             "🧾 لطفاً رسید را فقط به‌صورت عکس یا فایل ارسال کنید.",
-            reply_markup=increase_request_user_keyboard(),
+            reply_markup=increase_request_user_keyboard(phase="receipt"),
         )
         return True
     raw = (message.text or "").strip().translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789"))
@@ -233,27 +295,13 @@ async def handle_increase_request_message(message: Message, bot: Bot) -> bool:
     if not raw.isdigit() or int(raw) <= 0:
         await message.answer(
             "⚠️ مبلغ معتبر نیست؛ فقط عدد مثبت بفرستید.",
-            reply_markup=increase_request_user_keyboard(),
+            reply_markup=increase_request_user_keyboard(phase="amount"),
         )
         return True
     data["amount"] = int(raw)
     data["phase"] = "receipt"
-    from bot.admin_accounting import active_cashier_payment_info
-    payment = await active_cashier_payment_info(data["group_id"])
-    if payment and payment.get("card"):
-        holder = payment.get("name") or ("مالک گروه" if payment.get("is_owner") else "ادمین فعال")
-        prompt = (
-            f"💰 مبلغ درخواست: {data['amount']:,}\n\n"
-            f"💳 شماره کارت واریز:\n<code>{payment['card']}</code>\n"
-            f"👤 به نام: <b>{holder}</b>\n\n"
-            "لطفاً مبلغ را به کارت بالا واریز کنید و سپس تصویر رسید را ارسال نمایید."
-        )
-    else:
-        prompt = (
-            "💰 مبلغ ثبت شد. لطفاً برای دریافت شماره کارت با مدیر گروه هماهنگ کنید "
-            "و سپس تصویر رسید را ارسال نمایید."
-        )
-    await message.answer(prompt, parse_mode="HTML", reply_markup=increase_request_user_keyboard())
+    prompt = await _receipt_prompt_text(data["group_id"], data["amount"], html=True)
+    await message.answer(prompt, parse_mode="HTML", reply_markup=increase_request_user_keyboard(phase="receipt"))
     return True
 
 
@@ -276,7 +324,17 @@ def manual_increase_prompt(req, *, already_processed: bool = False) -> str:
 
 async def handle_increase_request_receipt(message: Message, bot: Bot) -> bool:
     data = _request_wait.get(int(message.from_user.id))
-    if not data or data.get("phase") != "receipt":
+    if not data:
+        return False
+    if data.get("phase") == "amount":
+        await message.answer(
+            "⚠️ اول باید مبلغ را به‌صورت عدد بفرستید.\n"
+            "بعد از ثبت مبلغ، عکس رسید را ارسال کنید.\n"
+            "مثال مبلغ: 50000",
+            reply_markup=increase_request_user_keyboard(phase="amount"),
+        )
+        return True
+    if data.get("phase") != "receipt":
         return False
     file_id, kind = "", ""
     if message.photo:
@@ -436,13 +494,25 @@ async def apply_increase_request_approval(
 
     try:
         from bot.pv_dice import _store_member_offer, _pv_member_offer_kb
+        from bot.pv_search import pop_offer_search_after_increase, search_opponent_kb
+        from aiogram.types import InlineKeyboardButton as IKB, InlineKeyboardMarkup
+
         tok = _store_member_offer(int(req.telegram_chat_id), int(req.telegram_user_id))
+        offer_kb = _pv_member_offer_kb(tok)
+        if pop_offer_search_after_increase(int(req.telegram_user_id)):
+            rows = list(offer_kb.inline_keyboard) if offer_kb else []
+            rows.append([IKB(text="🔍 جستجوی حریف", callback_data="pvs:go")])
+            kb = InlineKeyboardMarkup(inline_keyboard=rows)
+        else:
+            kb = offer_kb
         await bot.send_message(
-            req.telegram_user_id, user_text, reply_markup=_pv_member_offer_kb(tok),
+            req.telegram_user_id, user_text, reply_markup=kb,
         )
     except Exception:
         try:
-            await bot.send_message(req.telegram_user_id, user_text)
+            from bot.pv_search import pop_offer_search_after_increase, search_opponent_kb
+            kb = search_opponent_kb() if pop_offer_search_after_increase(int(req.telegram_user_id)) else None
+            await bot.send_message(req.telegram_user_id, user_text, reply_markup=kb)
         except Exception:
             pass
     await bot.send_message(req.telegram_chat_id, group_text)

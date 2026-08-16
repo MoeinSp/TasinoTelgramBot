@@ -66,9 +66,12 @@ async def _build_bot_dp():
     scheduler = AsyncIOScheduler(timezone="Asia/Tehran")
     scheduler.add_job(
         send_scheduled_logic,
-        "interval",
-        minutes=1,
+        "cron",
+        minute="*",
+        second=0,
         max_instances=1,
+        coalesce=True,
+        misfire_grace_time=50,
         args=[bot],
         id="scheduled_messages",
     )
@@ -114,7 +117,7 @@ async def _build_bot_dp():
     scheduler.add_job(
         _challenge_start_job,
         "interval",
-        seconds=15,
+        seconds=5,
         max_instances=1,
         id="challenge_start_announce",
     )
@@ -126,27 +129,66 @@ async def _build_bot_dp():
         id="challenge_end_warning",
     )
 
-    from bot.midnight_stats import broadcast_midnight_stats, midnight_warn_then_stats
+    from bot.midnight_stats import broadcast_midnight_stats, broadcast_midnight_warning
 
+    # هشدار ۲۳:۵۹ — بدون sleep (آمار job جداست)
     scheduler.add_job(
-        midnight_warn_then_stats,
+        broadcast_midnight_warning,
         "cron",
         hour=23,
         minute=59,
         second=0,
         args=[bot],
-        id="midnight_warn_then_stats",
-        misfire_grace_time=30,
+        id="midnight_warn",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=90,
     )
+    # آمار + جوایز دقیقاً ۰۰:۰۰
     scheduler.add_job(
         broadcast_midnight_stats,
         "cron",
         hour=0,
         minute=0,
-        second=5,
+        second=0,
+        args=[bot],
+        id="midnight_stats",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=600,
+    )
+    # اگر ۰۰:۰۰ از دست رفت
+    scheduler.add_job(
+        broadcast_midnight_stats,
+        "cron",
+        hour=0,
+        minute=1,
+        second=0,
         args=[bot],
         id="midnight_stats_fallback",
-        misfire_grace_time=120,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=600,
+    )
+
+    async def _weekly_league_reset_job():
+        from bot.league import weekly_league_reset_job
+        try:
+            await weekly_league_reset_job(bot)
+        except Exception as exc:
+            logger.exception("weekly league reset job: %s", exc)
+
+    scheduler.add_job(
+        _weekly_league_reset_job,
+        "cron",
+        day_of_week="sat",
+        hour=0,
+        minute=0,
+        second=20,
+        id="weekly_league_reset",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
     )
     scheduler.start()
     from bot.backup_schedule import set_scheduler

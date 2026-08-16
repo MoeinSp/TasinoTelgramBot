@@ -402,6 +402,10 @@ async def handle_challenge_callback(call, bot) -> bool:
             await call.message.answer("⚠️ چالش ساخته شد ولی ارسال به گروه ناموفق بود.")
             await call.answer()
             return True
+        # برای چالش زمان‌بندی‌شده: countdown ۱۰ثانیه + پیام شروع دقیق
+        if ch.announce_message_id is None:
+            from bot.challenges import schedule_challenge_lifecycle
+            schedule_challenge_lifecycle(bot, ch.id)
         await call.answer("منتشر شد ✅")
         await call.message.answer(
             f"✅ چالش #{ch.id} منتشر شد و در گروه اعلام گردید.",

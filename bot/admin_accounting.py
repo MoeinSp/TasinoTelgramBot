@@ -4,7 +4,7 @@ from datetime import timedelta
 import jdatetime
 from asgiref.sync import sync_to_async
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from django.db.models import Sum
+from django.db.models import Count, Sum
 from django.utils import timezone
 
 from account.models import AdminAccounting, AdminActivitySession, TelegramGroupMember, WalletTransaction
@@ -155,6 +155,37 @@ def _session_tx_stats(chat_id, admin_id, start, end):
     }
 
 
+def _session_challenge_stats(chat_id, admin_id, start, end) -> dict:
+    from account.models import GroupChallenge
+
+    qs = GroupChallenge.objects.filter(
+        telegram_chat_id=int(chat_id),
+        created_by=int(admin_id),
+        created_at__gte=start,
+        created_at__lt=end,
+    ).exclude(status="cancelled")
+    agg = qs.aggregate(n=Count("id"), total=Sum("prize_amount"))
+    return {
+        "challenge_count": int(agg["n"] or 0),
+        "challenge_prize_total": int(agg["total"] or 0),
+    }
+
+
+def _session_league_stats(chat_id, start, end) -> dict:
+    """جوایز لیگ در بازه فعالیت (از طرف مالک؛ در تسویه ادمین لحاظ نمی‌شود)."""
+    qs = WalletTransaction.objects.filter(
+        telegram_chat_id=int(chat_id),
+        created_at__gte=start,
+        created_at__lt=end,
+        description__icontains="(لیگ پله",
+    )
+    agg = qs.aggregate(n=Count("id"), total=Sum("amount"))
+    return {
+        "league_prize_count": int(agg["n"] or 0),
+        "league_prize_total": abs(int(agg["total"] or 0)),
+    }
+
+
 def make_offschedule_id(admin_id, day_key: str) -> str:
     return f"off_{admin_id}_{day_key}"
 
@@ -239,9 +270,10 @@ def _offschedule_hourly_stats(chat_id, admin_id, start, end):
         admin_id=int(admin_id),
         created_at__gte=start,
         created_at__lt=end,
-    ).order_by("created_at")
+        type__in=("admin_increase", "fee") + _SETTLE_TYPES + ("bet", "game_bet", "game_start"),
+    ).only("type", "amount", "created_at").order_by("created_at")
     qs = _exclude_admin_session_windows(qs, chat_id, admin_id)
-    for tx in qs:
+    for tx in qs.iterator(chunk_size=500):
         hour = timezone.localtime(tx.created_at).strftime("%H:00")
         amt = abs(int(tx.amount or 0))
         if tx.type == "admin_increase":
@@ -251,11 +283,11 @@ def _offschedule_hourly_stats(chat_id, admin_id, start, end):
         elif tx.type == "fee":
             buckets[hour]["fee"] += amt
         elif tx.type in ("bet", "game_bet", "game_start"):
-            buckets[hour]["game"] += 1
+            buckets[hour]["games"] += 1
     return [{"hour": h, **buckets[h]} for h in sorted(buckets.keys())]
 
 
-def _build_offschedule_row(chat_id, admin_id, day_key: str):
+def _build_offschedule_row(chat_id, admin_id, day_key: str, *, detail: bool = False):
     start, day_end = _day_bounds(day_key)
     now = timezone.now()
     is_today = timezone.localtime(now).strftime("%Y-%m-%d") == day_key
@@ -266,7 +298,11 @@ def _build_offschedule_row(chat_id, admin_id, day_key: str):
     ).first()
     pct = int(cfg.share_percent) if cfg else 50
     fin = compute_financials(stats["increase"], stats["settle"], stats["fee"], pct)
-    hourly = _offschedule_hourly_stats(chat_id, admin_id, start, query_end)
+    hourly = (
+        _offschedule_hourly_stats(chat_id, admin_id, start, query_end) if detail else []
+    )
+    challenge_stats = _session_challenge_stats(chat_id, admin_id, start, query_end)
+    league_stats = _session_league_stats(chat_id, start, query_end)
     ended_local = None if is_today else timezone.localtime(day_end - timedelta(seconds=1))
     return {
         "id": make_offschedule_id(admin_id, day_key),
@@ -282,6 +318,8 @@ def _build_offschedule_row(chat_id, admin_id, day_key: str):
         "hourly": hourly,
         **stats,
         **fin,
+        **challenge_stats,
+        **league_stats,
         "balance_delta": 0,
         "session_net": fin["net"],
         "session_settlement_kind": fin["settlement_kind"],
@@ -290,6 +328,7 @@ def _build_offschedule_row(chat_id, admin_id, day_key: str):
 
 
 def _admins_for_offschedule_day(chat_id, day_key: str) -> set[int]:
+    """فقط ادمین‌هایی که همان روز تراکنش یا بازه دارند — نه کل AdminAccounting."""
     start, end = _day_bounds(day_key)
     ids: set[int] = set(
         AdminActivitySession.objects.filter(
@@ -304,28 +343,27 @@ def _admins_for_offschedule_day(chat_id, day_key: str) -> set[int]:
             admin_id__isnull=False,
             created_at__gte=start,
             created_at__lt=end,
+            type__in=("admin_increase", "fee") + _SETTLE_TYPES,
         ).values_list("admin_id", flat=True)
-    )
-    ids.update(
-        AdminAccounting.objects.filter(telegram_chat_id=int(chat_id)).values_list(
-            "admin_id", flat=True
-        )
     )
     return {int(x) for x in ids if x is not None}
 
 
-def list_offschedule_for_day(chat_id, day_key: str) -> list[dict]:
+def list_offschedule_for_day(chat_id, day_key: str, *, detail: bool = False) -> list[dict]:
     """بازه خارج از برنامه هر ادمین در یک روز — فقط اگر تراکنش یا بازه رسمی داشته باشد."""
     start, end = _day_bounds(day_key)
-    rows = []
-    for aid in _admins_for_offschedule_day(chat_id, day_key):
-        row = _build_offschedule_row(chat_id, aid, day_key)
-        has_session = AdminActivitySession.objects.filter(
+    session_admins = {
+        int(x)
+        for x in AdminActivitySession.objects.filter(
             telegram_chat_id=int(chat_id),
-            admin_id=int(aid),
             started_at__gte=start,
             started_at__lt=end,
-        ).exists()
+        ).values_list("admin_id", flat=True)
+    }
+    rows = []
+    for aid in _admins_for_offschedule_day(chat_id, day_key):
+        row = _build_offschedule_row(chat_id, aid, day_key, detail=detail)
+        has_session = int(aid) in session_admins
         has_tx = bool(row["increase"] or row["settle"] or row["fee"])
         if has_session or has_tx:
             rows.append(row)
@@ -333,39 +371,18 @@ def list_offschedule_for_day(chat_id, day_key: str) -> list[dict]:
     return rows
 
 
-def _days_with_offschedule_activity(chat_id, lookback_days: int = 30) -> set[str]:
-    """روزهایی که حداقل یک تراکنش ادمین خارج از بازه فعالیت دارند."""
+def _activity_cash_days(chat_id, lookback_days: int = 30) -> set[str]:
+    """روزهای دارای تراکنش نقدی ادمین — بدون اسکن پنجره‌به‌پنجره."""
     since = timezone.now() - timedelta(days=lookback_days)
     days: set[str] = set()
-    qs = _exclude_game_wallet_txs(
-        WalletTransaction.objects.filter(
-            telegram_chat_id=int(chat_id),
-            admin_id__isnull=False,
-            created_at__gte=since,
-            type__in=("admin_increase", "fee") + _SETTLE_TYPES,
-        )
+    qs = WalletTransaction.objects.filter(
+        telegram_chat_id=int(chat_id),
+        admin_id__isnull=False,
+        created_at__gte=since,
+        type__in=("admin_increase", "fee") + _SETTLE_TYPES,
     )
-    by_admin: dict[int, list] = defaultdict(list)
-    for tx in qs.only("admin_id", "created_at", "type").iterator():
-        by_admin[int(tx.admin_id)].append(tx.created_at)
-
-    now = timezone.now()
-    for aid, times in by_admin.items():
-        windows = list(
-            AdminActivitySession.objects.filter(
-                telegram_chat_id=int(chat_id), admin_id=aid
-            ).values_list("started_at", "ended_at")
-        )
-
-        def _in_window(ts, wins=windows):
-            for s, e in wins:
-                if s <= ts < (e or now):
-                    return True
-            return False
-
-        for ts in times:
-            if not _in_window(ts):
-                days.add(timezone.localtime(ts).strftime("%Y-%m-%d"))
+    for ts in qs.datetimes("created_at", "day", tzinfo=timezone.get_current_timezone()):
+        days.add(timezone.localtime(ts).strftime("%Y-%m-%d"))
     return days
 
 
@@ -381,8 +398,9 @@ def _session_hourly_stats(chat_id, admin_id, start, end):
         admin_id=int(admin_id),
         created_at__gte=start,
         created_at__lt=end,
-    ).order_by("created_at")
-    for tx in qs:
+        type__in=("admin_increase", "fee") + _SETTLE_TYPES + ("bet", "game_bet", "game_start"),
+    ).only("type", "amount", "created_at").order_by("created_at")
+    for tx in qs.iterator(chunk_size=500):
         hour = timezone.localtime(tx.created_at).strftime("%H:00")
         amt = abs(int(tx.amount or 0))
         if tx.type == "admin_increase":
@@ -396,7 +414,31 @@ def _session_hourly_stats(chat_id, admin_id, start, end):
     return [{"hour": h, **buckets[h]} for h in sorted(buckets.keys())]
 
 
-def _build_session_row(chat_id, session, *, end_override=None):
+def _build_session_row(chat_id, session, *, end_override=None, detail: bool = False, meta_only: bool = False):
+    """
+    meta_only: فقط شناسه/زمان/ادمین برای لیست روزها.
+    detail=False: مالی + چالش/لیگ برای لیست همان روز (بدون hourly).
+    detail=True: گزارش کامل یک بازه.
+    """
+    if meta_only:
+        return {
+            "id": session.id,
+            "admin_id": session.admin_id,
+            "admin_name": _admin_name(chat_id, session.admin_id),
+            "started_at": timezone.localtime(session.started_at),
+            "ended_at": timezone.localtime(session.ended_at) if session.ended_at else None,
+            "is_active": session.ended_at is None,
+            "increase": 0,
+            "settle": 0,
+            "fee": 0,
+            "session_net": 0,
+            "challenge_count": 0,
+            "challenge_prize_total": 0,
+            "league_prize_count": 0,
+            "league_prize_total": 0,
+            "hourly": [],
+        }
+
     end = end_override or session.ended_at or timezone.now()
     stats = _session_tx_stats(chat_id, session.admin_id, session.started_at, end)
     cfg = AdminAccounting.objects.filter(
@@ -405,13 +447,22 @@ def _build_session_row(chat_id, session, *, end_override=None):
     pct = int(cfg.share_percent) if cfg else 50
     fin = compute_financials(stats["increase"], stats["settle"], stats["fee"], pct)
     start_bal = int(session.start_group_balance or 0)
-    end_bal = int(
-        session.end_group_balance
-        if session.end_group_balance is not None
-        else _group_total_balance(chat_id)
-    )
+    if session.end_group_balance is not None:
+        end_bal = int(session.end_group_balance)
+    elif detail and session.ended_at is None:
+        end_bal = int(_group_total_balance(chat_id))
+    else:
+        end_bal = start_bal
     balance_info = compute_session_balance_settlement(start_bal, end_bal)
-    hourly = _session_hourly_stats(chat_id, session.admin_id, session.started_at, end)
+    hourly = (
+        _session_hourly_stats(chat_id, session.admin_id, session.started_at, end)
+        if detail
+        else []
+    )
+    challenge_stats = _session_challenge_stats(
+        chat_id, session.admin_id, session.started_at, end
+    )
+    league_stats = _session_league_stats(chat_id, session.started_at, end)
     return {
         "id": session.id,
         "admin_id": session.admin_id,
@@ -426,6 +477,8 @@ def _build_session_row(chat_id, session, *, end_override=None):
         **stats,
         **fin,
         **balance_info,
+        **challenge_stats,
+        **league_stats,
         "session_net": fin["net"],
         "session_settlement_kind": fin["settlement_kind"],
         "session_settle_amount": fin["settle_amount"],
@@ -446,30 +499,20 @@ def _settlement_parties(net: int, admin_name: str = "ادمین") -> list[str]:
     n = int(net or 0)
     name = (admin_name or "ادمین").strip()
     if n > 0:
-        return [
-            f"  💰 مبلغ تسویه: {n:,} واحد",
-            f"  📤 پرداخت‌کننده: ادمین ({name})",
-            "  📥 دریافت‌کننده: مالک",
-            f"  📌 وضعیت: ادمین باید {n:,} به مالک بزند",
-        ]
+        return [f"  🔻 {name} → مالک: {n:,}"]
     if n < 0:
-        return [
-            f"  💰 مبلغ تسویه: {abs(n):,} واحد",
-            "  📤 پرداخت‌کننده: مالک",
-            f"  📥 دریافت‌کننده: ادمین ({name})",
-            f"  📌 وضعیت: مالک باید {abs(n):,} به {name} بزند",
-        ]
-    return ["  ✅ بدهی صفر — هیچ‌کس بدهکار نیست"]
+        return [f"  💸 مالک → {name}: {abs(n):,}"]
+    return ["  ✅ تسویه صفر"]
 
 
 def _settlement_footer(net: int, admin_name: str = "ادمین") -> str:
     n = int(net or 0)
     name = (admin_name or "ادمین").strip()
     if n > 0:
-        return f"  📌 تسویه نهایی: {name} → مالک | {n:,} واحد"
+        return f"  📌 {name} → مالک | {n:,}"
     if n < 0:
-        return f"  📌 تسویه نهایی: مالک → {name} | {abs(n):,} واحد"
-    return "  📌 تسویه نهایی: صفر — تسویه کامل"
+        return f"  📌 مالک → {name} | {abs(n):,}"
+    return "  📌 تسویه صفر"
 
 
 def _session_time_line(session: dict) -> str:
@@ -512,12 +555,10 @@ def _render_session_calc(session: dict, admin_name: str) -> list[str]:
         _SUB,
         _calc_row(session.get("increase", 0), "افزایش", op="+"),
         _calc_row(session.get("settle", 0), "تسویه", op="-"),
-        _calc_row(session.get("admin_share", 0), f"سهم ادمین از حق‌واسطه ({pct}٪)", op="-"),
+        _calc_row(session.get("admin_share", 0), f"سهم ادمین ({pct}٪)", op="-"),
         "  ─────────",
         _calc_row(session_net, "جمع", op="="),
         _settlement_footer(session_net, admin_name),
-        "",
-        "  ℹ️ سهم ادمین از حق‌واسطه طلب ادمین از مالک است.",
     ]
 
 
@@ -613,6 +654,88 @@ def set_share(chat_id, admin_id, percent):
     return percent
 
 
+# انتظار ورود درصد دلخواه سهم ادمین از پیوی مالک
+_share_wait: dict[int, dict] = {}
+
+
+def set_share_wait(owner_id: int, *, chat_id: int, admin_id: int, session_id: str | None = None) -> None:
+    _share_wait[int(owner_id)] = {
+        "chat_id": int(chat_id),
+        "admin_id": int(admin_id),
+        "session_id": session_id or None,
+    }
+
+
+def is_waiting_share_percent(owner_id: int) -> bool:
+    return int(owner_id) in _share_wait
+
+
+def pop_share_wait(owner_id: int) -> dict | None:
+    return _share_wait.pop(int(owner_id), None)
+
+
+async def handle_share_custom_text(message, bot) -> bool:
+    """پردازش عدد دلخواه سهم ادمین در پیوی."""
+    from bot.cache_manager import is_owner
+    from bot.utils import normalize_numbers
+
+    uid = int(message.from_user.id)
+    data = pop_share_wait(uid)
+    if not data:
+        return False
+
+    text = (message.text or "").strip()
+    if text in ("لغو", "انصراف", "cancel", "Cancel"):
+        await message.answer("❌ تنظیم درصد لغو شد.")
+        return True
+
+    chat_id = int(data["chat_id"])
+    admin_id = int(data["admin_id"])
+    session_id = data.get("session_id")
+    if not is_owner(chat_id, uid):
+        await message.answer("❌ فقط مالک می‌تواند سهم ادمین را تغییر دهد.")
+        return True
+
+    raw = normalize_numbers(text).replace("%", "").replace("٪", "").strip()
+    try:
+        percent = int(raw)
+    except ValueError:
+        set_share_wait(uid, chat_id=chat_id, admin_id=admin_id, session_id=session_id)
+        await message.answer(
+            "⚠️ یک عدد بین ۰ تا ۱۰۰ بنویسید.\n"
+            "مثال: <code>45</code>\n"
+            "برای لغو: لغو",
+            parse_mode="HTML",
+        )
+        return True
+
+    if not (0 <= percent <= 100):
+        set_share_wait(uid, chat_id=chat_id, admin_id=admin_id, session_id=session_id)
+        await message.answer("⚠️ درصد باید بین ۰ تا ۱۰۰ باشد.")
+        return True
+
+    new_pct = await set_share(chat_id, admin_id, percent)
+    await message.answer(
+        f"✅ سهم ادمین روی {new_pct}٪ تنظیم شد.\n"
+        "گزارش‌های بعدی با درصد جدید محاسبه می‌شوند."
+    )
+    if session_id:
+        session = await get_activity_session(chat_id, session_id)
+        if session:
+            kb = report_keyboard(
+                chat_id, [], session_id=session_id,
+                selected_admin=session["admin_id"], session=session,
+            )
+            await _send_fresh_message(bot, uid, render_session_card(session), kb)
+            return True
+    rows = await report(chat_id, "0")
+    await _send_fresh_message(
+        bot, uid, render(rows, "0"),
+        report_keyboard(chat_id, rows, "0", selected_admin=admin_id),
+    )
+    return True
+
+
 @sync_to_async
 def get_admin_share_percent(chat_id, admin_id) -> int:
     cfg = AdminAccounting.objects.filter(
@@ -647,7 +770,7 @@ def start_activity(chat_id, admin_id):
         open_session.ended_at = now
         open_session.end_group_balance = start_bal
         open_session.save(update_fields=["ended_at", "end_group_balance"])
-        closed_summary = _build_session_row(cid, open_session)
+        closed_summary = _build_session_row(cid, open_session, detail=False)
 
     AdminAccounting.objects.filter(telegram_chat_id=cid, is_active_cashier=True).update(
         is_active_cashier=False
@@ -693,7 +816,7 @@ def end_activity(chat_id):
         session.end_group_balance = end_bal
         session.save(update_fields=["ended_at", "end_group_balance"])
         closed = 1
-        closed_summary = _build_session_row(cid, session)
+        closed_summary = _build_session_row(cid, session, detail=False)
     AdminAccounting.objects.filter(telegram_chat_id=cid, is_active_cashier=True).update(
         is_active_cashier=False, activity_started_at=None
     )
@@ -803,35 +926,50 @@ def get_active_session_live(chat_id):
     )
     if not session:
         return None
-    return _build_session_row(chat_id, session)
+    return _build_session_row(chat_id, session, detail=True)
 
 
 @sync_to_async
 def list_activity_sessions(chat_id, limit=40):
+    """سبک: فقط متا برای انتخاب روز — بدون اسکن تراکنش/ساعتی."""
     sessions = list(
         AdminActivitySession.objects.filter(telegram_chat_id=int(chat_id)).order_by("-started_at")[
             :limit
         ]
     )
-    rows = [_build_session_row(chat_id, s) for s in sessions]
+    return [_build_session_row(chat_id, s, meta_only=True) for s in sessions]
+
+
+@sync_to_async
+def list_activity_sessions_for_day(chat_id, day_key: str):
+    """مالی همان روز بدون hourly — برای صفحهٔ روز."""
+    start, end = _day_bounds(day_key)
+    sessions = list(
+        AdminActivitySession.objects.filter(
+            telegram_chat_id=int(chat_id),
+            started_at__gte=start,
+            started_at__lt=end,
+        ).order_by("started_at")
+    )
+    rows = [_build_session_row(chat_id, s, detail=False) for s in sessions]
     return _filter_spurious_sessions(rows)
 
 
 @sync_to_async
 def list_offschedule_day(chat_id, day_key: str):
-    return list_offschedule_for_day(chat_id, day_key)
+    return list_offschedule_for_day(chat_id, day_key, detail=False)
 
 
 @sync_to_async
 def list_activity_day_keys(chat_id, limit=14):
-    """روزهای دارای بازه رسمی یا خارج از برنامه."""
+    """روزهای دارای بازه رسمی یا تراکنش نقدی ادمین."""
     sessions = list(
         AdminActivitySession.objects.filter(telegram_chat_id=int(chat_id))
         .order_by("-started_at")
         .values_list("started_at", flat=True)[:200]
     )
     days = {timezone.localtime(s).strftime("%Y-%m-%d") for s in sessions}
-    days |= _days_with_offschedule_activity(chat_id, lookback_days=max(30, limit + 5))
+    days |= _activity_cash_days(chat_id, lookback_days=max(30, limit + 5))
     today = timezone.localtime().strftime("%Y-%m-%d")
     days.add(today)
     return sorted(days, reverse=True)[:limit]
@@ -842,13 +980,13 @@ def get_activity_session(chat_id, session_id):
     parsed = parse_offschedule_id(session_id)
     if parsed:
         admin_id, day_key = parsed
-        return _build_offschedule_row(chat_id, admin_id, day_key)
+        return _build_offschedule_row(chat_id, admin_id, day_key, detail=True)
     session = AdminActivitySession.objects.filter(
         telegram_chat_id=int(chat_id), id=int(session_id)
     ).first()
     if not session:
         return None
-    return _build_session_row(chat_id, session)
+    return _build_session_row(chat_id, session, detail=True)
 
 
 def session_title(session_id, sessions=None):
@@ -890,7 +1028,6 @@ def render(rows, title=None):
     total_inc = sum(r["increase"] for r in rows)
     total_settle = sum(r["settle"] for r in rows)
     total_fee = sum(r["fee"] for r in rows)
-    total_cash = sum(r.get("cash_balance", r["increase"] - r["settle"]) for r in rows)
     total_admin_share = sum(r["admin_share"] for r in rows)
     total_owner_fee = sum(r.get("owner_fee", r["fee"] - r["admin_share"]) for r in rows)
     total_admin_pays = sum(
@@ -903,41 +1040,22 @@ def render(rows, title=None):
     lines = [
         "📊 گزارش مالی ادمین‌ها",
         f"📅 {title}",
-        "━━━━━━━━━━━━━━━━━━",
-        "📦 خلاصه بازه",
-        f"👥 تعداد ادمین: {len(rows)}",
-        f"➕ مجموع افزایش اعضا: {total_inc:,}",
-        f"🧾 مجموع تسویه اعضا: {total_settle:,}",
-        f"💵 تراز نقدی (افزایش − تسویه): {_fmt_money(total_cash)}",
-        f"💹 مجموع حق واسطه: {total_fee:,}",
-        f"💼 سهم ادمین‌ها از حق واسطه: {total_admin_share:,}",
-        f"👑 سهم مالک از حق واسطه: {total_owner_fee:,}",
-        "────────",
-        f"🔻 ادمین‌ها باید به مالک بزنند: {total_admin_pays:,}",
-        f"💸 مالک باید به ادمین‌ها بزند: {total_owner_pays:,}",
-        "━━━━━━━━━━━━━━━━━━",
-        "ℹ️ تراز نقدی = افزایش − تسویه",
-        "ℹ️ سهم ادمین فقط از حق‌واسطه محاسبه می‌شود",
-        "ℹ️ مبلغ نهایی = تراز نقدی − سهم ادمین از حق‌واسطه",
-        "ℹ️ مثبت = ادمین → مالک | منفی = مالک → ادمین",
+        _SEP,
+        f"👥 {len(rows)} ادمین",
+        f"➕ افزایش: {total_inc:,}   🧾 تسویه: {total_settle:,}",
+        f"💹 حق واسطه: {total_fee:,}  (ادمین {total_admin_share:,} · مالک {total_owner_fee:,})",
+        f"🏁 ادمین→مالک: {total_admin_pays:,}  |  مالک→ادمین: {total_owner_pays:,}",
     ]
     if not rows:
         return "\n".join(lines + ["", "در این بازه تراکنشی ثبت نشده است."])
 
     for i, r in enumerate(rows, 1):
-        cash = r.get("cash_balance", r["increase"] - r["settle"])
-        owner_fee = r.get("owner_fee", r["fee"] - r["admin_share"])
         pct = int(r.get("percent") or 0)
         lines += [
-            f"\n{i}) 👤 {html_escape(r.get('admin_name') or r['admin_id'])}",
-            f"🆔 <code>{r['admin_id']}</code>",
-            f"➕ افزایش اعضا: {r['increase']:,}",
-            f"🧾 تسویه اعضا: {r['settle']:,}",
-            f"💵 تراز نقدی: {_fmt_money(cash)}",
-            f"💹 حق واسطه: {r['fee']:,}",
-            f"💼 سهم ادمین ({pct}٪ از حق واسطه): {r['admin_share']:,}",
-            f"👑 سهم مالک از حق واسطه: {owner_fee:,}",
-            settlement_line(r),
+            "",
+            f"{i}) 👤 {html_escape(r.get('admin_name') or r['admin_id'])}",
+            f"   ➕{r['increase']:,}  🧾{r['settle']:,}  💹{r['fee']:,}  💼{pct}٪→{r['admin_share']:,}",
+            f"   {settlement_line(r)}",
         ]
     return "\n".join(lines)
 
@@ -956,20 +1074,13 @@ def render_activities_list(sessions, day_keys: list[str] | None = None):
     if not keys:
         return (
             "📋 بازه‌های فعالیت\n\n"
-            "هنوز بازه‌ای ثبت نشده است.\n\n"
-            "با دستور «شروع فعالیت» اولین بازه ساخته می‌شود.\n"
-            "تراکنش‌های خارج از بازه فعالیت در «خارج از برنامه» دیده می‌شوند."
+            "هنوز بازه‌ای ثبت نشده.\n"
+            "با «شروع فعالیت» اولین بازه ساخته می‌شود."
         )
     grouped = defaultdict(list)
     for s in sessions:
         grouped[s["started_at"].strftime("%Y-%m-%d")].append(s)
-    lines = [
-        "📋 بازه‌های فعالیت — انتخاب روز",
-        "━━━━━━━━━━━━━━━━━━",
-        "هر بازه با «شروع فعالیت» باز و با «پایان فعالیت» یا «شروع فعالیت» بعدی بسته می‌شود.",
-        "تراکنش‌های بیرون از این بازه‌ها در «خارج از برنامه» همان روز ثبت می‌شوند.",
-        "",
-    ]
+    lines = ["📋 بازه‌های فعالیت", _SEP]
     for day_key in keys:
         day_sessions = grouped.get(day_key) or []
         try:
@@ -980,13 +1091,15 @@ def render_activities_list(sessions, day_keys: list[str] | None = None):
             sample_local = timezone.localtime()
         weekday = PERSIAN_WEEKDAYS[sample_local.weekday()]
         jdate = jdatetime.datetime.fromgregorian(datetime=sample_local).strftime("%Y/%m/%d")
+        n = len(day_sessions)
         active_cnt = sum(1 for s in day_sessions if s.get("is_active"))
-        extra = f" | {len(day_sessions)} بازه" if day_sessions else " | خارج از برنامه"
-        if active_cnt:
-            extra += f" | 🟢 {active_cnt} فعال"
-        lines.append(f"📆 {weekday} — {jdate}{extra}")
-    lines.append("")
-    lines.append("👇 روز مورد نظر را از دکمه‌های زیر انتخاب کنید.")
+        if n:
+            extra = f"{n} بازه"
+            if active_cnt:
+                extra += f" · 🟢{active_cnt}"
+        else:
+            extra = "خارج از برنامه"
+        lines.append(f"📆 {weekday} {jdate} — {extra}")
     return "\n".join(lines)
 
 
@@ -1002,70 +1115,84 @@ def render_day_sessions(sessions, day_key: str, offs: list[dict] | None = None):
         sample = (day_sessions or offs)[0]["started_at"]
     weekday = PERSIAN_WEEKDAYS[sample.weekday()]
     jdate = jdatetime.datetime.fromgregorian(datetime=sample).strftime("%Y/%m/%d")
-    lines = [f"📆 بازه‌های {weekday} — {jdate}", "━━━━━━━━━━━━━━━━━━", ""]
+    lines = [f"📆 {weekday} — {jdate}", _SEP]
     if day_sessions:
-        lines.append("⏱ بازه‌های برنامه‌ای")
-        lines.append(_SUB)
         for s in sorted(day_sessions, key=lambda x: x["started_at"]):
             status = "🟢" if s.get("is_active") else "⚫"
             end_txt = s["ended_at"].strftime("%H:%M") if s.get("ended_at") else "..."
             lines.append(
-                f"{status} {s['started_at']:%H:%M} → {end_txt} | {html_escape(s.get('admin_name', ''))}"
+                f"{status} {s['started_at']:%H:%M}→{end_txt} | {html_escape(s.get('admin_name', ''))}"
             )
             lines.append(f"   {settlement_line_signed(s.get('session_net', s.get('net', 0)))}")
-            lines.append("")
+            bits = []
+            ch_n = int(s.get("challenge_count") or 0)
+            if ch_n > 0:
+                bits.append(f"🏆{ch_n}")
+            lg_n = int(s.get("league_prize_count") or 0)
+            if lg_n > 0:
+                bits.append(f"🏅{lg_n}")
+            if bits:
+                lines.append(f"   {' · '.join(bits)}")
     if offs:
+        if day_sessions:
+            lines.append("")
         lines.append("🟠 خارج از برنامه")
-        lines.append(_SUB)
-        lines.append("تراکنش‌هایی که داخل بازه شروع/پایان فعالیت ادمین نبوده‌اند.")
-        lines.append("")
         for o in offs:
-            mark = "🟠"
-            active = " (امروز)" if o.get("is_active") else ""
+            active = " · امروز" if o.get("is_active") else ""
             lines.append(
-                f"{mark} خارج از برنامه{active} | {html_escape(o.get('admin_name', ''))}"
+                f"🟠 {html_escape(o.get('admin_name', ''))}{active}"
             )
             lines.append(f"   {settlement_line_signed(o.get('session_net', o.get('net', 0)))}")
-            lines.append("")
-    lines.append("👇 برای جزئیات کامل، دکمه همان بازه را بزنید.")
     return "\n".join(lines)
 
 
 def render_session_card(session: dict) -> str:
-    """خلاصه تمیز — اعداد اصلی روی دکمه‌های اینلاین هستند."""
+    """کپشن کامل بازه — دکمه‌ها فقط برای ریز/عملیات."""
     from html import escape as html_escape
-    admin_name = html_escape(session.get("admin_name") or session.get("admin_id"))
+    admin_name_raw = session.get("admin_name") or session.get("admin_id")
+    admin_name = html_escape(admin_name_raw)
     session_net = int(session.get("session_net", 0))
+    pct = int(session.get("percent") or 0)
     if session.get("is_offschedule"):
-        status = "🟠 خارج از برنامه" + (" · امروز باز" if session.get("is_active") else " · بسته")
-        title = "📊 فعالیت خارج از برنامه"
-        lines = [
-            title,
-            _SEP,
-            f"👤 {admin_name}",
-            f"📅 {_session_time_line(session)}",
-            f"📌 {status}",
-            "  ℹ️ فقط تراکنش‌های بیرون از بازه شروع/پایان فعالیت",
-        ]
+        status = "🟠 خارج از برنامه" + (" · باز" if session.get("is_active") else "")
+        title = "📊 خارج از برنامه"
     else:
         status = "🟢 فعال" if session.get("is_active") else "⚫ بسته"
-        title = (
-            "📊 گزارش لحظه‌ای بازه فعالیت"
-            if session.get("is_active")
-            else "📊 گزارش بازه فعالیت"
+        title = "📊 بازه فعالیت"
+
+    lines = [
+        title,
+        _SEP,
+        f"👤 {admin_name}",
+        f"📅 {_session_time_line(session)}",
+        f"📌 {status}",
+        "",
+        "📦 عملکرد",
+        f"  ➕ افزایش: {int(session.get('increase', 0) or 0):,}",
+        f"  🧾 تسویه: {int(session.get('settle', 0) or 0):,}",
+        f"  💹 حق واسطه: {int(session.get('fee', 0) or 0):,}",
+        f"  💼 سهم ادمین ({pct}٪): {int(session.get('admin_share', 0) or 0):,}",
+        f"  💵 تراز نقدی: {_fmt_money(session.get('cash_balance', 0))}",
+    ]
+    if not session.get("is_offschedule"):
+        end_bal = session.get("end_group_balance")
+        end_txt = f"{int(end_bal):,}" if end_bal is not None else "—"
+        lines.append(
+            f"  🏦 تراز گروه: {int(session.get('start_group_balance', 0) or 0):,} → {end_txt}"
         )
-        lines = [
-            title,
-            _SEP,
-            f"👤 {admin_name}",
-            f"📅 {_session_time_line(session)}",
-            f"📌 {status}",
-        ]
-        if session.get("is_active"):
-            lines.append("  ℹ️ بازه هنوز بسته نشده — اعداد تا همین لحظه")
-    lines += ["", "🏁 نتیجه"]
-    lines.extend(_settlement_parties(session_net, session.get("admin_name") or "ادمین"))
-    lines += ["", "👇 اعداد کلیدی و توضیحات را از دکمه‌ها ببینید."]
+    ch_n = int(session.get("challenge_count") or 0)
+    lg_n = int(session.get("league_prize_count") or 0)
+    if ch_n or lg_n:
+        lines.append("")
+        if ch_n:
+            lines.append(
+                f"🏆 چالش: {ch_n} · {int(session.get('challenge_prize_total') or 0):,} واحد"
+            )
+        if lg_n:
+            lines.append(
+                f"🏅 لیگ: {lg_n} · {int(session.get('league_prize_total') or 0):,} واحد"
+            )
+    lines += ["", "🏁 نتیجه", _settlement_footer(session_net, str(admin_name_raw))]
     return "\n".join(lines)
 
 
@@ -1115,6 +1242,15 @@ def render_session_activity_info(session: dict) -> str:
         ("👑 سهم مالک", session.get("owner_fee", 0)),
         ("💵 تراز نقدی", session.get("cash_balance", 0)),
     ], empty="بدون تراکنش مستقیم"))
+    lines.append(f"🏆 تعداد چالش: {int(session.get('challenge_count') or 0)}")
+    lines.append(
+        f"🎁 جمع واحد چالش‌ها: {int(session.get('challenge_prize_total') or 0):,}"
+    )
+    lines.append(f"🏅 تعداد جایزه لیگ: {int(session.get('league_prize_count') or 0)}")
+    lines.append(
+        f"🎁 جمع جایزه لیگ: {int(session.get('league_prize_total') or 0):,}"
+    )
+    lines.append("  ℹ️ جوایز لیگ از طرف مالک است و در افزایش ادمین لحاظ نمی‌شود")
     return "\n".join(lines)
 
 
@@ -1319,7 +1455,7 @@ def get_settlement_timeline(chat_id, session_id):
     parsed = parse_offschedule_id(session_id)
     if parsed:
         admin_id, day_key = parsed
-        row = _build_offschedule_row(chat_id, admin_id, day_key)
+        row = _build_offschedule_row(chat_id, admin_id, day_key, detail=True)
         start, end = _day_bounds(day_key)
         now = timezone.now()
         if timezone.localtime(now).strftime("%Y-%m-%d") == day_key:
@@ -1335,7 +1471,7 @@ def get_settlement_timeline(chat_id, session_id):
     ).first()
     if not session:
         return None, []
-    row = _build_session_row(chat_id, session)
+    row = _build_session_row(chat_id, session, detail=True)
     end = session.ended_at or timezone.now()
     events = build_settlement_timeline(
         chat_id, session.admin_id, session.started_at, end,
@@ -1364,13 +1500,19 @@ def render_session_detail(session: dict) -> str:
 def format_closed_session_summary(session: dict | None) -> str:
     if not session:
         return ""
-    return "\n".join([
+    lines = [
         "",
         "📋 خلاصه بازه بسته‌شده",
         f"👤 {session.get('admin_name') or session.get('admin_id')}",
         f"💼 تراز: {session.get('start_group_balance', 0):,} → {session.get('end_group_balance', 0):,}",
         settlement_line_signed(session.get("session_net", 0)),
-    ])
+    ]
+    lg_n = int(session.get("league_prize_count") or 0)
+    if lg_n > 0:
+        lines.append(
+            f"🏅 لیگ: {lg_n} جایزه · {int(session.get('league_prize_total') or 0):,} واحد (مالک)"
+        )
+    return "\n".join(lines)
 
 
 def format_start_activity_group(result: dict) -> str:
@@ -1466,63 +1608,36 @@ def report_keyboard(chat_id, rows, mode="0", selected_admin=None, session_id=Non
     kb = []
     if session_id:
         snap = session or {}
-        start_bal = int(snap.get("start_group_balance", 0) or 0)
-        end_bal = snap.get("end_group_balance")
-        end_lbl = "الان" if snap.get("is_active") else "پایان"
-        end_txt = f"{int(end_bal):,}" if end_bal is not None else "—"
-        net = int(snap.get("session_net", 0) or 0)
-        inc = int(snap.get("increase", 0) or 0)
-        stl = int(snap.get("settle", 0) or 0)
+        pct_now = int(snap.get("percent", 50) or 50)
         prefix = f"aareport:{chat_id}:act:{session_id}"
-        if snap.get("is_offschedule"):
-            kb.append([
-                InlineKeyboardButton(text="🟠 خارج از برنامه", callback_data=f"{prefix}:info:bal"),
-            ])
-        else:
-            kb.append([
-                InlineKeyboardButton(text=f"شروع: {start_bal:,}"[:40], callback_data=f"{prefix}:info:bal"),
-                InlineKeyboardButton(text=f"{end_lbl}: {end_txt}"[:40], callback_data=f"{prefix}:info:bal"),
-            ])
+        admin_for_share = selected_admin or snap.get("admin_id")
+        # فقط عملیات — اعداد داخل کپشن
         kb.append([
-            InlineKeyboardButton(text=_settle_direction_label(net)[:40], callback_data=f"{prefix}:info:net"),
+            InlineKeyboardButton(text="➕ ریز افزایش", callback_data=f"{prefix}:{admin_for_share}:increase" if admin_for_share else f"{prefix}:info:act"),
+            InlineKeyboardButton(text="🧾 ریز تسویه", callback_data=f"{prefix}:{admin_for_share}:settle" if admin_for_share else f"{prefix}:info:act"),
         ])
+        if admin_for_share:
+            kb.append([
+                InlineKeyboardButton(text="💹 حق واسطه", callback_data=f"{prefix}:{admin_for_share}:fee"),
+                InlineKeyboardButton(text="🎲 بازی‌ها", callback_data=f"{prefix}:{admin_for_share}:games"),
+            ])
         kb.append([
-            InlineKeyboardButton(text=f"➕ افزایش: {inc:,}"[:40], callback_data=f"{prefix}:info:act"),
-            InlineKeyboardButton(text=f"🧾 تسویه: {stl:,}"[:40], callback_data=f"{prefix}:info:act"),
-        ])
-        kb.append([
-            InlineKeyboardButton(text="🧮 محاسبه", callback_data=f"{prefix}:info:calc"),
             InlineKeyboardButton(text="📦 جزئیات ادمین", callback_data=f"{prefix}:info:act"),
-        ])
-        kb.append([
-            InlineKeyboardButton(text="👥 سایر ادمین", callback_data=f"{prefix}:info:other"),
             InlineKeyboardButton(text="🕒 ساعتی", callback_data=f"{prefix}:info:hour"),
         ])
         kb.append([
-            InlineKeyboardButton(text="📟 تسویه لحظه‌ای با مالک", callback_data=f"{prefix}:live"),
+            InlineKeyboardButton(text="📟 تسویه لحظه‌ای", callback_data=f"{prefix}:live"),
         ])
-        pct_now = int(snap.get("percent", 50) or 50)
-        admin_for_share = selected_admin or snap.get("admin_id")
-        if admin_for_share:
-            kb.append([
-                InlineKeyboardButton(
-                    text=f"💼 سهم ادمین: {pct_now}٪"[:40],
-                    callback_data=f"aareport:{chat_id}:share:{admin_for_share}:{session_id}",
-                ),
-            ])
         kb.append([
-            InlineKeyboardButton(text="🔄 بروزرسانی", callback_data=prefix),
+            InlineKeyboardButton(
+                text=f"💼 سهم {pct_now}٪"[:40],
+                callback_data=f"aareport:{chat_id}:share:{admin_for_share}:{session_id}" if admin_for_share else prefix,
+            ),
+        ])
+        kb.append([
+            InlineKeyboardButton(text="🔄", callback_data=prefix),
             InlineKeyboardButton(text="📋 بازه‌ها", callback_data=f"aareport:{chat_id}:actlist"),
         ])
-        if selected_admin:
-            kb.append([
-                InlineKeyboardButton(text="🧾 لیست تسویه", callback_data=f"{prefix}:{selected_admin}:settle"),
-                InlineKeyboardButton(text="➕ لیست افزایش", callback_data=f"{prefix}:{selected_admin}:increase"),
-            ])
-            kb.append([
-                InlineKeyboardButton(text="💹 حق واسطه", callback_data=f"{prefix}:{selected_admin}:fee"),
-                InlineKeyboardButton(text="🎲 بازی‌ها", callback_data=f"{prefix}:{selected_admin}:games"),
-            ])
         return InlineKeyboardMarkup(inline_keyboard=kb)
 
     kb.append(
@@ -1530,13 +1645,13 @@ def report_keyboard(chat_id, rows, mode="0", selected_admin=None, session_id=Non
             InlineKeyboardButton(text="امروز", callback_data=f"aareport:{chat_id}:0"),
             InlineKeyboardButton(text="دیروز", callback_data=f"aareport:{chat_id}:1"),
             InlineKeyboardButton(text="پریروز", callback_data=f"aareport:{chat_id}:2"),
+            InlineKeyboardButton(text="هفتگی", callback_data=f"aareport:{chat_id}:w"),
         ]
     )
-    kb.append([InlineKeyboardButton(text="هفتگی", callback_data=f"aareport:{chat_id}:w")])
     kb.append(
         [
-            InlineKeyboardButton(text="🔄 بروزرسانی", callback_data=f"aareport:{chat_id}:{mode}"),
-            InlineKeyboardButton(text="📋 بازه‌های فعالیت", callback_data=f"aareport:{chat_id}:actlist"),
+            InlineKeyboardButton(text="🔄", callback_data=f"aareport:{chat_id}:{mode}"),
+            InlineKeyboardButton(text="📋 بازه‌ها", callback_data=f"aareport:{chat_id}:actlist"),
         ]
     )
 
@@ -1567,7 +1682,7 @@ def report_keyboard(chat_id, rows, mode="0", selected_admin=None, session_id=Non
         )
         kb.append([
             InlineKeyboardButton(
-                text="💼 تغییر سهم ادمین",
+                text="💼 سهم ادمین",
                 callback_data=f"aareport:{chat_id}:share:{selected_admin}",
             ),
         ])
@@ -1588,11 +1703,14 @@ def activities_keyboard(chat_id, sessions, *, day_key: str | None = None, sessio
                 [InlineKeyboardButton(text=label[:40], callback_data=f"aareport:{chat_id}:act:{s['id']}")]
             )
         for o in (offs or []):
-            label = f"🟠 خارج {str(o.get('admin_name') or o['admin_id'])[:12]}"
+            label = f"🟠 {(str(o.get('admin_name') or o['admin_id']))[:14]}"
             kb.append(
                 [InlineKeyboardButton(text=label[:40], callback_data=f"aareport:{chat_id}:act:{o['id']}")]
             )
-        kb.append([InlineKeyboardButton(text="📋 روزها", callback_data=f"aareport:{chat_id}:actlist")])
+        kb.append([
+            InlineKeyboardButton(text="📋 روزها", callback_data=f"aareport:{chat_id}:actlist"),
+            InlineKeyboardButton(text="📊 امروز", callback_data=f"aareport:{chat_id}:0"),
+        ])
         return InlineKeyboardMarkup(inline_keyboard=kb)
 
     keys = day_keys
@@ -1604,15 +1722,23 @@ def activities_keyboard(chat_id, sessions, *, day_key: str | None = None, sessio
     grouped = defaultdict(list)
     for s in sessions:
         grouped[s["started_at"].strftime("%Y-%m-%d")].append(s)
+    row_btns = []
     for dk in keys[:14]:
         sample = grouped[dk][0]["started_at"] if grouped.get(dk) else None
         if sample:
-            label = f"📆 {sample:%m/%d} ({len(grouped[dk])})"
+            label = f"📆 {sample:%m/%d}"
+            if grouped[dk]:
+                label += f" ({len(grouped[dk])})"
         else:
-            label = f"📆 {dk[5:]} (خارج)"
-        kb.append(
-            [InlineKeyboardButton(text=label[:40], callback_data=f"aareport:{chat_id}:actday:{dk}")]
+            label = f"📆 {dk[5:]}"
+        row_btns.append(
+            InlineKeyboardButton(text=label[:40], callback_data=f"aareport:{chat_id}:actday:{dk}")
         )
+        if len(row_btns) == 2:
+            kb.append(row_btns)
+            row_btns = []
+    if row_btns:
+        kb.append(row_btns)
     kb.append([InlineKeyboardButton(text="📊 گزارش امروز", callback_data=f"aareport:{chat_id}:0")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
@@ -1766,6 +1892,8 @@ async def handle_report_callback(call, bot):
         # aareport:chat:share:admin:sid
         # aareport:chat:share:admin:set:PCT
         # aareport:chat:share:admin:sid:set:PCT
+        # aareport:chat:share:admin:custom
+        # aareport:chat:share:admin:sid:custom
         admin_id = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else None
         if admin_id is None:
             await call.answer("ادمین نامعتبر", show_alert=True)
@@ -1773,17 +1901,23 @@ async def handle_report_callback(call, bot):
 
         session_id = None
         set_pct = None
+        want_custom = False
         if len(parts) >= 6 and parts[-2] == "set":
             set_pct = int(parts[-1])
             if len(parts) >= 7:
                 session_id = parts[4]
         elif len(parts) >= 5 and parts[4] == "set" and len(parts) >= 6:
             set_pct = int(parts[5])
+        elif len(parts) >= 5 and parts[-1] == "custom":
+            want_custom = True
+            if len(parts) >= 6:
+                session_id = parts[4]
         elif len(parts) >= 5:
             session_id = parts[4]
 
         if set_pct is not None:
             new_pct = await set_share(chat_id, admin_id, set_pct)
+            pop_share_wait(uid)
             await call.answer(f"سهم {new_pct}٪ شد", show_alert=True)
             if session_id:
                 session = await get_activity_session(chat_id, session_id)
@@ -1801,11 +1935,39 @@ async def handle_report_callback(call, bot):
             )
             return True
 
+        if want_custom:
+            set_share_wait(uid, chat_id=chat_id, admin_id=admin_id, session_id=session_id)
+            await _send_fresh_message(
+                bot, uid,
+                "✏️ درصد دلخواه سهم ادمین را بنویسید\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "عدد بین ۰ تا ۱۰۰\n"
+                "مثال: <code>45</code>\n\n"
+                "برای لغو: لغو",
+            )
+            await call.answer()
+            return True
+
         back = f"aareport:{chat_id}:act:{session_id}" if session_id else f"aareport:{chat_id}:0:{admin_id}"
         set_prefix = (
             f"aareport:{chat_id}:share:{admin_id}:{session_id}:set"
             if session_id else f"aareport:{chat_id}:share:{admin_id}:set"
         )
+        custom_cb = (
+            f"aareport:{chat_id}:share:{admin_id}:{session_id}:custom"
+            if session_id else f"aareport:{chat_id}:share:{admin_id}:custom"
+        )
+        cur_pct = await get_admin_share_percent(chat_id, admin_id)
+        admin_name = str(admin_id)
+        try:
+            u = await bot.get_chat(admin_id)
+            admin_name = (u.full_name or u.first_name or "").strip() or str(admin_id)
+        except Exception:
+            pass
+        if session_id:
+            session = await get_activity_session(chat_id, session_id)
+            if session and session.get("admin_name"):
+                admin_name = session["admin_name"]
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="0٪", callback_data=f"{set_prefix}:0"),
@@ -1816,11 +1978,16 @@ async def handle_report_callback(call, bot):
                 InlineKeyboardButton(text="70٪", callback_data=f"{set_prefix}:70"),
                 InlineKeyboardButton(text="100٪", callback_data=f"{set_prefix}:100"),
             ],
+            [InlineKeyboardButton(text="✏️ عدد دلخواه", callback_data=custom_cb)],
             [InlineKeyboardButton(text="🔙 بازگشت", callback_data=back)],
         ])
         await _send_fresh_message(
             bot, uid,
-            "💼 تغییر سهم ادمین از حق‌واسطه\n\nدرصد دلخواه را انتخاب کنید.",
+            "💼 تغییر سهم ادمین از حق‌واسطه\n\n"
+            f"ادمین: {admin_name}\n"
+            f"درصد فعلی: {cur_pct}٪\n\n"
+            "درصد دلخواه را از دکمه‌ها انتخاب کنید\n"
+            "یا «✏️ عدد دلخواه» را بزنید.",
             kb,
         )
         await call.answer()
@@ -1831,7 +1998,7 @@ async def handle_report_callback(call, bot):
         if not day_key:
             await call.answer("روز نامعتبر", show_alert=True)
             return True
-        sessions = await list_activity_sessions(chat_id)
+        sessions = await list_activity_sessions_for_day(chat_id, day_key)
         offs = await list_offschedule_day(chat_id, day_key)
         text = render_day_sessions(sessions, day_key, offs)
         kb = activities_keyboard(chat_id, sessions, day_key=day_key, offs=offs)
@@ -1946,8 +2113,7 @@ async def handle_report_callback(call, bot):
         rows = await report(chat_id, session_id=session_id)
         if selected_admin:
             rows = [r for r in rows if r["admin_id"] == int(selected_admin)]
-        sessions = await list_activity_sessions(chat_id)
-        title = session_title(session_id, sessions)
+        title = session_title(session_id)
         full_rows = await report(chat_id, session_id=session_id)
         await _send_fresh_message(
             bot,

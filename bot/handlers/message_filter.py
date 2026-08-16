@@ -13,10 +13,11 @@ from aiogram.types import Message, ChatPermissions
 from aiogram.dispatcher.event.bases import skip
 
 from bot import cache
-from bot.cache_manager import has_privilege
+from bot.cache_manager import has_privilege, is_vip
 from bot.helpers import (
     safe_send, contains_link, contains_username, is_night_time, log_action,
     db_add_warning, db_reset_warnings,
+    game_chat_lock_on, is_allowed_under_game_chat_lock,
 )
 
 router = Router()
@@ -159,12 +160,25 @@ async def enforce_filters(message: Message, bot: Bot):
     if has_privilege(chat_id, user_id):
         skip()
 
+    # قفل بازی: فقط پیام بازی / پیشنهاد شرط — ادمین از بالا معاف؛ ویژه اینجا معاف
+    if game_chat_lock_on(chat_id):
+        if is_vip(chat_id, user_id):
+            pass
+        elif not is_allowed_under_game_chat_lock(
+            message.text or message.caption,
+            has_dice=bool(message.dice),
+            has_game=bool(message.game),
+        ):
+            await _delete(message)
+            return
+
     locks = cache.GROUP_LOCKS.get(chat_id, {})
     # بدون قفل/فلود/شب — سریع رد شو (بدون اسکن متن/مدیا)
     if (
         chat_id not in cache.GROUP_LOCK
         and chat_id not in cache.NIGHT_MODE
         and chat_id not in cache.ANTI_FLOOD_ENABLED
+        and not game_chat_lock_on(chat_id)
         and not any(locks.values())
     ):
         skip()

@@ -26,6 +26,8 @@ def _load_from_db():
             cache.DICE_OPTION.add(cid)
         if getattr(group, "quiet_extra", False):
             cache.QUIET_EXTRA.add(cid)
+        if getattr(group, "game_chat_lock", False):
+            cache.GAME_CHAT_LOCK.add(cid)
         if getattr(group, "dice_turn_limit", 0):
             cache.DICE_TURN_LIMIT[cid] = int(group.dice_turn_limit)
 

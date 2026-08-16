@@ -3,7 +3,10 @@
 """
 from aiogram import Router, F, Bot
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton as Btn
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton as Btn,
+    ReplyKeyboardMarkup, KeyboardButton,
+)
 
 from bot import cache
 from bot.cache_manager import load_all_caches, is_owner, is_admin
@@ -49,9 +52,9 @@ _CREATOR_STATE: dict[int, str] = {}
 _INCREASE_ADMIN_MESSAGE: dict[int, int] = {}
 
 
-def _welcome_kb(bot_username: str) -> InlineKeyboardMarkup:
+def _welcome_kb(bot_username: str, *, creator: bool = False) -> InlineKeyboardMarkup:
     add_url = f"https://t.me/{bot_username}?startgroup=true"
-    return InlineKeyboardMarkup(inline_keyboard=[
+    rows = [
         [
             Btn(text="➕ افزودن ربات به گروه ↗️", url=add_url),
             Btn(text="🎲 تنظیمات گروه", callback_data="pv:group_settings"),
@@ -59,7 +62,25 @@ def _welcome_kb(bot_username: str) -> InlineKeyboardMarkup:
         [Btn(text="💰 پنل مالی گروه", callback_data="pv:finance")],
         [Btn(text=get_link_directory_title(), url=get_link_directory_url())],
         [Btn(text="📚 راهنمای ربات", callback_data="pv:help")],
-    ])
+    ]
+    if creator:
+        rows.append([Btn(text="👑 ورود به پنل ادمین", callback_data="cr:open")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _creator_reply_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="👑 ورود به پنل ادمین")]],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+def _clip_tg(text: str, limit: int = 4000) -> str:
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit("\n", 1)[0]
+    return cut + "\n…"
 
 
 def _creator_panel_kb() -> InlineKeyboardMarkup:
@@ -68,6 +89,24 @@ def _creator_panel_kb() -> InlineKeyboardMarkup:
 
     sens_on = is_admin_sensitive_hidden()
     return InlineKeyboardMarkup(inline_keyboard=[
+        [Btn(text="🏠 داشبورد ربات", callback_data="cr:dash")],
+        [
+            Btn(text="🕵️ گزارش چیت", callback_data="cr:cheat:7"),
+            Btn(text="📈 پیشرفت اعضا", callback_data="cr:progress"),
+        ],
+        [
+            Btn(text="🎮 بازی زنده", callback_data="cr:live"),
+            Btn(text="👥 گروه‌ها", callback_data="cr:groups:0"),
+        ],
+        [
+            Btn(text="💰 ثروتمندها", callback_data="cr:rich"),
+            Btn(text="📥 مالی باز", callback_data="cr:wd"),
+        ],
+        [Btn(text="🔎 بررسی کاربر", callback_data="cr:watch")],
+        [
+            Btn(text="⚠️ اخطار / میوت", callback_data="cr:mod"),
+            Btn(text="🎲 تاس ۲۴ساعت", callback_data="cr:act"),
+        ],
         [Btn(text="📊 وضعیت جوین اجباری", callback_data="cr:fj:status")],
         [Btn(text="روشن · جوین", callback_data="cr:fj:on"), Btn(text="خاموش · جوین", callback_data="cr:fj:off")],
         [Btn(text="⏰ زمان‌بندی جوین سازنده", callback_data="cr:fj:schedule"), Btn(text="♻️ حذف زمان‌بندی", callback_data="cr:fj:schedule_clear")],
@@ -96,7 +135,8 @@ def _creator_panel_text(name: str) -> str:
     return (
         f"👑 سلام {name}\n\n"
         "به <b>پنل سازنده تاسینو</b> خوش آمدید.\n"
-        "جوین اجباری، مخفی‌سازی ادمین، لینکدونی، ایموجی، تم تاس، بکاپ و کش را از اینجا مدیریت کنید.\n\n"
+        "جوین اجباری، گزارش چیت، پیشرفت اعضا، بازی زنده، بکاپ و کش را از اینجا مدیریت کنید.\n\n"
+        "دستورها: <code>/admin</code> · دکمه پایین صفحه · <code>/start</code>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"⚙️ Forced Join: {'روشن' if is_forced_join_active() else 'خاموش'}\n"
         f"🔒 مخفی حساس از ادمین: <b>{sens}</b>\n"
@@ -165,6 +205,17 @@ def _theme_panel_kb(page: int = 0) -> InlineKeyboardMarkup:
     ])
     kb.append([Btn(text="🔙 بازگشت به پنل", callback_data="cr:theme:back")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def _admin_back_kb(*, cheat: bool = False) -> InlineKeyboardMarkup:
+    rows = []
+    if cheat:
+        rows.append([
+            Btn(text="۷ روز", callback_data="cr:cheat:7"),
+            Btn(text="۳۰ روز", callback_data="cr:cheat:30"),
+        ])
+    rows.append([Btn(text="🔙 پنل ادمین", callback_data="cr:open")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _theme_item_text(theme_id: int, page: int = 0) -> str:
@@ -381,22 +432,74 @@ def _welcome_text(name: str, bot_username: str) -> str:
     )
 
 
-async def _send_welcome(message: Message, bot: Bot | None = None, user=None):
+async def _send_welcome(message: Message, bot: Bot | None = None, user=None, *, reply_kb: bool = False):
     user = user or message.from_user
     name = (user.first_name if user else None) or "کاربر"
-    if is_creator(user.id if user else message.from_user.id):
-        return await message.answer(
-            _creator_panel_text(name),
-            reply_markup=_creator_panel_kb(),
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
     bot = bot or message.bot
     me = await bot.get_me()
     username = me.username or "TasinoBot"
+    creator = is_creator(user.id if user else message.from_user.id)
     await message.answer(
         _welcome_text(name, username),
-        reply_markup=_welcome_kb(username),
+        reply_markup=_welcome_kb(username, creator=creator),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+    if creator and reply_kb:
+        await message.answer(
+            "👑 دکمه پایین صفحه یا /admin → پنل ادمین",
+            reply_markup=_creator_reply_kb(),
+        )
+
+
+async def _open_creator_panel(message: Message) -> None:
+    if message.from_user:
+        _CREATOR_STATE.pop(message.from_user.id, None)
+    name = (message.from_user.first_name if message.from_user else None) or "سازنده"
+    await message.answer(
+        _creator_panel_text(name),
+        reply_markup=_creator_panel_kb(),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
+@sync_to_async
+def _pv_join_ads_text() -> str | None:
+    """لیست جوین پنل تبلیغات — فقط اگر لینک فعالی باشد."""
+    from django.utils import timezone
+    from bot_setting.models import JoinMessage
+
+    now = timezone.localtime(timezone.now())
+    messages = JoinMessage.objects.filter(is_active=True).order_by("priority", "-created_at")
+    if not any((m.text or "").strip() and m.is_active_now(now) for m in messages):
+        return None
+    return JoinMessage.get_join_message()
+
+
+@router.message(Command("admin"))
+@router.message(F.text.in_({"ورود به پنل ادمین", "👑 ورود به پنل ادمین", "/admin"}))
+async def cmd_admin_panel(message: Message):
+    if not is_creator(message.from_user.id):
+        return await message.answer("⛔️ این پنل فقط برای سازنده است.")
+    return await _open_creator_panel(message)
+
+
+@router.message(
+    F.text,
+    F.func(lambda m: bool(m.from_user) and is_creator(m.from_user.id) and _CREATOR_STATE.get(m.from_user.id) == "await_watch_uid"),
+)
+async def cmd_creator_watch_uid(message: Message):
+    import re
+    m = re.search(r"(\d{5,})", message.text or "")
+    if not m:
+        return await message.answer("❌ شناسه عددی معتبر بفرستید. نمونه: <code>8810788620</code>", parse_mode="HTML")
+    _CREATOR_STATE.pop(message.from_user.id, None)
+    from bot.creator_admin import build_user_watch
+    text = await build_user_watch(int(m.group(1)))
+    await message.answer(
+        _clip_tg(text),
+        reply_markup=_admin_back_kb(),
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
@@ -416,15 +519,14 @@ async def start(message: Message, bot: Bot):
     await save_telegram_user(message.from_user.id, message.chat.id)
     _CREATOR_STATE.pop(message.from_user.id, None)
 
-    # وسط مسابقه پیوی — منوی استارت نیاید
+    # وسط بازی پیوی: منوی اصلی نیاد — فقط یادآوری بازی
     try:
-        from bot.pv_dice import user_busy, GAMES, handle_pv_game_text, ensure_sweeper
-        busy = user_busy(message.from_user.id)
-        if busy and busy[0] == "game":
-            game = GAMES.get(busy[1])
-            if game and game.get("status") not in ("finished", "cancelled"):
-                await ensure_sweeper(bot)
-                return await handle_pv_game_text(message, bot)
+        from bot.pv_dice import get_active_pv_game, _remind_in_game, ensure_sweeper
+        await ensure_sweeper(bot)
+        game = get_active_pv_game(message.from_user.id)
+        if game:
+            await _remind_in_game(bot, message.from_user.id, game)
+            return
     except Exception:
         pass
 
@@ -435,12 +537,47 @@ async def start(message: Message, bot: Bot):
                 reply_markup=join_required_keyboard(),
                 parse_mode="HTML",
             )
-    await _send_welcome(message, bot)
+    await _send_welcome(message, bot, reply_kb=True)
+    try:
+        join_text = await _pv_join_ads_text()
+        if join_text:
+            await message.answer(join_text, disable_web_page_preview=True)
+    except Exception:
+        pass
 
 
 def _waiting_settle_amount(message: Message) -> bool:
     from bot.accounts_panel import is_waiting_settle_amount
     return bool(message.from_user and is_waiting_settle_amount(message.from_user.id))
+
+
+def _waiting_user_admin(message: Message) -> bool:
+    from bot.user_admin import is_waiting_user_admin
+    return bool(message.from_user and is_waiting_user_admin(message.from_user.id))
+
+
+def _in_active_pv_game_msg(message: Message) -> bool:
+    if not message.from_user:
+        return False
+    try:
+        from bot.pv_dice import is_in_active_pv_game
+        return is_in_active_pv_game(message.from_user.id)
+    except Exception:
+        return False
+
+
+@router.message(F.text, F.func(_in_active_pv_game_msg))
+async def pv_dice_game_lock_text(message: Message, bot: Bot):
+    """وسط بازی پیوی: همه متن‌ها (از جمله /start و منو) فقط داخل بازی."""
+    from bot.pv_dice import handle_pv_game_text, ensure_sweeper
+    await ensure_sweeper(bot)
+    await handle_pv_game_text(message, bot)
+
+
+@router.message(F.text, F.func(_waiting_user_admin))
+async def pv_user_admin_amount_catch(message: Message, bot: Bot):
+    from bot.user_admin import handle_user_admin_text
+    await handle_user_admin_text(message, bot)
 
 
 @router.message(F.text, F.func(_waiting_settle_amount))
@@ -476,14 +613,70 @@ async def pv_withdrawal_catch(message: Message, bot: Bot):
     await handle_text(bot, message.from_user.id, message.text or "")
 
 
+def _waiting_pv_search(message: Message) -> bool:
+    from bot.pv_search import is_waiting_pv_search
+    return bool(message.from_user and is_waiting_pv_search(message.from_user.id))
+
+
+@router.message(F.text, F.func(_waiting_pv_search))
+async def pv_search_amount_catch(message: Message, bot: Bot):
+    from bot.pv_search import handle_pv_search_text
+    await handle_pv_search_text(message, bot)
+
+
+# دکمه‌های منو/فلو کاربر — وسط بازی پیوی مسدود (قبل از handlerهای مربوطه)
+_PV_LOCK_CB_PREFIXES = (
+    "h:", "pv:help", "pv:finance", "pv:group_settings",
+    "pf:", "ch:", "gs:", "inc_flow:", "incme:", "pvs:",
+)
+_PV_LOCK_CB_EXACT_WD = frozenset({"wd:card", "wd:name", "wd:full", "wd:cancel", "wd:amount"})
+
+
+def _is_pv_locked_callback(data: str) -> bool:
+    d = data or ""
+    if d in _PV_LOCK_CB_EXACT_WD:
+        return True
+    return any(d == p or d.startswith(p) for p in _PV_LOCK_CB_PREFIXES)
+
+
+def _cb_locked_by_pv_game(call: CallbackQuery) -> bool:
+    if not call.from_user or not _is_pv_locked_callback(call.data or ""):
+        return False
+    try:
+        from bot.pv_dice import is_in_active_pv_game
+        return is_in_active_pv_game(call.from_user.id)
+    except Exception:
+        return False
+
+
+@router.callback_query(F.func(_cb_locked_by_pv_game))
+async def cb_pv_game_lock_nav(call: CallbackQuery, bot: Bot):
+    try:
+        from bot.pv_dice import get_active_pv_game, _remind_in_game, ensure_sweeper
+        await ensure_sweeper(bot)
+        game = get_active_pv_game(call.from_user.id)
+        if game:
+            await call.answer("وسط بازی پیوی هستید.", show_alert=True)
+            await _remind_in_game(bot, call.from_user.id, game)
+            return
+    except Exception:
+        pass
+    await call.answer()
+
+
 @router.callback_query(F.data.startswith("wd:"))
 async def cb_withdrawal_flow(call: CallbackQuery, bot: Bot):
     data = call.data or ""
     if data in ("wd:card", "wd:name", "wd:full", "wd:cancel", "wd:amount"):
+        from bot.pv_throttle import allow_action, allow_reply, action_bucket
+        uid = call.from_user.id
+        if not allow_action(uid, action_bucket(data)) or not allow_reply(uid):
+            await call.answer()
+            return
         from bot.withdrawal_flow import handle_callback
         if await handle_callback(call, bot):
             return
-    if data.startswith("wd:approve:") or data.startswith("wd:reject:") or data.startswith("wd:receipt:") or data.startswith("wd:message:") or data.startswith("wd:refresh:"):
+    if data.startswith("wd:approve:") or data.startswith("wd:reject:") or data.startswith("wd:receipt:") or data.startswith("wd:message:") or data.startswith("wd:refresh:") or data.startswith("wd:cards:"):
         await _handle_withdrawal_admin_action(call, bot)
         return
     await call.answer()
@@ -496,27 +689,21 @@ async def cb_pv_dice(call: CallbackQuery, bot: Bot):
     await handle_callback(call, bot)
 
 
-def _waiting_pv_dice_game(message: Message) -> bool:
-    """هر متنی وقتی کاربر وسط مسابقه پیوی است — تا از منو خارج نشود."""
-    if not message.from_user or not message.text:
-        return False
-    from bot.pv_dice import user_busy, GAMES
-    busy = user_busy(message.from_user.id)
-    if not busy or busy[0] != "game":
-        return False
-    game = GAMES.get(busy[1])
-    return bool(game and game.get("status") not in ("finished", "cancelled"))
-
-
-@router.message(F.text, F.func(_waiting_pv_dice_game))
-async def pv_dice_game_text(message: Message, bot: Bot):
-    from bot.pv_dice import handle_pv_game_text, ensure_sweeper
+@router.callback_query(F.data.startswith("pvc:"))
+async def cb_admin_pv_chat(call: CallbackQuery, bot: Bot):
+    from bot.pv_dice import handle_callback, ensure_sweeper
     await ensure_sweeper(bot)
-    await handle_pv_game_text(message, bot)
+    await handle_callback(call, bot)
 
 
 @router.callback_query(F.data.startswith("inc_flow:"))
 async def cb_increase_request_flow(call: CallbackQuery, bot: Bot):
+    from bot.pv_throttle import allow_action, allow_reply, action_bucket
+    uid = call.from_user.id
+    data = call.data or ""
+    if not allow_action(uid, action_bucket(data)) or not allow_reply(uid):
+        await call.answer()
+        return
     from bot.hidden_increase import handle_increase_request_callback
     await handle_increase_request_callback(call, bot)
 
@@ -526,6 +713,12 @@ async def cb_member_increase_offer(call: CallbackQuery, bot: Bot):
     """دکمه افزایش پس از بازی پیوی — درخواست عضو برای ادمین."""
     from bot.pv_dice import resolve_member_offer
     from bot.hidden_increase import start_increase_request_flow
+    from bot.pv_throttle import allow_action, allow_reply
+
+    uid = call.from_user.id
+    if not allow_action(uid, "incme") or not allow_reply(uid):
+        await call.answer()
+        return
 
     tok = (call.data or "").split(":", 1)[-1]
     data = resolve_member_offer(tok)
@@ -608,13 +801,17 @@ async def _handle_withdrawal_admin_action(call: CallbackQuery, bot: Bot):
     from asgiref.sync import sync_to_async
     from django.utils import timezone
     from account.models import WithdrawalRequest
-    from bot.finance import decrease_wallet
+    from bot.finance import approve_withdrawal_debit
+    # decrease_wallet import removed — debit is atomic inside approve_withdrawal_debit
     from bot.wallet_helpers import notify_other_admins
     from bot.withdrawal_flow import (
         set_receipt_wait,
         set_admin_message_wait,
         format_withdrawal_admin_text,
         withdrawal_admin_keyboard,
+        get_card_warning_for_request,
+        get_user_card_history,
+        format_user_cards_history,
     )
 
     action, request_id = call.data.split(":")[1], int(call.data.rsplit(":", 1)[-1])
@@ -633,6 +830,19 @@ async def _handle_withdrawal_admin_action(call: CallbackQuery, bot: Bot):
     if not allowed:
         return await call.answer("فقط مالک و ادمین‌های ربات دسترسی دارند.", show_alert=True)
 
+    if action == "cards":
+        try:
+            u = await bot.get_chat(req.telegram_user_id)
+            user_name = (u.full_name or u.first_name or "").strip() or str(req.telegram_user_id)
+        except Exception:
+            user_name = str(req.telegram_user_id)
+        cards = await get_user_card_history(req.telegram_chat_id, req.telegram_user_id)
+        await call.answer()
+        return await call.message.answer(
+            format_user_cards_history(cards, user_name=user_name, html=True),
+            parse_mode="HTML",
+        )
+
     if action == "refresh":
         try:
             u = await bot.get_chat(req.telegram_user_id)
@@ -644,6 +854,9 @@ async def _handle_withdrawal_admin_action(call: CallbackQuery, bot: Bot):
             _t, bal, _p = await get_playable_balance(req.telegram_chat_id, req.telegram_user_id)
         except Exception:
             bal = None
+        card_warning = await get_card_warning_for_request(
+            req.telegram_chat_id, req.telegram_user_id, req.card_number, req.card_name,
+        )
         msg = format_withdrawal_admin_text(
             user_name=user_name,
             amount=int(req.amount),
@@ -653,6 +866,7 @@ async def _handle_withdrawal_admin_action(call: CallbackQuery, bot: Bot):
             refreshed=True,
             balance=bal,
             settle_kind=getattr(req, "settle_kind", None) or None,
+            card_warning=card_warning,
         )
         kb = withdrawal_admin_keyboard(req.id, status=req.status)
         from bot.withdrawal_flow import remember_wd_delivery, broadcast_wd_admin_update
@@ -701,6 +915,9 @@ async def _handle_withdrawal_admin_action(call: CallbackQuery, bot: Bot):
             _t, bal, _p = await get_playable_balance(req.telegram_chat_id, req.telegram_user_id)
         except Exception:
             bal = None
+        card_warning = await get_card_warning_for_request(
+            req.telegram_chat_id, req.telegram_user_id, req.card_number, req.card_name,
+        )
         msg = format_withdrawal_admin_text(
             user_name=user_name,
             amount=int(req.amount),
@@ -710,6 +927,7 @@ async def _handle_withdrawal_admin_action(call: CallbackQuery, bot: Bot):
             refreshed=True,
             balance=bal,
             settle_kind=getattr(req, "settle_kind", None) or None,
+            card_warning=card_warning,
         )
         kb = withdrawal_admin_keyboard(req.id, status="cancelled")
         from bot.withdrawal_flow import remember_wd_delivery, broadcast_wd_admin_update
@@ -720,37 +938,26 @@ async def _handle_withdrawal_admin_action(call: CallbackQuery, bot: Bot):
 
     receipt_file_id = (getattr(req, "receipt_file_id", "") or "").strip()
 
-    @sync_to_async
-    def _mark_done():
-        from django.db import transaction
-        with transaction.atomic():
-            row = WithdrawalRequest.objects.select_for_update().filter(
-                id=request_id, status="pending",
-            ).first()
-            if not row:
-                return None
-            row.status = "done"
-            row.approved_by = call.from_user.id
-            row.approved_at = timezone.now()
-            row.completed_at = timezone.now()
-            row.save(update_fields=["status", "approved_by", "approved_at", "completed_at"])
-            return row
-
-    req = await _mark_done()
-    if not req:
+    from bot.finance import approve_withdrawal_debit
+    req, err, live_bal = await approve_withdrawal_debit(
+        request_id,
+        call.from_user.id,
+        receipt_file_id=receipt_file_id or None,
+    )
+    if err == "missing" or not req:
         return await call.answer("این درخواست قبلاً پردازش شده است.", show_alert=True)
+    if err == "insufficient":
+        await call.answer("موجودی کافی نیست", show_alert=True)
+        await call.message.answer(
+            "⚠️ موجودی فعلی کاربر کمتر از مبلغ درخواست است.\n"
+            f"💰 موجودی: {int(live_bal):,} واحد\n"
+            f"💸 مبلغ درخواست: {int(req.amount):,} واحد\n\n"
+            "ابتدا درخواست را لغو کنید یا موجودی را افزایش دهید.",
+        )
+        return True
 
     receipt_file_id = (getattr(req, "receipt_file_id", "") or "").strip()
 
-    await decrease_wallet(
-        req.telegram_chat_id,
-        req.telegram_user_id,
-        req.amount,
-        admin_id=call.from_user.id,
-        description="تأیید درخواست تسویه کاربر",
-        receipt_file_id=receipt_file_id or None,
-        receipt_note="withdrawal_receipt" if receipt_file_id else None,
-    )
     await call.answer("تسویه انجام شد.")
     try:
         u = await bot.get_chat(req.telegram_user_id)
@@ -762,6 +969,9 @@ async def _handle_withdrawal_admin_action(call: CallbackQuery, bot: Bot):
         _t, bal, _p = await get_playable_balance(req.telegram_chat_id, req.telegram_user_id)
     except Exception:
         bal = None
+    card_warning = await get_card_warning_for_request(
+        req.telegram_chat_id, req.telegram_user_id, req.card_number, req.card_name,
+    )
     fresh = format_withdrawal_admin_text(
         user_name=user_name,
         amount=int(req.amount),
@@ -771,6 +981,7 @@ async def _handle_withdrawal_admin_action(call: CallbackQuery, bot: Bot):
         refreshed=True,
         balance=bal,
         settle_kind=getattr(req, "settle_kind", None) or None,
+        card_warning=card_warning,
     )
     kb_done = withdrawal_admin_keyboard(req.id, status="done")
     from bot.withdrawal_flow import remember_wd_delivery, broadcast_wd_admin_update
@@ -1157,6 +1368,17 @@ async def pv_challenge_input(message: Message, bot: Bot):
     await handle_challenge_text(message, bot)
 
 
+def _waiting_share_percent(message: Message) -> bool:
+    from bot.admin_accounting import is_waiting_share_percent
+    return bool(message.from_user and is_waiting_share_percent(message.from_user.id))
+
+
+@router.message(F.text, F.func(_waiting_share_percent))
+async def pv_share_percent_catch(message: Message, bot: Bot):
+    from bot.admin_accounting import handle_share_custom_text
+    await handle_share_custom_text(message, bot)
+
+
 @router.message(F.text, F.func(_waiting_increase_amount))
 async def pv_increase_amount_catch(message: Message, bot: Bot):
     """مبلغ افزایش موجودی مخفی در پیوی."""
@@ -1168,6 +1390,15 @@ async def pv_increase_amount_catch(message: Message, bot: Bot):
 async def msg_start_alias(message: Message, bot: Bot):
     from bot.finance import save_telegram_user
     await save_telegram_user(message.from_user.id, message.chat.id)
+    try:
+        from bot.pv_dice import get_active_pv_game, _remind_in_game, ensure_sweeper
+        await ensure_sweeper(bot)
+        game = get_active_pv_game(message.from_user.id)
+        if game:
+            await _remind_in_game(bot, message.from_user.id, game)
+            return
+    except Exception:
+        pass
     if is_forced_join_active() and not is_creator(message.from_user.id):
         if not await is_user_channel_member(bot, message.from_user.id):
             return await message.answer(
@@ -1405,6 +1636,78 @@ async def pv_group_id_finance(message: Message, bot: Bot):
     await handle_group_id_message(message, bot)
 
 
+@router.message(F.text.in_(["جستجو", "جستجوی حریف", "جستجو حریف"]))
+async def pv_search_start(message: Message, bot: Bot):
+    from bot.pv_search import start_pv_search
+    await start_pv_search(bot, message.from_user.id, message=message)
+
+
+def _pv_search_cancel_text(message: Message) -> bool:
+    """لغو جستجو — حتی وقتی سشن حافظه رفته و فقط قفل یتیم مانده."""
+    from bot.pv_search import _cancel_words, is_waiting_pv_search
+    from bot.pv_dice import user_busy
+
+    if not message.from_user or not _cancel_words(message.text or ""):
+        return False
+    uid = message.from_user.id
+    # سشن فعال را همان هندلر فلو جستجو جمع می‌کند
+    if is_waiting_pv_search(uid):
+        return False
+    busy = user_busy(uid)
+    return bool(busy and busy[0] == "search")
+
+
+@router.message(F.text, F.func(_pv_search_cancel_text))
+async def pv_search_force_cancel(message: Message, bot: Bot):
+    from bot.pv_search import try_cancel_pv_search_command
+    await try_cancel_pv_search_command(bot, message.from_user.id, message=message)
+
+
+_LEAGUE_PV_CMDS = (
+    "لیگ من", "لیگمن",
+    "لیگ", "لیگ برترها", "جدول لیگ", "برترین لیگ",
+    "رتبه بندی", "رتبه‌بندی", "رتبه بندی لیگ", "رتبه‌بندی لیگ",
+    "لیگ رتبه", "لیگ رتبه‌بندی",
+    "لیگ راهنما", "راهنما لیگ",
+)
+
+
+@router.message(
+    F.text.in_(_LEAGUE_PV_CMDS)
+    | F.text.regexp(r"^(?:لیگ|رتبه[\u200c ]?بندی(?:\s+لیگ)?|لیگ\s+رتبه(?:[\u200c ]?بندی)?|لیگ\s+برترها|جدول\s+لیگ|برترین\s+لیگ)\s+\d+$")
+)
+async def pv_league_cmds(message: Message, bot: Bot):
+    from bot.league import handle_league_pv_command
+    await handle_league_pv_command(bot, message.from_user.id, message.text or "", message=message)
+
+
+@router.callback_query(F.data.startswith("lg:") | F.data.startswith("lgb:"))
+async def cb_league_pv(call: CallbackQuery, bot: Bot):
+    from bot.league import handle_league_pv_callback
+    await handle_league_pv_callback(call, bot)
+
+
+@router.message(F.text.regexp(r"^(?:کاربر|شناسه\s*کاربر|مدیریت\s*کاربر)\s+\d{5,}$"))
+async def pv_user_admin_cmd(message: Message, bot: Bot):
+    from bot.user_admin import parse_user_admin_command, start_user_admin
+    tid = parse_user_admin_command(message.text or "")
+    if not tid:
+        return
+    await start_user_admin(bot, message.from_user.id, tid, message=message)
+
+
+@router.callback_query(F.data.startswith("ua:"))
+async def cb_user_admin(call: CallbackQuery, bot: Bot):
+    from bot.user_admin import handle_user_admin_callback
+    await handle_user_admin_callback(call, bot)
+
+
+@router.callback_query(F.data.startswith("pvs:"))
+async def cb_pv_search(call: CallbackQuery, bot: Bot):
+    from bot.pv_search import handle_pv_search_callback
+    await handle_pv_search_callback(call, bot)
+
+
 @router.message(F.text.in_([
     "افزایش", "افزایش موجودی", "درخواست افزایش", "درخواست افزایش موجودی",
     "تسویه", "تسویه حساب", "درخواست تسویه", "درخواست تسویه حساب",
@@ -1412,6 +1715,11 @@ async def pv_group_id_finance(message: Message, bot: Bot):
 async def pv_member_increase_settle(message: Message, bot: Bot):
     """در پیوی: انتخاب گپ سپس ادامه درخواست افزایش/تسویه."""
     from bot.pv_finance_panel import try_handle_member_request_text
+    from bot.pv_throttle import allow_action, allow_reply
+
+    uid = message.from_user.id
+    if not allow_action(uid, "finance_text") or not allow_reply(uid):
+        return
     await try_handle_member_request_text(bot, message.from_user.id, message.text or "")
 
 
@@ -1742,6 +2050,92 @@ async def cb_creator_panel(call: CallbackQuery, bot: Bot):
 
     action = call.data[3:]
 
+    async def _send_report(text: str, markup=None):
+        markup = markup or _admin_back_kb()
+        text = _clip_tg(text)
+        try:
+            await call.message.edit_text(
+                text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True,
+            )
+        except Exception:
+            await call.message.answer(
+                text, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True,
+            )
+
+    if action == "open":
+        _CREATOR_STATE.pop(call.from_user.id, None)
+        name = call.from_user.first_name or "سازنده"
+        await _send_report(_creator_panel_text(name), _creator_panel_kb())
+        return await call.answer()
+
+    if action == "dash":
+        from bot.creator_admin import build_dashboard
+        await _send_report(await build_dashboard())
+        return await call.answer()
+
+    if action.startswith("cheat:"):
+        from bot.creator_admin import build_cheat_report
+        days = 30 if action.endswith(":30") else 7
+        await _send_report(await build_cheat_report(days), _admin_back_kb(cheat=True))
+        return await call.answer()
+
+    if action == "progress":
+        from bot.creator_admin import build_progress_report
+        await _send_report(await build_progress_report())
+        return await call.answer()
+
+    if action == "live":
+        from bot.creator_admin import build_live_games
+        await _send_report(build_live_games())
+        return await call.answer()
+
+    if action.startswith("groups:"):
+        from bot.creator_admin import build_groups_page
+        try:
+            page = int(action.split(":")[1])
+        except (IndexError, ValueError):
+            page = 0
+        text, page = await build_groups_page(page)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                Btn(text="◀️", callback_data=f"cr:groups:{max(0, page - 1)}"),
+                Btn(text="▶️", callback_data=f"cr:groups:{page + 1}"),
+            ],
+            [Btn(text="🔙 پنل ادمین", callback_data="cr:open")],
+        ])
+        await _send_report(text, kb)
+        return await call.answer()
+
+    if action == "rich":
+        from bot.creator_admin import build_rich_list
+        await _send_report(await build_rich_list())
+        return await call.answer()
+
+    if action == "wd":
+        from bot.creator_admin import build_open_finance
+        await _send_report(await build_open_finance())
+        return await call.answer()
+
+    if action == "watch":
+        _CREATOR_STATE[call.from_user.id] = "await_watch_uid"
+        await call.message.answer(
+            "🔎 شناسه عددی کاربر را بفرستید.\n"
+            "نمونه: <code>8810788620</code>\n"
+            "یا در گروه: <code>کاربر 8810788620</code>",
+            parse_mode="HTML",
+        )
+        return await call.answer("منتظر آیدی…")
+
+    if action == "mod":
+        from bot.creator_admin import build_moderation_report
+        await _send_report(await build_moderation_report())
+        return await call.answer()
+
+    if action == "act":
+        from bot.creator_admin import build_activity_report
+        await _send_report(await build_activity_report())
+        return await call.answer()
+
     if action == "fj:status":
         await call.message.answer(creator_status_text(), parse_mode="HTML")
         return await call.answer("📊 وضعیت ارسال شد")
@@ -1870,6 +2264,9 @@ async def cb_creator_panel(call: CallbackQuery, bot: Bot):
             "• <code>وضعیت لینکدونی</code>\n\n"
             "💬 پشتیبانی:\n"
             "• <code>تنظیم پشتیبانی https://t.me/Spayers</code>\n\n"
+            "🕵️ گزارش چیت: میانگین تاس و درصد ۶ نسبت به شانس عادلانه.\n"
+            "📈 پیشرفت اعضا / 🔎 بررسی کاربر با آیدی عددی.\n"
+            "ورود: <code>/admin</code> یا دکمه پایین صفحه بعد از /start.\n\n"
             "🎨 ایموجی پرمیوم و 🎲 تم تاس از دکمه‌های پنل.\n\n"
             "💾 بکاپ:\n"
             "• خودکار هر ۳ ساعت به پیوی شما\n"
