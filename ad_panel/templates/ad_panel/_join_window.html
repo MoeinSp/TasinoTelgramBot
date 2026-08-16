@@ -1,0 +1,7 @@
+<label>بازه جوین اجباری
+  <select name="join_window">
+    {% for val, label in join_window_choices %}
+    <option value="{{ val }}" {% if val == join_window_default %}selected{% endif %}>{{ label }}</option>
+    {% endfor %}
+  </select>
+</label>
