@@ -13,7 +13,8 @@ django.setup()
 from django.db import connection
 try:
     connection.ensure_connection()
-except Exception:
+except Exception as e:
+    print(f"db not ready: {e}", flush=True)
     sys.exit(1)
 sys.exit(0)
 PY
@@ -44,8 +45,6 @@ run_migrate() {
 }
 
 run_prepare() {
-  # در پروداکشن makemigrations اجباری نکن — اگر مدل عوض شده و مایگریشن ساخته نشده،
-  # فقط هشدار بده؛ شکست واقعی از migrate/collectstatic/check باشد.
   if [ "${RUN_MAKEMIGRATIONS:-0}" = "1" ]; then
     echo "==> makemigrations"
     python manage.py makemigrations --no-input
@@ -60,6 +59,8 @@ run_prepare() {
 }
 
 if [ "${1:-}" = "prepare-only" ]; then
+  echo "==> prepare-only start"
+  echo "==> DATABASE_URL host hint: $(echo "${DATABASE_URL:-}" | sed -E 's#://[^@]*@#://***@#')"
   wait_for_db
   run_prepare
   echo "==> prepare-only done"

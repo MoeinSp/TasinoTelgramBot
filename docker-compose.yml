@@ -90,6 +90,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     entrypoint: ["sh", "/entrypoint.sh", "prepare-only"]
     restart: "no"
 
