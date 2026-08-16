@@ -2,6 +2,21 @@
 
 from django.db import migrations
 
+from account import migration_utils as idem
+
+
+def forwards(apps, schema_editor):
+    idem.rename_index_if_needed(
+        schema_editor,
+        "account_lea_telegra_wager_idx",
+        "account_lea_telegra_40418d_idx",
+    )
+    idem.rename_index_if_needed(
+        schema_editor,
+        "account_lea_tg_season_idx",
+        "account_lea_telegra_2bebb7_idx",
+    )
+
 
 class Migration(migrations.Migration):
 
@@ -10,14 +25,21 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RenameIndex(
-            model_name="leaguestanding",
-            new_name="account_lea_telegra_40418d_idx",
-            old_name="account_lea_telegra_wager_idx",
-        ),
-        migrations.RenameIndex(
-            model_name="leaguestanding",
-            new_name="account_lea_telegra_2bebb7_idx",
-            old_name="account_lea_tg_season_idx",
+        migrations.SeparateDatabaseAndState(
+            database_operations=[
+                migrations.RunPython(forwards, migrations.RunPython.noop),
+            ],
+            state_operations=[
+                migrations.RenameIndex(
+                    model_name="leaguestanding",
+                    new_name="account_lea_telegra_40418d_idx",
+                    old_name="account_lea_telegra_wager_idx",
+                ),
+                migrations.RenameIndex(
+                    model_name="leaguestanding",
+                    new_name="account_lea_telegra_2bebb7_idx",
+                    old_name="account_lea_tg_season_idx",
+                ),
+            ],
         ),
     ]
