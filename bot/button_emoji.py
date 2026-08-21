@@ -89,6 +89,9 @@ PREFERRED: dict[str, str] = {
     "panel_owner": "👑",
     "panel_finance": "💰",
     "panel_challenges": "🏆",
+    # این دو در ست‌های مالک ایموجیِ اختصاصی ندارند → جایگزینِ ورزشیِ موجود
+    "game_basketball": "🏅",
+    "game_bowling": "🥇",
 }
 
 
