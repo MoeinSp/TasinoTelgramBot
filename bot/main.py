@@ -51,6 +51,15 @@ async def _build_bot_dp():
     setup_routers(dp)
     await load_all_caches()
 
+    # ارتقای خودکارِ ایموجیِ خروجی به پرمیوم (متن HTML + دکمه‌های اینلاین)
+    from bot.premium_middleware import PremiumEmojiMiddleware
+    from bot.premium_text import load_emoji_map
+    bot.session.middleware(PremiumEmojiMiddleware())
+    try:
+        await load_emoji_map(bot)
+    except Exception:
+        logger.exception("load premium emoji map failed (متن‌ها بدون ارتقا ادامه می‌دهند)")
+
     try:
         me = await bot.get_me()
     except TelegramNotFound as exc:
