@@ -114,6 +114,12 @@ def _load_from_db():
         "active_from": fj.active_from,
         "active_until": fj.active_until,
     })
+    from bot.button_emoji import apply_button_emoji_cache
+    from bot_setting.models import ButtonEmojiOverride
+    apply_button_emoji_cache(list(
+        ButtonEmojiOverride.objects.values("key", "custom_emoji_id", "placeholder")
+    ))
+
     sc = BotSiteConfig.get_singleton()
     apply_site_config_cache({
         "bot_enabled": bool(getattr(sc, "bot_enabled", True)),

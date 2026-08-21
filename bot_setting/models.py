@@ -195,6 +195,43 @@ class BotSiteConfig(models.Model):
         return obj
 
 
+class ButtonEmojiOverride(models.Model):
+    """
+    آیکون ایموجی پرمیوم (custom emoji) برای یک دکمه شیشه‌ای.
+
+    نبودِ ردیف برای یک key = «فقط فالبک یونیکد».
+    وجودِ ردیف = «آیکون پرمیوم روی دکمه ست شده».
+    key ها در bot/button_emoji.py::BUTTON_EMOJI_DEFS تعریف می‌شوند.
+    """
+    key = models.CharField(
+        max_length=64,
+        unique=True,
+        verbose_name="کلید دکمه",
+        help_text="کلید ثبت‌شده در BUTTON_EMOJI_DEFS (مثل btn_start).",
+    )
+    custom_emoji_id = models.CharField(
+        max_length=64,
+        verbose_name="شناسه ایموجی پرمیوم",
+        help_text="custom_emoji_id گرفته‌شده از پیام ایموجی پرمیوم مالک.",
+    )
+    placeholder = models.CharField(
+        max_length=16,
+        blank=True,
+        default="",
+        verbose_name="ایموجی نمایشی",
+        help_text="ایموجی پایه (fallback) که زیر ایموجی پرمیوم قرار می‌گیرد.",
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "ایموجی دکمه"
+        verbose_name_plural = "ایموجی دکمه‌ها"
+        ordering = ["key"]
+
+    def __str__(self):
+        return f"{self.key} → {self.custom_emoji_id}"
+
+
 class DatabaseBackupTool(BotSiteConfig):
     """پروکسی منوی ادمین — بکاپ/بازیابی (جدول جدا ندارد)."""
 

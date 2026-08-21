@@ -8,7 +8,7 @@ from django.utils.html import format_html
 from unfold.admin import ModelAdmin
 from unfold.decorators import display
 
-from .models import JoinMessage, ForcedJoinConfig, BotSiteConfig
+from .models import JoinMessage, ForcedJoinConfig, BotSiteConfig, ButtonEmojiOverride
 
 # ثبت پنل بکاپ/بازیابی
 from . import admin_backup  # noqa: F401, E402
@@ -62,6 +62,24 @@ class BotSiteConfigAdmin(SingletonAdmin):
             messages.success(request, "کش ربات هم به‌روز شد.")
         except Exception:
             messages.warning(request, "ذخیره شد؛ برای اعمال در ربات کش را ریلود کنید.")
+
+
+@admin.register(ButtonEmojiOverride)
+class ButtonEmojiOverrideAdmin(ModelAdmin):
+    list_display = ("key", "placeholder", "custom_emoji_id", "updated_at")
+    search_fields = ("key", "custom_emoji_id")
+    readonly_fields = ("updated_at",)
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        messages.info(
+            request,
+            "ذخیره شد. برای اعمال در بات در حال اجرا، پراسس بات را ری‌استارت کنید.",
+        )
+
+    def delete_model(self, request, obj):
+        super().delete_model(request, obj)
+        messages.info(request, "حذف شد. برای اعمال، بات را ری‌استارت کنید.")
 
 
 @admin.register(ForcedJoinConfig)

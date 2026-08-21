@@ -1,6 +1,7 @@
 from aiogram import Dispatcher
 
 from bot.handlers.private import router as private_router
+from bot.handlers.button_emoji_panel import router as button_emoji_router
 from bot.handlers.panel import router as panel_router
 from bot.handlers.vip import router as vip_router
 from bot.handlers.games import router as games_router
@@ -30,6 +31,7 @@ def setup_routers(dp: Dispatcher):
     dp.callback_query.outer_middleware(join_mw)
     dp.message.outer_middleware(GroupRequiredJoinMiddleware())
 
+    dp.include_router(button_emoji_router)  # پنل ایموجی دکمه‌ها (پیوی مالک) — قبل از private
     dp.include_router(private_router)
     dp.include_router(panel_router)   # callback پنل — گروه و پیوی
     dp.include_router(group_lifecycle_router)  # افزودن به گروه / ارتقا به ادمین

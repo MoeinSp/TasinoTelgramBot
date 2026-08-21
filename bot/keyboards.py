@@ -1,15 +1,17 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+from bot.button_emoji import btn
+
 
 def home_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🎮 بازی‌ها", callback_data="menu:games"),
-            InlineKeyboardButton(text="📚 راهنما", callback_data="menu:help"),
+            btn("بازی‌ها", "btn_games", callback_data="menu:games"),
+            btn("راهنما", "btn_help", callback_data="menu:help"),
         ],
         [
-            InlineKeyboardButton(text="📣 کانال‌ها", url="https://t.me/TasinoBot"),
-            InlineKeyboardButton(text="💬 پشتیبانی", callback_data="menu:support"),
+            btn("کانال‌ها", "btn_channels", url="https://t.me/TasinoBot"),
+            btn("پشتیبانی", "btn_support", callback_data="menu:support"),
         ],
     ])
 
@@ -17,39 +19,39 @@ def home_keyboard() -> InlineKeyboardMarkup:
 def games_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🎲 تاس", callback_data="game:dice"),
-            InlineKeyboardButton(text="🎯 دارت", callback_data="game:dart"),
-            InlineKeyboardButton(text="🏀 بسکتبال", callback_data="game:basketball"),
+            btn("تاس", "game_dice", callback_data="game:dice"),
+            btn("دارت", "game_dart", callback_data="game:dart"),
+            btn("بسکتبال", "game_basketball", callback_data="game:basketball"),
         ],
         [
-            InlineKeyboardButton(text="⚽ پنالتی", callback_data="game:penalty"),
-            InlineKeyboardButton(text="🎳 بولینگ", callback_data="game:bowling"),
-            InlineKeyboardButton(text="🎰 اسلات", callback_data="game:slots"),
+            btn("پنالتی", "game_penalty", callback_data="game:penalty"),
+            btn("بولینگ", "game_bowling", callback_data="game:bowling"),
+            btn("اسلات", "game_slots", callback_data="game:slots"),
         ],
         [
-            InlineKeyboardButton(text="🪙 سکه", callback_data="game:coin"),
-            InlineKeyboardButton(text="✂️ سنگ کاغذ قیچی", callback_data="game:rps"),
-            InlineKeyboardButton(text="🍀 شانس", callback_data="game:luck"),
+            btn("سکه", "game_coin", callback_data="game:coin"),
+            btn("سنگ کاغذ قیچی", "game_rps", callback_data="game:rps"),
+            btn("شانس", "game_luck", callback_data="game:luck"),
         ],
-        [InlineKeyboardButton(text="🔙 بازگشت", callback_data="menu:home")],
+        [btn("بازگشت", "btn_back", callback_data="menu:home")],
     ])
 
 
 def help_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🔒 قفل‌ها", callback_data="help:locks"),
-            InlineKeyboardButton(text="👥 اعضا", callback_data="help:members"),
+            btn("قفل‌ها", "help_locks", callback_data="help:locks"),
+            btn("اعضا", "help_members", callback_data="help:members"),
         ],
         [
-            InlineKeyboardButton(text="⚠️ اخطارها", callback_data="help:warnings"),
-            InlineKeyboardButton(text="🔇 سکوت", callback_data="help:mute"),
+            btn("اخطارها", "help_warnings", callback_data="help:warnings"),
+            btn("سکوت", "help_mute", callback_data="help:mute"),
         ],
         [
-            InlineKeyboardButton(text="🎮 بازی‌ها", callback_data="help:games"),
-            InlineKeyboardButton(text="🔤 فیلتر کلمه", callback_data="help:filter"),
+            btn("بازی‌ها", "help_games", callback_data="help:games"),
+            btn("فیلتر کلمه", "help_filter", callback_data="help:filter"),
         ],
-        [InlineKeyboardButton(text="🔙 بازگشت", callback_data="menu:home")],
+        [btn("بازگشت", "btn_back", callback_data="menu:home")],
     ])
 
 
