@@ -19,7 +19,7 @@ import os
 import requests
 from django.core.management.base import BaseCommand
 
-from bot.button_emoji import BUTTON_EMOJI_DEFS, PREFERRED
+from bot.button_emoji import BUTTON_EMOJI_DEFS, PREFERRED, OWNER_EMOJI_SETS
 
 VS16 = "️"  # variation selector
 
@@ -35,6 +35,11 @@ class Command(BaseCommand):
         parser.add_argument(
             "--force", action="store_true",
             help="دکمه‌هایی که قبلاً پرمیوم دارند را هم بازنویسی کن.",
+        )
+        parser.add_argument(
+            "--sets", default="",
+            help="نام ست‌های custom-emoji (با کاما) برای کشف. خالی = از overrideهای موجود، "
+                 "وگرنه از OWNER_EMOJI_SETS پیش‌فرض.",
         )
 
     # ─── Bot API ───────────────────────────────────────────────────────────
@@ -57,24 +62,26 @@ class Command(BaseCommand):
 
         force = bool(opts.get("force"))
         overrides = {o.key: o for o in ButtonEmojiOverride.objects.all()}
-        if not overrides:
-            self.stderr.write(
-                "هیچ override‌ای وجود ندارد. اول حداقل یک دکمه را از پنل «ایموجی دکمه‌ها» "
-                "دستی تنظیم کن تا ست‌های پرمیومِ مالک کشف شوند."
-            )
-            return
 
-        ids = [o.custom_emoji_id for o in overrides.values()]
-
-        # کشف ست‌ها از روی idهای موجود
+        # ─── کشف ست‌ها ───────────────────────────────────────────────────────
+        # اولویت: --sets صریح > ست‌های overrideهای موجود > OWNER_EMOJI_SETS پیش‌فرض
         set_names: set[str] = set()
-        stickers = self._api("getCustomEmojiStickers", custom_emoji_ids=ids)
-        for s in stickers:
-            name = s.get("set_name")
-            if name:
-                set_names.add(name)
+        explicit = [s.strip() for s in (opts.get("sets") or "").split(",") if s.strip()]
+        if explicit:
+            set_names = set(explicit)
+        elif overrides:
+            ids = [o.custom_emoji_id for o in overrides.values()]
+            for s in self._api("getCustomEmojiStickers", custom_emoji_ids=ids):
+                if s.get("set_name"):
+                    set_names.add(s["set_name"])
+
         if not set_names:
-            self.stderr.write("هیچ ست پرمیومی از روی overrideها کشف نشد.")
+            set_names = set(OWNER_EMOJI_SETS)
+            self.stdout.write("کشف از overrideها ممکن نشد → استفاده از OWNER_EMOJI_SETS پیش‌فرض.")
+        if not set_names:
+            self.stderr.write(
+                "هیچ ستی برای کشف نبود. با --sets نام ست‌ها را بده یا اول یک دکمه را دستی تنظیم کن."
+            )
             return
         self.stdout.write(f"ست‌های کشف‌شده ({len(set_names)}): {', '.join(sorted(set_names))}")
 

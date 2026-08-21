@@ -69,6 +69,18 @@ BUTTON_EMOJI_DEFS: dict[str, tuple[str, str, str]] = {
     "panel_owner":     ("مالک", "👑", "panel"),
 }
 
+# ست‌های custom-emoji پرمیومِ مالک — منبعِ پیش‌فرضِ کشف برای assign خودکار.
+# بات لازم نیست مالکِ این ست‌ها باشد؛ getStickerSet با نام، برای هر بات کار می‌کند.
+OWNER_EMOJI_SETS: list[str] = [
+    "MeowieQ",
+    "NewsEmoji",
+    "DecorationEmojiPack",
+    "pk_2128353_by_EmojiRuBot",
+    "mamali01_by_TgEmojis_bot",
+    "yandex_adv",
+    "pack_90fb6_by_TgEmojis_bot",
+]
+
 # ─── مپ اختیاری key → ایموجیِ بهترِ خودکارسازی ──────────────────────────────
 # اگر فالبکِ رجیستری بهترین انتخاب برای auto-assign نباشد، این‌جا override کن.
 # نبود key در این مپ = از فالبکِ BUTTON_EMOJI_DEFS استفاده می‌شود.
