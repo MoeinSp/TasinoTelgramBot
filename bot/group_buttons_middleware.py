@@ -40,6 +40,9 @@ class GroupContextButtonsMiddleware(BaseRequestMiddleware):
         text = getattr(method, "text", None)
         if not isinstance(text, str) or not text:
             return
+        # فقط ارسالِ پیامِ جدید (SendMessage). متدهای ادیت/... message_id دارند → رد.
+        if getattr(method, "message_id", None) is not None:
+            return
         if getattr(method, "reply_markup", None) is not None:
             return  # هرگز کیبوردِ موجود را دست نزن
         if not _is_group(getattr(method, "chat_id", None)):
