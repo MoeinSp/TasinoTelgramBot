@@ -4,6 +4,7 @@ from bot.handlers.private import router as private_router
 from bot.handlers.button_emoji_panel import router as button_emoji_router
 from bot.group_menu import router as group_menu_router
 from bot.group_inline import router as group_inline_router
+from bot.slash_commands import router as slash_commands_router
 from bot.handlers.panel import router as panel_router
 from bot.handlers.vip import router as vip_router
 from bot.handlers.games import router as games_router
@@ -39,6 +40,7 @@ def setup_routers(dp: Dispatcher):
     dp.include_router(group_lifecycle_router)  # افزودن به گروه / ارتقا به ادمین
     dp.include_router(group_menu_router)  # منوی کاربریِ گروه (Reply + inline) — قبل از فیلتر/بازی
     dp.include_router(group_inline_router)  # callbackهای دکمه‌های زمینه‌ای (gi:*) — موجودی/بازی
+    dp.include_router(slash_commands_router)  # اسلش‌کامندهای BotFather → هندلرهای موجود
     # فیلترها باید قبل از بقیه اجرا بشن؛ پیام سالم با skip() به هندلرهای بعدی می‌رسه
     dp.include_router(filter_router)
     dp.include_router(vip_router)
