@@ -44,6 +44,17 @@ def _rebuild_patterns() -> None:
     _LEADING_PATTERN = re.compile(r"^\s*(" + alt + r")\s*")
 
 
+# هم‌ارزهای هم‌شکل: گلیف‌هایی که در ست‌های مالک نیستند ولی معادلِ بصریِ نزدیک دارند.
+# فقط جایگزین‌های واضح (فلش/دایره/بازخوانی) — تزئین‌های ظریف دست‌نخورده می‌مانند.
+ALIASES: dict[str, str] = {
+    "→": "➡️",
+    "←": "⬅️",
+    "↻": "🔄",
+    "⟳": "🔄",
+    "⬤": "⚫",
+}
+
+
 def apply_emoji_map(mapping: dict[str, str]) -> None:
     _EMOJI_MAP.clear()
     for emoji, eid in (mapping or {}).items():
@@ -52,6 +63,11 @@ def apply_emoji_map(mapping: dict[str, str]) -> None:
             stripped = emoji.replace(VS16, "")
             if stripped and stripped != emoji:
                 _EMOJI_MAP.setdefault(stripped, str(eid))
+    # هم‌ارزها روی نقشه‌ی ساخته‌شده می‌نشینند
+    for src, tgt in ALIASES.items():
+        eid = _EMOJI_MAP.get(tgt) or _EMOJI_MAP.get(tgt.replace(VS16, ""))
+        if eid and src not in _EMOJI_MAP:
+            _EMOJI_MAP[src] = eid
     _rebuild_patterns()
 
 
