@@ -51,6 +51,11 @@ async def _build_bot_dp():
     setup_routers(dp)
     await load_all_caches()
 
+    # دکمه‌های اینلاینِ زمینه‌ای برای گروه (موجودی/موجودی ناکافی/نتیجه‌ی بازی).
+    # قبل از Premium ثبت می‌شود (بیرونی‌تر) تا ایموجیِ دکمه‌های جدید هم پرمیوم شود.
+    from bot.group_buttons_middleware import GroupContextButtonsMiddleware
+    bot.session.middleware(GroupContextButtonsMiddleware())
+
     # ارتقای خودکارِ ایموجیِ خروجی به پرمیوم (متن HTML + دکمه‌های اینلاین)
     from bot.premium_middleware import PremiumEmojiMiddleware
     from bot.premium_text import load_emoji_map
