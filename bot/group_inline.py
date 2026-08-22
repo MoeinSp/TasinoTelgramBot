@@ -89,55 +89,77 @@ def detect_keyboard(text: str) -> InlineKeyboardMarkup | None:
     return None
 
 
-# ─── ادیتِ در جا ─────────────────────────────────────────────────────────────
-async def _edit(cq: CallbackQuery, text: str) -> None:
-    """همان پیام را ادیت می‌کند (پیامِ جدید نمی‌فرستد). خطاها بی‌صدا رد می‌شوند."""
+# ─── نتیجه‌ی بازی محفوظ می‌ماند؛ بقیه در جا ادیت می‌شوند ──────────────────────
+# اگر پیامِ لمس‌شده «نتیجه‌ی بازی» باشد، ادیتش نمی‌کنیم (پیامِ جدید می‌دهیم) تا نتیجه
+# در گپ بماند. کارتِ موجودی/آمار/... در جا ادیت می‌شوند تا گپ شلوغ نشود.
+_RESULT_MARKERS = ("نتایج نهایی", "مسابقه تاس")
+
+
+def _is_result_message(cq: CallbackQuery) -> bool:
+    t = (cq.message.text or cq.message.caption or "") if cq.message else ""
+    return any(m in t for m in _RESULT_MARKERS)
+
+
+async def _deliver(cq: CallbackQuery, text: str, *, preserve: bool) -> None:
+    """preserve=True → پیامِ جدید (نتیجه محفوظ)؛ False → ادیتِ در جا. خطاها بی‌صدا."""
     try:
-        await cq.message.edit_text(text, reply_markup=panel_kb(), parse_mode="HTML")
+        if preserve:
+            await cq.message.answer(text, reply_markup=panel_kb(), parse_mode="HTML")
+        else:
+            await cq.message.edit_text(text, reply_markup=panel_kb(), parse_mode="HTML")
     except Exception as exc:
-        # «message is not modified» یا حذف‌شدن پیام → فقط toast
-        logger.debug("gi edit skipped: %s", exc)
+        logger.debug("gi deliver skipped (preserve=%s): %s", preserve, exc)
 
 
 class _EditRedirectBot:
     """
-    پوششِ سبک روی bot: اولین send_message را به edit_message_text روی «همان پیام»
-    تبدیل می‌کند تا هندلرهای موجود (که با safe_send→bot.send_message می‌فرستند)
-    بدونِ تغییر، خروجی‌شان را «در جا» ادیت کنند. بقیه‌ی متدها pass-through هستند.
+    پوششِ سبک روی bot تا خروجیِ هندلرهای موجود (که با safe_send→bot.send_message
+    می‌فرستند) را کنترل کنیم: اولین send_message را یا «در جا ادیت» می‌کند
+    (preserve=False) یا به یک پیامِ جدیدِ ریپلای‌شده با panel_kb تبدیل می‌کند
+    (preserve=True؛ برای پیام‌های نتیجه که نباید محو شوند). بقیه pass-through.
     """
-    def __init__(self, real_bot, chat_id: int, message_id: int):
+    def __init__(self, real_bot, chat_id: int, message_id: int, preserve: bool):
         self._bot = real_bot
         self._chat_id = chat_id
         self._mid = message_id
-        self._edited = False
+        self._preserve = preserve
+        self._used = False
 
     def __getattr__(self, name):
         return getattr(self._bot, name)
 
     async def send_message(self, chat_id, text, **kwargs):
-        if not self._edited:
-            self._edited = True
+        if not self._used:
+            self._used = True
+            pm = kwargs.get("parse_mode", "HTML")
             try:
+                if self._preserve:
+                    return await self._bot.send_message(
+                        self._chat_id, text,
+                        reply_to_message_id=self._mid,
+                        parse_mode=pm, reply_markup=panel_kb(),
+                    )
                 return await self._bot.edit_message_text(
                     text=text, chat_id=self._chat_id, message_id=self._mid,
-                    reply_markup=panel_kb(),
-                    parse_mode=kwargs.get("parse_mode", "HTML"),
+                    reply_markup=panel_kb(), parse_mode=pm,
                 )
             except Exception as exc:
-                logger.debug("redirect edit failed, sending instead: %s", exc)
+                logger.debug("redirect deliver failed, sending plain: %s", exc)
         # fallback / ارسال‌های بعدی: عادی بفرست
         return await self._bot.send_message(chat_id, text, **kwargs)
 
 
-async def _edit_via_handler(cq: CallbackQuery, bot: Bot, module: str, fn_name: str, wants_bot: bool) -> None:
+async def _run_via_handler(cq: CallbackQuery, bot: Bot, module: str, fn_name: str, wants_bot: bool) -> None:
     """
-    هندلرِ موجود را با هویتِ لمس‌کننده اجرا می‌کند، اما خروجی‌اش را «در جا» ادیت
-    می‌کند (به‌جای پیامِ جدید): message.bot را با _EditRedirectBot جایگزین می‌کنیم.
+    هندلرِ موجود را با هویتِ لمس‌کننده اجرا می‌کند و خروجی‌اش را — بسته به اینکه
+    پیامِ فعلی «نتیجه» است یا نه — در جا ادیت یا به‌صورتِ پیامِ جدید تحویل می‌دهد.
     آرگومانِ bot (برای get_chat_member و ...) همان botِ واقعی می‌ماند.
     """
     fn = getattr(importlib.import_module(module), fn_name)
     proxy = cq.message.model_copy(update={"from_user": cq.from_user})
-    wrapped = _EditRedirectBot(bot, cq.message.chat.id, cq.message.message_id)
+    wrapped = _EditRedirectBot(
+        bot, cq.message.chat.id, cq.message.message_id, preserve=_is_result_message(cq),
+    )
     proxy.as_(wrapped)
     if wants_bot:
         await fn(proxy, bot)
@@ -160,7 +182,7 @@ async def cb_balance(cq: CallbackQuery):
             time_str=time_str, viewer_name=_html.escape(name),
             viewing_other=False, html=True,
         )
-        await _edit(cq, text)
+        await _deliver(cq, text, preserve=_is_result_message(cq))
         await cq.answer()
     except Exception:
         logger.exception("gi:bal failed")
@@ -189,7 +211,7 @@ async def cb_again(cq: CallbackQuery):
 @router.callback_query(F.data == "gi:stats")
 async def cb_stats(cq: CallbackQuery, bot: Bot):
     try:
-        await _edit_via_handler(cq, bot, "bot.handlers.main_group", "cmd_stats", True)
+        await _run_via_handler(cq, bot, "bot.handlers.main_group", "cmd_stats", True)
         await cq.answer()
     except Exception:
         logger.exception("gi:stats failed")
@@ -199,7 +221,7 @@ async def cb_stats(cq: CallbackQuery, bot: Bot):
 @router.callback_query(F.data == "gi:league")
 async def cb_league(cq: CallbackQuery, bot: Bot):
     try:
-        await _edit_via_handler(cq, bot, "bot.handlers.main_group", "cmd_league_me", True)
+        await _run_via_handler(cq, bot, "bot.handlers.main_group", "cmd_league_me", True)
         await cq.answer()
     except Exception:
         logger.exception("gi:league failed")
@@ -209,7 +231,7 @@ async def cb_league(cq: CallbackQuery, bot: Bot):
 @router.callback_query(F.data == "gi:top")
 async def cb_top(cq: CallbackQuery, bot: Bot):
     try:
-        await _edit_via_handler(cq, bot, "bot.handlers.main_group", "cmd_top_users", True)
+        await _run_via_handler(cq, bot, "bot.handlers.main_group", "cmd_top_users", True)
         await cq.answer()
     except Exception:
         logger.exception("gi:top failed")
@@ -219,7 +241,7 @@ async def cb_top(cq: CallbackQuery, bot: Bot):
 @router.callback_query(F.data == "gi:games")
 async def cb_games(cq: CallbackQuery, bot: Bot):
     try:
-        await _edit_via_handler(cq, bot, "bot.handlers.main_group", "cmd_games_list", False)
+        await _run_via_handler(cq, bot, "bot.handlers.main_group", "cmd_games_list", False)
         await cq.answer()
     except Exception:
         logger.exception("gi:games failed")
