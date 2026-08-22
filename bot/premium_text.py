@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import html
 import logging
 import re
 
@@ -104,6 +105,25 @@ def upgrade_html_text(text: str | None) -> str | None:
         return f'<tg-emoji emoji-id="{eid}">{emoji}</tg-emoji>'
 
     return _PATTERN.sub(_sub, text)
+
+
+def has_mapped_emoji(text: str | None) -> bool:
+    """آیا متن حداقل یک ایموجیِ موجود در نقشه دارد؟"""
+    if not text or _PATTERN is None:
+        return False
+    return _PATTERN.search(text) is not None
+
+
+def upgrade_plain_text(text: str | None) -> str | None:
+    """
+    متنِ ساده (parse_mode=None) را به HTML امن تبدیل می‌کند: کلِ متن escape می‌شود
+    (پس < & > همان‌طور literal می‌مانند) و ایموجی‌ها به tg-emoji تبدیل می‌شوند.
+    اگر ایموجیِ قابل‌ارتقا نباشد None برمی‌گرداند (یعنی دست نزن).
+    """
+    if not has_mapped_emoji(text):
+        return None
+    escaped = html.escape(text, quote=False)
+    return upgrade_html_text(escaped)
 
 
 # ─── ارتقای دکمه‌ها ────────────────────────────────────────────────────────

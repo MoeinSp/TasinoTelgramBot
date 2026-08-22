@@ -22,6 +22,22 @@ logger = logging.getLogger(__name__)
 
 
 class PremiumEmojiMiddleware(BaseRequestMiddleware):
+    @staticmethod
+    def _resolve_mode(bot, method) -> str:
+        """parse_mode مؤثر: 'HTML' | 'MARKDOWN'/'MARKDOWNV2' | '' (ساده)."""
+        raw = getattr(method, "parse_mode", None)
+        # aiogram وقتی parse_mode ست نشده یک sentinel از نوع Default می‌گذارد؛
+        # مقدارِ واقعی از bot.default می‌آید (این بات پیش‌فرض None دارد → ساده).
+        try:
+            from aiogram.client.default import Default
+            if isinstance(raw, Default):
+                raw = getattr(getattr(bot, "default", None), "parse_mode", None)
+        except Exception:
+            pass
+        if isinstance(raw, str):
+            return raw.upper()
+        return ""
+
     async def __call__(self, make_request, bot, method):
         if pt.map_size() == 0:
             return await make_request(bot, method)
@@ -29,11 +45,10 @@ class PremiumEmojiMiddleware(BaseRequestMiddleware):
         original: dict[str, object] = {}
         changed_markup = False
         try:
-            parse_mode = getattr(method, "parse_mode", None)
-            is_html = str(parse_mode or "").upper() == "HTML"
+            mode = self._resolve_mode(bot, method)  # "HTML" | "MARKDOWN…" | "" (plain)
 
-            # متن
-            if is_html:
+            # متن/کپشن
+            if mode == "HTML":
                 for field in ("text", "caption"):
                     val = getattr(method, field, None)
                     if isinstance(val, str) and val:
@@ -41,6 +56,20 @@ class PremiumEmojiMiddleware(BaseRequestMiddleware):
                         if new != val:
                             original[field] = val
                             setattr(method, field, new)
+            elif mode == "":  # متنِ ساده → escape + HTML + ارتقا
+                upgraded_any = False
+                for field in ("text", "caption"):
+                    val = getattr(method, field, None)
+                    if isinstance(val, str) and val:
+                        new = pt.upgrade_plain_text(val)
+                        if new is not None and new != val:
+                            original[field] = val
+                            setattr(method, field, new)
+                            upgraded_any = True
+                if upgraded_any and hasattr(method, "parse_mode"):
+                    original["parse_mode"] = getattr(method, "parse_mode", None)
+                    method.parse_mode = "HTML"
+            # MARKDOWN* → متن دست‌نخورده (فقط دکمه‌ها ارتقا می‌یابند)
 
             # دکمه‌های اینلاین
             markup = getattr(method, "reply_markup", None)
